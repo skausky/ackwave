@@ -91,6 +91,24 @@ def test_frames_yield_to_acks():
     check(det.max_scores(t) == (5.0, 5.0), 'no ACKs: frames decide')
 
 
+def test_analyzer_takes_new_lines():
+    """analyze.py reads a live stream with every line type the board prints."""
+    import itertools
+    import subprocess
+    import sys
+    from fake_csi import generate
+    lines = [ln for ln, *_ in itertools.islice(generate(), 3000)]
+    lines[100:100] = ["GATE,0,-60,97,500,ok", "GATE,8,-70,0,50,silent", f"POKING,8,{TV}",
+                      f"UNPOKED,{TV}", "UNPOKED,all", f"REFUSED,{PLUG},full",
+                      "REFUSED,bad-command", "BUTTON,recalibrate,pc",
+                      "STATS,1000,10,0,9,1,0,0,55", "STATS,2000,10,0,9,1,0,0"]
+    here = os.path.dirname(os.path.abspath(__file__))
+    r = subprocess.run([sys.executable, os.path.join(here, 'analyze.py'), '-'],
+                       input='\n'.join(lines) + '\n', capture_output=True, text=True)
+    check(r.returncode == 0, f'analyze.py crashed: {r.stderr[-300:]}')
+    check('silent' in r.stdout and '55 poke replies' in r.stdout, 'new lines shown')
+
+
 def test_oui():
     with tempfile.TemporaryDirectory() as tmp:
         js = os.path.join(tmp, 'master_oui.json')
@@ -225,6 +243,7 @@ def main():
     test_parse()
     test_verdict_ignores_device_links()
     test_frames_yield_to_acks()
+    test_analyzer_takes_new_lines()
     test_oui()
     test_auto_picks_stationary()
     test_drop_silent_and_reboot_resync()

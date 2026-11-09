@@ -347,13 +347,16 @@ def main():
             det.on_channel(d['ts'])
         elif kind == 'stats':
             print(f"--- board: {d['poke']} pokes, {d['ack']} ACKs, {d['ap']} AP frames, "
-                  f"{d['tx_err']} tx errors, {d['qfull']} queue drops")
+                  f"{d['tx_err']} tx errors, {d['qfull']} queue drops, "
+                  f"{d['reply']} poke replies")
+        elif kind == 'gate':
+            print(f"--- link {d['idx']}: {d['state']}, {d['yield_pct']}% of pokes answered")
         elif kind == 'calib':
             print(f"--- board quiet level {d['floor']:.4f} ({d['phase']}, {d['why']})")
         elif kind == 'state':
             print(f"*** board says {'MOTION' if d['motion'] else 'still'} "
                   f"(score {d['score']:.3f})")
-        else:
+        elif kind == 'csi':
             score = det.on_csi(d)
             change = det.evaluate(d['ts'])
             if det.take_cal_event():
