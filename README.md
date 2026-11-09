@@ -97,10 +97,11 @@ All protocol and decision logic lives in [`main/csi_core.h`](main/csi_core.h), w
 
 | Suite | What it covers |
 |---|---|
-| `test/test_core.c` | 175 checks: beacon/IE parsing (truncated, reordered, hidden SSID), CSA validation, Null-frame builder, made-up poke address, ACK classifier (dmac match, foreign frames, window, one-ACK-per-poke, 32-bit wrap), wrap-safe timeouts, poke round-robin and gating (RSSI hysteresis, yield windows, trial pokes, strongest fallback), detector (band-pass scores, top-K, hysteresis of both windows, long-window cap, quiet-level percentile, tracking limits and clamps, recalibration delay, RSSI-step detection), serial format, plus a 200,000-frame fuzzer, all under AddressSanitizer + UBSan |
+| `test/test_core.c` | 249 checks: beacon/IE parsing (truncated, reordered, hidden SSID), CSA validation, Null-frame builder, made-up poke address, ACK classifier (dmac match, foreign frames, window, one-ACK-per-poke, 32-bit wrap), wrap-safe timeouts, poke round-robin and gating (RSSI hysteresis, yield windows, trial pokes, strongest fallback), device slots, device list from data frames, PC commands, detector (band-pass scores, top-K, hysteresis of both windows, long-window cap, quiet-level percentile, tracking limits and clamps, recalibration delay, RSSI-step detection), serial format, plus a 200,000-frame fuzzer (beacon and data-frame parsers), all under AddressSanitizer + UBSan |
 | `tools/test_pipeline.py` | End to end on synthetic multipath CSI (beacons at 10 Hz + ACKs at 40 Hz, plus malformed lines) in five scenarios: calibration → motion → channel hop → motion; **motion during calibration**; **board moved** (RSSI step → one recalibration); **board moved somewhere noisier** without an RSSI change (must not get stuck in motion, and the quiet level must converge to the new spot's); and **two real captures** from an ESP32-S3 (`test/data`: a still room, which must give no motion, and a person moving). Checks detection within 1 s, release within 10 s, no false motion, and **C vs Python agreement** on every run |
 | `tools/test_probe_report.py` | The bring-up report on a synthetic probe log |
 | `tools/test_gui.py` | GUI state tracking, reboot handling and rendering (headless) |
+| `tools/test_devices.py` | device lines, OUI lookup (all three database formats), stationary check, poke modes, dropping silent devices, re-sync after a board reboot, device links kept out of the verdict |
 | `tools/test_record.py` | The session recorder's event log and summary, with a fake clock |
 
 ```bash
@@ -140,6 +141,14 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    python tools/gui.py /dev/ttyUSB0        # or COM5 on Windows
    ```
 4. After boot, keep the room still for about 15 s while it shows `CALIBRATING`. It's fine if someone moves now and then; it settles within a minute or two either way. Press **BOOT** to recalibrate at any time, for example after rearranging the room. If you get false alarms, raise `MD_ON_SHORT`/`MD_ON_LONG`; to catch smaller movements, lower them. The GUI shows the scores as multiples of the quiet level, so you can see the margins directly.
+
+### Devices on your network (experimental)
+
+The GUI opens a second window listing the devices the board hears talking to your network (only your `MY_SSID`), with their maker from the [`oui`](https://github.com/Ringmast4r/OUI-Master-Database) tool's database if installed (`~/.oui-database/`), else the system IEEE list (`ieee-data` / `arp-scan`). Each device is judged after 3 minutes of watching: a **stationary** one has a real (not private) MAC, actually transmits, is stronger than -80 dBm and keeps a steady signal.
+
+Poke modes: **Auto** (default) pokes up to 4 stationary devices as extra sensing links, **All active** pokes the 4 busiest ones (phones included), **Manual** pokes exactly what you tick, **Off** pokes only the router. A poked device that stops answering is dropped for 30 minutes. Picks are sent to the board over USB while it runs (no reflash), the board refuses any MAC it hasn't seen on your network, and the GUI re-sends them after a board reboot. Your mode and picks are kept in `sessions/devices.json`.
+
+Only the router link decides motion / still; device links are plotted dotted for comparison. Realistic expectations: the ESP32-S3 is **2.4 GHz only**, so devices on 5 GHz never appear, and devices asleep in power save mode don't answer pokes. On a mesh router that steers most clients to 5 GHz, expect few usable devices.
 
 **Placement matters more than any setting.** The board is most sensitive along the line between it and the router, and close to either device. Place it so the area you want to watch lies between the two.
 
@@ -183,10 +192,21 @@ CALIB,<ts_us>,<wait|collect|fast|track>,<boot|button|rssi|channel>,<quiet×1e6>,
                                                  on every calibration change and every 5 s
 STATS,<ts_us>,<pokes>,<tx_err>,<ack_csi>,<ap_csi>,<dropped>,<queue_full>   every 5 s
                                                  (ME, LEARNED and GATE are repeated just before it)
-GATE,<idx>,<beacon_rssi>,<yield_pct|-1>,<pokes>,<ok|weak|silent>   per AP, every 5 s (POKE_HZ > 0)
+GATE,<idx>,<beacon_rssi>,<yield_pct|-1>,<pokes>,<ok|weak|silent>   per poked AP / device, every 5 s
+POKING,<idx>,<mac>                               devices being poked (nodes 8..11), every 5 s
+DEV,<mac>,<rssi>,<frames_sent>,<frames_received>,<ms_since_heard>   devices on our network, every 5 s
+UNPOKED,<mac|all>   REFUSED,<mac>,<not-seen-on-network|is-an-ap|full>   REFUSED,bad-command
 BUZZER,<off|gpioN|error,...>
-BUTTON,<gpioN|error,gpioN|recalibrate>
+BUTTON,<gpioN|error,gpioN|recalibrate|recalibrate,pc>
 PROBE,...                                        only with CSI_PROBE=1
+```
+
+Commands to the board (one per line on the USB port; the GUI sends them):
+
+```
+POKE,<mac>      poke a device heard on our network (up to 4)
+UNPOKE,<mac>    stop;  UNPOKE,all  stops all
+CAL             recalibrate, like the BOOT button
 ```
 
 ## Project layout
@@ -200,7 +220,8 @@ PROBE,...                                        only with CSI_PROBE=1
 │   ├── score_lines.c       runs the C detector on a log (C/Python cross-check)
 │   └── data/               real captures (still room, person moving) used by the tests
 ├── tools/
-│   ├── gui.py              live GUI
+│   ├── gui.py              live GUI (+ device list window)
+│   ├── devices.py          device names (OUI), stationary check, which to poke
 │   ├── analyze.py          text analyzer + Python detector
 │   ├── record.py           session recorder: readable motion log + summary
 │   ├── probe_report.py     hardware bring-up report
@@ -211,7 +232,7 @@ PROBE,...                                        only with CSI_PROBE=1
 
 ## Limitations
 
-- Detects motion *presence* only, with no localisation or activity classification.
+- Detects motion *presence* only, with no localisation or activity classification. Device links (experimental) are the first step toward telling "near the board" from "near the router".
 - The quiet level is measured automatically, but the threshold multipliers come from one room and position. If you get false alarms or miss movement, adjust `MD_ON_SHORT`/`MD_ON_LONG`.
 - Right after a (re)calibration during constant movement, sensitivity is reduced for up to about 30 s. Moved somewhere noisier without a change in signal strength, the board may report motion for up to about 1.5 minutes while the quiet level catches up (BOOT skips that).
 - Anything that moves continuously for minutes without pauses (a fan, curtains) slowly becomes part of the background. You are still detected on top of it.

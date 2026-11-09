@@ -9,6 +9,7 @@ CALIB lines come from the same detector the board runs.
     python fake_csi.py --realtime   # paced like the real board (for gui.py)
 """
 import argparse
+import math
 import sys
 import time
 
@@ -91,6 +92,28 @@ def timeline(scenario):
     return out, t
 
 
+def _mac(*b):
+    return ':'.join(f"{x:02x}" for x in b)
+
+
+# (MAC, signal dBm, frames/s, signal wobble dB): a smart plug and a TV that
+# sit still, a phone with a private MAC, and a console that sleeps
+DEMO_DEVICES = [(_mac(0x50, 0x02, 0x91, 0x10, 0x20, 0x30), -62, 2.0, 0.5),
+                (_mac(0x3c, 0x22, 0xfb, 0x40, 0x50, 0x60), -55, 6.0, 1.0),
+                (_mac(0xda, 0xa1, 0x19, 0x70, 0x80, 0x90), -48, 9.0, 6.0),
+                (_mac(0xa4, 0xc1, 0xe8, 0xa0, 0xb0, 0xc0), 0, 0.0, 0.0)]
+
+
+def fake_devices(t):
+    """DEV lines as the board prints them every 5 s (no randomness, so the
+    demo and the tests stay reproducible)."""
+    out = []
+    for i, (m, rssi, rate, wob) in enumerate(DEMO_DEVICES):
+        r = rssi + (round(wob * math.sin(t * 0.7 + i)) if rssi else 0)
+        out.append(f"DEV,{m},{r},{int(rate * t)},{int(t / 3)},{0 if rate else 4000}")
+    return out
+
+
 def generate(seed=0, scenario=DEFAULT):
     """Yields (line, kind, label, t). kind: junk|learned|channel|csi|stats|state|calib|other.
     label is 'still'/'motion' for CSI lines."""
@@ -135,6 +158,8 @@ def generate(seed=0, scenario=DEFAULT):
             yield "ME,24:0a:c4:11:22:33", 'other', None, t
             yield "LEARNED,0,aa:bb:cc:dd:ee:f0", 'learned', None, t
             yield "LEARNED,1,aa:bb:cc:dd:ee:f1", 'learned', None, t
+            for line in fake_devices(t):         # devices on the network (demo)
+                yield line, 'dev', None, t
             yield (f"STATS,{int(next_stats * 1e6)},{pokes},0,{acks},{aps},3,0",
                    'stats', None, t)
             next_stats += 5.0

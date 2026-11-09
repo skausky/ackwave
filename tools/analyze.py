@@ -14,6 +14,7 @@ import numpy as np
 # Must match lltf_amplitudes() in main/csi_core.h.
 VALID = np.r_[1:27, 38:64]
 KIND_NAMES = {0: 'ap', 1: 'ack'}
+MAX_APS = 8          # nodes 0..7 are APs, 8.. are devices we poke (csi_core.h)
 
 # Defaults shared with the firmware: md_cfg_default() in main/csi_core.h.
 # Keep them in sync (test_pipeline.py checks C and Python agree).
@@ -42,7 +43,8 @@ WHYS = ('boot', 'button', 'rssi', 'channel')
 
 
 def parse_line(line):
-    """Returns (kind, dict) for CSI/CHANNEL/LEARNED/STATE/STATS lines, else None."""
+    """Returns (kind, dict) for the board's lines (CSI, CHANNEL, LEARNED, STATE,
+    STATS, CALIB, GATE, DEV, POKING, UNPOKED, REFUSED), else None."""
     line = line.strip()
     try:
         if line.startswith('CSI,'):
@@ -66,6 +68,27 @@ def parse_line(line):
         if line.startswith('LEARNED,'):
             p = line.split(',')
             return 'learned', dict(idx=int(p[1]), mac=p[2])
+        if line.startswith('GATE,'):                     # per-link poke health
+            p = line.split(',')
+            if len(p) != 6 or p[5] not in ('ok', 'weak', 'silent'):
+                return None
+            return 'gate', dict(idx=int(p[1]), rssi=int(p[2]), yield_pct=int(p[3]),
+                                sent=int(p[4]), state=p[5])
+        if line.startswith('DEV,'):                      # a device heard on our network
+            p = line.split(',')
+            if len(p) != 6 or len(p[1]) != 17:
+                return None
+            return 'dev', dict(mac=p[1].lower(), rssi=int(p[2]), tx=int(p[3]),
+                               rx=int(p[4]), age_ms=int(p[5]))
+        if line.startswith('POKING,'):
+            p = line.split(',')
+            return 'poking', dict(idx=int(p[1]), mac=p[2].lower())
+        if line.startswith('UNPOKED,'):
+            return 'unpoked', dict(mac=line.split(',')[1].lower())
+        if line.startswith('REFUSED,'):
+            p = line.split(',')
+            return 'refused', dict(mac=p[1].lower() if len(p) > 2 else '',
+                                   why=p[-1])
         if line.startswith('STATS,'):                    # firmware counters
             p = line.split(',')
             if len(p) != 8:
@@ -203,8 +226,9 @@ class MotionDetector:
     def max_scores(self, now_us):
         """(short, long): highest scores among live streams, None if none."""
         stale = self.c['stale_s'] * 1e6
-        live = [s for s in self.streams.values()
-                if s.score_s is not None and now_us - s.t_last <= stale]
+        live = [s for (src, _k), s in self.streams.items()      # APs decide, as on
+                if src < MAX_APS and s.score_s is not None       # the board
+                and now_us - s.t_last <= stale]
         if not live:
             return None, None
         return max(s.score_s for s in live), max(s.score_l for s in live)
@@ -278,12 +302,19 @@ class MotionDetector:
                 f"{int((on_s or 0) * 1e6)},{int((on_l or 0) * 1e6)}")
 
 
-def open_source(src, baud):
+def open_port(src, baud):
+    """(lines, send): an iterator of text lines, and send(text) to write a
+    command to the board (None for stdin / a file)."""
     if src == '-':
-        return sys.stdin
+        return sys.stdin, None
     import serial                            # pip install pyserial
     port = serial.Serial(src, baud, timeout=1)
-    return (b.decode('utf-8', 'ignore') for b in iter(port.readline, None))
+    lines = (b.decode('utf-8', 'ignore') for b in iter(port.readline, None))
+    return lines, lambda text: port.write(text.encode('ascii') + b'\n')
+
+
+def open_source(src, baud):
+    return open_port(src, baud)[0]
 
 
 def main():

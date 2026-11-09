@@ -9,8 +9,15 @@ With a board it also logs in the background, exactly like record.py (events
 and raw data in sessions/, summary when the window closes); --no-log turns
 that off. Buttons: 30 s / 2 min / 10 min of detail, and Pause (freezes the
 view so the toolbar can zoom and pan; logging continues). Keys: space = pause,
-1/2/3 = window. The session timeline at the bottom covers everything since the
-GUI started, on a clock.
+1/2/3 = window, c = recalibrate (with a board). The session timeline at the
+bottom covers everything since the GUI started, on a clock.
+
+A second window lists the devices the board hears on your network, with
+their maker (from the `oui` tool's database, or the system IEEE list),
+signal, and whether they look stationary. In Auto mode the board pokes up to
+4 stationary ones as extra links; tick a device to choose yourself (Manual).
+Only the router link decides motion / still; device links are plotted thin
+and dotted. Your mode and picks are remembered in sessions/devices.json.
 
 Shows: short-window motion score per stream (node x beacon/ACK) and the
 long-window score, both as multiples of the room's quiet level, with the two
@@ -30,7 +37,8 @@ from collections import defaultdict, deque
 
 import numpy as np
 
-from analyze import KIND_NAMES, VALID, MotionDetector, open_source, parse_line
+from analyze import MAX_APS, VALID, MotionDetector, open_port, open_source, parse_line
+from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 
 BG, PANEL, FG, DIM = '#101418', '#171c22', '#e6e9ed', '#7d8794'
 MOTION_C, STILL_C, LONG_C, CAL_C = '#ff5a4f', '#3ecf8e', '#f2f4f7', '#7d8794'
@@ -43,9 +51,11 @@ COLORS = ['#4ea8ff', '#ffb547', '#b48cff', '#5fd4d0', '#ff7eb6', '#c3e88d', '#f7
 class State:
     """Everything the plots need; fed one parsed event at a time."""
 
-    def __init__(self, window_s, waterfall_s=10.0, clock=time.time):
+    def __init__(self, window_s, waterfall_s=10.0, clock=time.time, devices=None):
         self.window_s, self.waterfall_s = window_s, waterfall_s   # window_s: detail kept
         self.clock = clock
+        self.devices = devices or Devices(clock=clock)   # survives board reboots
+        self.outbox = []                                 # commands for the board
         # Whole-session history on the wall clock (survives board reboots):
         # one bin per second with the highest short / long score
         self.hist_t, self.hist_s, self.hist_l = [], [], []
@@ -87,6 +97,10 @@ class State:
         if kind == 'learned':
             self.nodes[d['idx']] = d['mac']
             return
+        if kind in ('dev', 'gate', 'poking', 'unpoked', 'refused', 'stats'):
+            self.outbox += self.devices.feed(kind, d)
+            if kind != 'stats':
+                return
         if 'ts' in d:
             if self.last_ts is not None and d['ts'] < self.last_ts - 1_000_000:
                 nodes, me = self.nodes, self.me      # board rebooted / demo looped
@@ -195,12 +209,18 @@ class State:
         self.motion_spans = [s for s in self.motion_spans if s[1] is None or s[1] >= t0]
         self.cal_spans = [s for s in self.cal_spans if s[1] is None or s[1] >= t0]
 
+    def label(self, key):
+        """'router ACK', 'Espressif ACK', ... for a (node, kind) stream."""
+        return f"{self.devices.link_label(key[0])} {'ACK' if key[1] else 'frames'}"
+
     def rate(self, key):
         dq = self.arrivals[key]
         return len(dq) / 2.0
 
     def busiest(self):
         live = [k for k, dq in self.wf.items() if dq]
+        aps = [k for k in live if k[0] < MAX_APS]       # prefer the links that decide
+        live = aps or live
         return max(live, key=lambda k: len(self.wf[k])) if live else None
 
 
@@ -216,8 +236,9 @@ def thin(t, v, n=2000):
 
 
 class View:
-    def __init__(self, state, plt, log_name=None, window=WINDOWS[0]):
+    def __init__(self, state, plt, log_name=None, window=WINDOWS[0], send=None):
         self.s, self.plt = state, plt
+        self.send = send                         # send(cmd) to the board, or None
         self.view_s = window
         self.paused = False
         self.log_name = log_name
@@ -266,6 +287,12 @@ class View:
         self.btn_pause = Button(ax, 'Pause', color=PANEL, hovercolor='#2a313a')
         self.btn_pause.label.set_color(FG)
         self.btn_pause.on_clicked(lambda _e: self.toggle_pause())
+        self.btn_cal = None
+        if self.send:
+            ax = self.fig.add_axes([0.70 - 0.095, 0.935, 0.088, 0.035])
+            self.btn_cal = Button(ax, 'Recalibrate', color=PANEL, hovercolor='#2a313a')
+            self.btn_cal.label.set_color(FG)
+            self.btn_cal.on_clicked(lambda _e: self.recalibrate())
         self._mark_buttons()
 
     def _mark_buttons(self):
@@ -290,9 +317,16 @@ class View:
         else:
             self.fig.canvas.draw_idle()
 
+    def recalibrate(self):
+        """Same as the board's button: re-measure the quiet level in 5 s."""
+        if self.send:
+            self.send('CAL')
+
     def _key(self, e):
         if e.key == ' ':
             self.toggle_pause()
+        elif e.key == 'c':
+            self.recalibrate()
         elif e.key in ('1', '2', '3'):
             self.set_window(WINDOWS[int(e.key) - 1])
 
@@ -313,20 +347,25 @@ class View:
         src = 'board' if det.external else 'PC'
         quiet = (f"quiet level {det.floor:.4f} ({det.phase}, {det.why}, from {src})"
                  if det.floor > 0 else f"measuring quiet level ({det.phase}, {det.why}) - keep still")
-        rows = [f"{ch:18s} nodes {len(s.nodes)}   board says: {board}", quiet]
+        dv = s.devices
+        rows = [f"{ch:18s} board says: {board}", quiet]
         streams = sorted(set(s.arrivals) | set(s.scores))
+        live = [k for k in streams if s.rate(k) > 0]
         rows.append('   '.join(
-            f"n{src}/{KIND_NAMES[k]} {s.rate((src, k)):5.1f}/s {s.rssi.get((src, k), 0):4d}dBm"
-            for src, k in streams[:4]) or 'waiting for CSI...')
+            f"{s.label(k)} {s.rate(k):3.0f}/s {s.rssi.get(k, 0):4d}dBm"
+            for k in live[:4]) or 'waiting for CSI...')
         if s.stats:
             st = s.stats
             ratio = st['ack'] / st['poke'] if st['poke'] else 0
             rows.append(f"pokes {st['poke']}  ACK CSI {st['ack']} ({ratio:.0%})  "
-                        f"tx err {st['tx_err']}  queue drops {st['qfull']}")
+                        f"tx err {st['tx_err']}  queue drops {st['qfull']}   APs {len(s.nodes)}  "
+                        f"devices heard {len(dv.devs)}, poking {len(dv.poking)}/{MAX_DEVS} "
+                        f"({dv.mode})")
         self.info.set_text('\n'.join(rows))
 
         if self.paused:
-            self.info.set_text('\n'.join(rows) + '   [PAUSED: zoom/pan with the toolbar, logging continues]')
+            rows[0] += '   [PAUSED: zoom/pan freely, logging continues]'
+            self.info.set_text('\n'.join(rows))
             return
         ax.cla()
         ax.set_facecolor(PANEL)
@@ -353,9 +392,11 @@ class View:
             ymax = max(ymax, v.max() * 1.15)
             gaps = np.where(np.diff(t) > max(0.5, win / 600))[0] + 1   # break over gaps
             t, v = np.insert(t, gaps, np.nan), np.insert(v, gaps, np.nan)
-            ax.plot(t, v, color=COLORS[(key[0] * 2 + key[1]) % len(COLORS)], lw=1.1,
-                    ls='-' if key[1] else '--', alpha=0.85,
-                    label=f"short: node {key[0]} {'ACK' if key[1] else 'beacon/AP'}")
+            is_ap = key[0] < MAX_APS
+            ax.plot(t, v, color=COLORS[(key[0] * 2 + key[1]) % len(COLORS)],
+                    lw=1.1 if is_ap else 0.8, ls=('-' if key[1] else '--') if is_ap else ':',
+                    alpha=0.85 if is_ap else 0.7,
+                    label=f"{s.label(key)}" + ('' if is_ap else ' (not in verdict)'))
         if s.long:
             t, v = np.array(s.long).T
             keep = t >= t0
@@ -402,8 +443,7 @@ class View:
                               extent=(ts[0], ts[-1] if len(ts) > 1 else ts[0] + 0.1, 0, len(VALID)),
                               interpolation='nearest')
             self._clock_axis(self.ax_wf)
-            self.ax_wf.set_title(f"normalised amplitude, node {key[0]} "
-                                 f"{'ACK' if key[1] else 'beacon/AP'}",
+            self.ax_wf.set_title(f"normalised amplitude, {s.label(key)}",
                                  color=DIM, fontsize=8.5, loc='left')
         self.fig.canvas.draw_idle()
 
@@ -465,9 +505,120 @@ class View:
         ax.set_ylabel('peak / s')
 
 
-def reader(source, baud, q, log=None):
+class DevicePanel:
+    """Tk window listing the devices on our network. Click a row's first
+    column (or double-click a row) to poke / stop poking it."""
+
+    COLS = (('poke', 'Poke', 46), ('name', 'Device (maker)', 170), ('mac', 'MAC', 130),
+            ('rssi', 'Signal', 62), ('tx', 'Sent', 62), ('rate', 'Frames/min', 92),
+            ('heard', 'Last heard', 90), ('status', 'Looks', 330), ('link', 'Poke link', 160))
+
+    def __init__(self, master, state, send, on_change=None):
+        import tkinter as tk
+        from tkinter import ttk
+        self.s, self.send, self.on_change = state, send, on_change
+        self.win = tk.Toplevel(master)
+        self.win.title('Devices on your network')
+        self.win.geometry('1200x380')
+        self.win.configure(bg=BG)
+        self.win.protocol('WM_DELETE_WINDOW', self.win.withdraw)   # hide, don't kill
+        st = ttk.Style(self.win)
+        try:
+            st.theme_use('clam')
+        except tk.TclError:
+            pass
+        st.configure('D.Treeview', background=PANEL, fieldbackground=PANEL, foreground=FG,
+                     rowheight=22, borderwidth=0)
+        st.configure('D.Treeview.Heading', background='#222932', foreground=FG, relief='flat')
+        st.map('D.Treeview', background=[('selected', '#2f3a46')])
+        st.configure('D.TRadiobutton', background=BG, foreground=FG)
+        st.map('D.TRadiobutton', background=[('active', BG)])
+        st.configure('D.TLabel', background=BG, foreground=DIM)
+
+        top = tk.Frame(self.win, bg=BG)
+        top.pack(fill='x', padx=10, pady=(8, 4))
+        ttk.Label(top, text='Poke:', style='D.TLabel').pack(side='left')
+        self.mode = tk.StringVar(value=state.devices.mode)
+        names = {'auto': 'Auto (stationary only)', 'all': 'All active (max 4)',
+                 'manual': 'Manual', 'off': 'Off (router only)'}
+        for m in MODES:
+            ttk.Radiobutton(top, text=names[m], value=m, variable=self.mode, style='D.TRadiobutton',
+                            command=self._mode).pack(side='left', padx=6)
+        self.note = ttk.Label(top, text='', style='D.TLabel')
+        self.note.pack(side='right')
+
+        self.tree = ttk.Treeview(self.win, columns=[c for c, _, _ in self.COLS], show='headings',
+                                 style='D.Treeview', selectmode='browse')
+        for c, title, w in self.COLS:
+            self.tree.heading(c, text=title)
+            self.tree.column(c, width=w, anchor='w', stretch=c == 'status')
+        self.tree.tag_configure('poked', foreground='#5fd4d0')
+        self.tree.tag_configure('stationary', foreground=STILL_C)
+        self.tree.tag_configure('dim', foreground=DIM)
+        self.tree.pack(fill='both', expand=True, padx=10)
+        self.tree.bind('<Button-1>', self._click)
+        self.tree.bind('<Double-1>', lambda e: self._toggle(self.tree.identify_row(e.y)))
+
+        self.foot = ttk.Label(self.win, style='D.TLabel', text=(
+            'Only devices talking to your own network (your SSID) are listed. The board is '
+            '2.4 GHz only: devices on 5 GHz never appear.\nOnly the router link decides '
+            'motion; device links are extra, plotted dotted. Phones use private MACs and '
+            'move, so Auto skips them.'))
+        self.foot.pack(fill='x', padx=10, pady=(4, 8))
+
+    def _mode(self):
+        self._send(self.s.devices.set_mode(self.mode.get()))
+
+    def _click(self, e):
+        if self.tree.identify_column(e.x) == '#1':           # the Poke column
+            self._toggle(self.tree.identify_row(e.y))
+
+    def _toggle(self, mac):
+        if mac:
+            self._send(self.s.devices.toggle(mac))
+            self.mode.set(self.s.devices.mode)
+
+    def _send(self, cmds):
+        for c in cmds:
+            if self.send:
+                self.send(c)
+        if self.on_change:
+            self.on_change()
+        self.refresh()
+
+    def refresh(self):
+        dv = self.s.devices
+        rows = dv.rows()
+        seen = set()
+        for r in rows:
+            mac = r['mac']
+            seen.add(mac)
+            box = '\u2611' if r['poked'] else ('\u2610' if not r['picked'] else '\u2026')
+            vals = (box, r['name'], mac, f"{r['rssi']} dBm" if r['rssi'] else '-',
+                    r['tx'], f"{r['rate'] * 60:.0f}", fmt_age(r['heard']) + ' ago',
+                    r['why'], r['link'])
+            tag = ('poked',) if r['poked'] else ('stationary',) if r['status'] == 'stationary' \
+                else ('dim',) if r['status'] in ('gone', 'quiet', 'random') else ()
+            if self.tree.exists(mac):
+                self.tree.item(mac, values=vals, tags=tag)
+            else:
+                self.tree.insert('', 'end', iid=mac, values=vals, tags=tag)
+        for iid in self.tree.get_children():
+            if iid not in seen:
+                self.tree.delete(iid)
+        for i, r in enumerate(rows):                         # keep the sort order
+            self.tree.move(r['mac'], '', i)
+        n_st = sum(r['status'] == 'stationary' for r in rows)
+        txt = (f"{len(rows)} heard, {n_st} stationary, poking {len(dv.poking)}/{MAX_DEVS}"
+               if dv.board_seen else 'waiting for the board...')
+        if not self.send:
+            txt += '   (no board: commands not sent)'
+        self.note.configure(text=txt)
+
+
+def reader(lines, q, log=None):
     try:
-        for line in open_source(source, baud):
+        for line in lines:
             if log:
                 log.feed(line)                   # in this thread: never waits for drawing
             q.put(line)
@@ -509,9 +660,21 @@ def main():
         awake = keep_awake('sleep')               # no suspend while logging; screen may blank
         print(f"Logging to {log.ev_path}\n  (and {os.path.basename(log.raw_path)});"
               " close the window to stop.")
+    prefs = os.path.join(a.out, 'devices.json')
+    mode, picks = Devices.load_prefs(prefs)
+    state.devices = Devices(oui=Oui(), mode=mode, manual=picks)
+    lines, send = open_port(a.source, a.baud)
     q = queue.Queue()
-    threading.Thread(target=reader, args=(a.source, a.baud, q, log), daemon=True).start()
-    view = View(state, plt, os.path.basename(log.ev_path) if log else None, a.window)
+    threading.Thread(target=reader, args=(lines, q, log), daemon=True).start()
+    view = View(state, plt, os.path.basename(log.ev_path) if log else None, a.window, send)
+    panel = None
+    try:
+        panel = DevicePanel(view.fig.canvas.get_tk_widget().winfo_toplevel(), state, send,
+                            on_change=lambda: (os.makedirs(a.out, exist_ok=True),
+                                               state.devices.save(prefs)))
+    except Exception as e:                       # not the Tk backend: plots only
+        print(f"(device list unavailable: {e})", file=sys.stderr)
+    last_panel = [0.0]
 
     def tick(_):
         deadline = time.monotonic() + 0.08
@@ -526,6 +689,13 @@ def main():
                 print(line[1:], file=sys.stderr)
                 continue
             state.feed(line)
+        for cmd in state.outbox:
+            if send:
+                send(cmd)
+        state.outbox.clear()
+        if panel and time.monotonic() - last_panel[0] > 1.0:
+            last_panel[0] = time.monotonic()
+            panel.refresh()
         view.draw()
         return []
 

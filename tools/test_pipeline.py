@@ -179,7 +179,7 @@ def test_default():
         ev = parse_line(line)
         if kind == 'junk':
             assert ev is None, f"junk line was parsed: {line!r}"
-        elif kind in ('learned', 'stats', 'state', 'calib', 'channel', 'csi'):
+        elif kind in ('learned', 'stats', 'state', 'calib', 'channel', 'csi', 'dev'):
             assert ev and ev[0] == kind, f"failed to parse {line!r}"
 
     # Separation of short scores on both streams, and beacon/ACK alike (time-based)

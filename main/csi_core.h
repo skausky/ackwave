@@ -186,7 +186,8 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //   POKE,<mac>     start poking a device of ours (mac as 6 hex pairs with ':')
 //   UNPOKE,<mac>   stop
 //   UNPOKE,all
-enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL };
+//   CAL            recalibrate, like the button
+enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL };
 
 static inline bool parse_mac(const char *s, uint8_t out[6]) {
     for (int i = 0; i < 6; i++) {
@@ -206,6 +207,8 @@ static inline bool parse_mac(const char *s, uint8_t out[6]) {
 
 static inline int parse_cmd(const char *line, uint8_t mac[6]) {
     if (!line) return CMD_NONE;
+    if (strncmp(line, "CAL", 3) == 0 && (line[3] == '\0' || line[3] == '\r' || line[3] == '\n'))
+        return CMD_CAL;
     if (strncmp(line, "UNPOKE,all", 10) == 0 &&
         (line[10] == '\0' || line[10] == '\r' || line[10] == '\n')) return CMD_UNPOKE_ALL;
     if (strncmp(line, "UNPOKE,", 7) == 0) return parse_mac(line + 7, mac) ? CMD_UNPOKE : CMD_NONE;

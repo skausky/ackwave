@@ -327,6 +327,8 @@ int main(void) {
         CHECK(parse_cmd(CMD("", "UNPOKE,", PLUG), cm) == CMD_UNPOKE);
         CHECK(parse_cmd("UNPOKE,all", cm) == CMD_UNPOKE_ALL);
         CHECK(parse_cmd("UNPOKE,allx", cm) == CMD_NONE);
+        CHECK(parse_cmd("CAL", cm) == CMD_CAL && parse_cmd("CAL\r\n", cm) == CMD_CAL);
+        CHECK(parse_cmd("CALX", cm) == CMD_NONE);
         CHECK(parse_cmd(CMD("", "POKE,", BC), cm) == CMD_NONE);   // broadcast refused
         CHECK(parse_cmd(CMD("z", "POKE,", PLUG), cm) == CMD_NONE); // trailing junk
         cb_[strlen(cb_) - 4] = '\0';                              // 5 bytes only

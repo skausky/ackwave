@@ -63,7 +63,9 @@ class Recorder:
     def feed(self, line):
         ev = parse_line(line)
         if ev is None:
-            if line.startswith('BUTTON,recalibrate'):
+            if line.startswith('BUTTON,recalibrate,pc'):
+                self.say("Recalibrate requested from the PC: recalibrating in 5 s, step away")
+            elif line.startswith('BUTTON,recalibrate'):
                 self.say("BOOT button pressed: recalibrating in 5 s, step away")
             return
         kind, d = ev

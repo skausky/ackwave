@@ -347,7 +347,10 @@ static __attribute__((unused)) void print_poking(void) {   // unused when POKE_H
 static void run_cmd(const char *line) {
     uint8_t mac[6];
     int cmd = parse_cmd(line, mac);
-    if (cmd == CMD_UNPOKE_ALL) {
+    if (cmd == CMD_CAL) {
+        cal_request = 1;
+        printf("BUTTON,recalibrate,pc\n");
+    } else if (cmd == CMD_UNPOKE_ALL) {
         for (int k = 0; k < MAX_DEVS; k++) dev_clear(&nodes, k);
         printf("UNPOKED,all\n");
     } else if (cmd == CMD_UNPOKE) {
