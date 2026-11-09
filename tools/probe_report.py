@@ -44,7 +44,7 @@ def parse(lines):
         try:
             if f[0] == 'ME' and len(f) == 2:
                 me = f[1]
-            elif f[0] == 'STATS' and len(f) == 8:
+            elif f[0] == 'STATS' and len(f) in (8, 9):
                 stats = dict(zip(('poke', 'tx_err', 'ack', 'ap', 'drop', 'qfull'),
                                  map(int, f[2:8])))
             elif f[0] == 'PROBE' and len(f) == 13:

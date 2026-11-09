@@ -268,7 +268,7 @@ static inline bool is_ack_to(const uint8_t *f, int len, const uint8_t me[6]) {
     return f && len >= 10 && f[0] == 0xD4 && memcmp(f + 4, me, 6) == 0;
 }
 
-enum { CSI_DROP = -1, CSI_KIND_AP = 0, CSI_KIND_ACK = 1 };
+enum { CSI_REPLY = -2, CSI_DROP = -1, CSI_KIND_AP = 0, CSI_KIND_ACK = 1 };
 
 typedef struct {
     int      node;          // node index the ACK is expected from, -1 = none
@@ -284,8 +284,13 @@ static inline int classify_csi(const node_table_t *t, poke_state_t *pk,
                                const uint8_t me[6], int sig_mode, int len,
                                uint32_t now_us, uint32_t win_us, int *node_out) {
     int idx = node_find(t, mac);
-    if (idx >= 0) {                                 // frame sent by a known AP
+    if (idx >= 0) {                                 // frame sent by a known node
         *node_out = idx;
+        // ...but addressed to one of our made-up poke addresses: the node
+        // answering a poke (some routers send a deauth, retried ~6 times
+        // since nobody ACKs it). Same path and moment as the ACK, so it
+        // adds nothing; count it, don't stream it.
+        if (poke_ta_node(me, dmac) >= 0) return CSI_REPLY;
         return CSI_KIND_AP;
     }
     int want = pk->node;
@@ -323,8 +328,8 @@ typedef struct {
     int  sent[MAX_NODES];       // pokes sent, running total (poke task)
     int  base_sent[MAX_NODES], base_acked[MAX_NODES];   // window start (poke task)
     int  yield[MAX_NODES];      // last verdict in %, -1 = not judged yet (poke task)
-    int  since_trial;           // pokes since the last trial (poke task)
-    int  trial_rr;              // (poke task)
+    int  since_trial[2];        // pokes since the last trial, APs / devices (poke task)
+    int  trial_rr[2];           // (poke task)
 } poke_gate_t;
 
 static inline void gate_init(poke_gate_t *g) {
@@ -378,34 +383,39 @@ static inline const char *gate_name(int s) {
     return s == GATE_WEAK ? "weak" : s == GATE_SILENT ? "silent" : "ok";
 }
 
-// Next node to poke among those heard on `ch`, or -1. Round-robin over the
-// OK ones, with the trial and strongest-fallback rules above.
+// Next node to poke among those heard on `ch`, or -1. devs = 0 picks among
+// APs, 1 among devices: the poke task alternates, so devices never take
+// pokes from the router. Round-robin over the OK ones, with the trial rule
+// above; if every AP is out the strongest is poked anyway (devices: none).
 static inline int next_poke_target(const node_table_t *t, const int *node_ch,
-                                   int ch, int *rr, poke_gate_t *g) {
+                                   int ch, int *rr, poke_gate_t *g, int devs) {
     const int n = MAX_NODES;
-    if (++g->since_trial >= POKE_TRIAL_EVERY) {
-        g->since_trial = 0;
+    devs = devs ? 1 : 0;
+#define NPT_MINE(i) (node_active(t, (i)) && node_is_ap(i) != devs && node_ch[(i)] == ch)
+    if (++g->since_trial[devs] >= POKE_TRIAL_EVERY) {
+        g->since_trial[devs] = 0;
         for (int k = 0; k < n; k++) {
-            int i = (g->trial_rr + k) % n;
-            if (node_active(t, i) && node_ch[i] == ch && gate_state(g, i) == GATE_SILENT) {
-                g->trial_rr = (i + 1) % n;
+            int i = (g->trial_rr[devs] + k) % n;
+            if (NPT_MINE(i) && gate_state(g, i) == GATE_SILENT) {
+                g->trial_rr[devs] = (i + 1) % n;
                 return i;
             }
         }
     }
     for (int k = 0; k < n; k++) {
         int i = (*rr + k) % n;
-        if (node_active(t, i) && node_ch[i] == ch && gate_state(g, i) == GATE_OK) {
+        if (NPT_MINE(i) && gate_state(g, i) == GATE_OK) {
             *rr = (i + 1) % n;
             return i;
         }
     }
-    int best = -1, bx = 0;                            // all out: strongest one
-    for (int i = 0; i < n; i++) {
-        if (!node_active(t, i) || node_ch[i] != ch) continue;
+    int best = -1, bx = 0;                            // all APs out: strongest one
+    for (int i = 0; i < n && !devs; i++) {
+        if (!NPT_MINE(i)) continue;
         int x = g->rssi_x16[i] ? g->rssi_x16[i] : -1000 * 16;
         if (best < 0 || x > bx) { best = i; bx = x; }
     }
+#undef NPT_MINE
     return best;
 }
 

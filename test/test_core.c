@@ -205,6 +205,11 @@ int main(void) {
     // Known AP frames still pass while a poke is pending, and don't consume it
     pk.node = 0; pk.sent_us = 2000;
     CHECK(classify_csi(&ct, &pk, AP1, BC, ME, 0, 128, 2100, WIN, &node) == CSI_KIND_AP && pk.node == 0);
+    // A known node's frame to one of our poke addresses is its reply to a poke
+    // (e.g. a deauth): counted apart, never streamed, and doesn't consume the poke
+    CHECK(classify_csi(&ct, &pk, AP1, ta0, ME, 0, 128, 2100, WIN, &node) == CSI_REPLY && pk.node == 0);
+    CHECK(classify_csi(&ct, &pk, AP2, ta1, ME, 0, 128, 2100, WIN, &node) == CSI_REPLY);
+    CHECK(classify_csi(&ct, &pk, AP1, ME, ME, 0, 128, 2100, WIN, &node) == CSI_KIND_AP); // real MAC
     // Late ACK is dropped; on-time one passes
     CHECK(classify_csi(&ct, &pk, Z, ta0, ME, 0, 128, 2000 + WIN + 1, WIN, &node) == CSI_DROP);
     CHECK(classify_csi(&ct, &pk, Z, ta0, ME, 0, 128, 2000 + WIN, WIN, &node) == CSI_KIND_ACK);
@@ -224,14 +229,14 @@ int main(void) {
     int nch[MAX_NODES] = {6, 11};
     int rr = 0;
     poke_gate_t pg; gate_init(&pg);
-    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 0);
-    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 0);        // only one on ch 6
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 0);
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 0);        // only one on ch 6
     nch[1] = 6;
-    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 1);
-    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 0);        // alternates
-    CHECK(next_poke_target(&ct, nch, 1, &rr, &pg) == -1);       // none on ch 1
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 1);
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 0);        // alternates
+    CHECK(next_poke_target(&ct, nch, 1, &rr, &pg, 0) == -1);       // none on ch 1
     node_table_t empty = {0};
-    rr = 0; CHECK(next_poke_target(&empty, nch, 6, &rr, &pg) == -1);
+    rr = 0; CHECK(next_poke_target(&empty, nch, 6, &rr, &pg, 0) == -1);
 
     // Device slots: nodes MAX_APS.., found by MAC, poked like APs
     {
@@ -266,13 +271,31 @@ int main(void) {
         dch[0] = 6; dch[DEV_NODE(0)] = 6;
         dt.dev_mask = 1;
         poke_gate_t dg; gate_init(&dg);
-        int drr = 0, got[MAX_NODES] = {0};
-        for (int j = 0; j < 100; j++) got[next_poke_target(&dt, dch, 6, &drr, &dg)]++;
-        CHECK(got[0] == 50 && got[DEV_NODE(0)] == 50);
-        dev_clear(&dt, 0);
+        // APs and devices are picked from separate slots: the TV never takes
+        // the router's pokes, and the router never fills the TV's
+        int drr[2] = {0, 0}, got[MAX_NODES] = {0};
+        for (int j = 0; j < 100; j++) got[next_poke_target(&dt, dch, 6, &drr[0], &dg, 0)]++;
+        CHECK(got[0] == 100);
         memset(got, 0, sizeof got);
-        for (int j = 0; j < 10; j++) got[next_poke_target(&dt, dch, 6, &drr, &dg)]++;
-        CHECK(got[0] == 10);                                   // removed: no more pokes
+        for (int j = 0; j < 100; j++) got[next_poke_target(&dt, dch, 6, &drr[1], &dg, 1)]++;
+        CHECK(got[DEV_NODE(0)] == 100);
+        dev_set(&dt, 1, PLUG); dch[DEV_NODE(1)] = 6;
+        memset(got, 0, sizeof got);
+        for (int j = 0; j < 100; j++) got[next_poke_target(&dt, dch, 6, &drr[1], &dg, 1)]++;
+        CHECK(got[DEV_NODE(0)] == 50 && got[DEV_NODE(1)] == 50);   // devices share their slot
+        dev_clear(&dt, 1);
+        // A silent device gets trial pokes only; no strongest-fallback for devices
+        dg.yield[DEV_NODE(0)] = 0;
+        int n_none = 0, n_tv = 0;
+        for (int j = 0; j < 10 * POKE_TRIAL_EVERY; j++) {
+            int x = next_poke_target(&dt, dch, 6, &drr[1], &dg, 1);
+            n_none += x < 0; n_tv += x == DEV_NODE(0);
+        }
+        CHECK(n_tv == 10 && n_none == 10 * (POKE_TRIAL_EVERY - 1));
+        dg.yield[DEV_NODE(0)] = -1;
+        dev_clear(&dt, 0);
+        CHECK(next_poke_target(&dt, dch, 6, &drr[1], &dg, 1) == -1);  // removed: no more pokes
+        CHECK(next_poke_target(&dt, dch, 6, &drr[0], &dg, 0) == 0);
         // gate_reset clears a reused slot's verdicts
         dg.yield[DEV_NODE(1)] = 3; gate_rssi(&dg, DEV_NODE(1), -90);
         gate_reset(&dg, DEV_NODE(1));
@@ -363,7 +386,7 @@ int main(void) {
     gate_init(&pg); rr = 0;
     gate_rssi(&pg, 0, -55); gate_rssi(&pg, 1, -82);
     int hits[2] = {0, 0};
-    for (int i = 0; i < 200; i++) hits[next_poke_target(&ct, nch, 6, &rr, &pg)]++;
+    for (int i = 0; i < 200; i++) hits[next_poke_target(&ct, nch, 6, &rr, &pg, 0)]++;
     CHECK(hits[0] == 200 && hits[1] == 0);
 
     // Yield: a window of POKE_EVAL_N pokes is judged when the next one goes,
@@ -388,22 +411,22 @@ int main(void) {
     pg.yield[1] = 0;
     hits[0] = hits[1] = 0;
     for (int i = 0; i < 100 * POKE_TRIAL_EVERY; i++)
-        hits[next_poke_target(&ct, nch, 6, &rr, &pg)]++;
+        hits[next_poke_target(&ct, nch, 6, &rr, &pg, 0)]++;
     CHECK(hits[1] == 100 && hits[0] == 100 * (POKE_TRIAL_EVERY - 1));
     pg.yield[1] = 90;
     hits[0] = hits[1] = 0;
-    for (int i = 0; i < 100; i++) hits[next_poke_target(&ct, nch, 6, &rr, &pg)]++;
+    for (int i = 0; i < 100; i++) hits[next_poke_target(&ct, nch, 6, &rr, &pg, 0)]++;
     CHECK(hits[0] == 50 && hits[1] == 50);                     // back to even split
 
     // Everything out: the strongest AP on the channel is still poked
     gate_init(&pg); rr = 0;
     gate_rssi(&pg, 0, -88); gate_rssi(&pg, 1, -84);
-    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 1);
-    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 1);
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 1);
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 1);
     nch[1] = 11;
-    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 0);        // only one here
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 0);        // only one here
     gate_init(&pg); pg.yield[0] = 0; nch[1] = 6; pg.yield[1] = 0;
-    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) >= 0);        // no RSSI yet: still pokes
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg, 0) >= 0);        // no RSSI yet: still pokes
     CHECK(strcmp(gate_name(GATE_WEAK), "weak") == 0 && strcmp(gate_name(GATE_SILENT), "silent") == 0
           && strcmp(gate_name(GATE_OK), "ok") == 0);
 

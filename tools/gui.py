@@ -358,7 +358,8 @@ class View:
             st = s.stats
             ratio = st['ack'] / st['poke'] if st['poke'] else 0
             rows.append(f"pokes {st['poke']}  ACK CSI {st['ack']} ({ratio:.0%})  "
-                        f"tx err {st['tx_err']}  queue drops {st['qfull']}   APs {len(s.nodes)}  "
+                        f"tx err {st['tx_err']}  queue drops {st['qfull']}  "
+                        f"router replies {st.get('reply', 0)}   APs {len(s.nodes)}  "
                         f"devices heard {len(dv.devs)}, poking {len(dv.poking)}/{MAX_DEVS} "
                         f"({dv.mode})")
         self.info.set_text('\n'.join(rows))

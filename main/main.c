@@ -88,7 +88,7 @@ static volatile uint32_t csa_at_ms = 0;
 static volatile bool     scanning = false;
 static poke_state_t      pk = {-1, 0};
 
-static volatile uint32_t n_poke, n_tx_err, n_ack, n_ap, n_drop, n_qfull;
+static volatile uint32_t n_poke, n_tx_err, n_ack, n_ap, n_drop, n_qfull, n_reply;
 
 static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static inline uint32_t now_us(void) { return (uint32_t)esp_timer_get_time(); }
@@ -260,6 +260,7 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
     xQueueSend(probe_q, &r, 0);
 #endif
     if (kind == CSI_DROP) { n_drop++; return; }
+    if (kind == CSI_REPLY) { n_reply++; return; }
     if (kind == CSI_KIND_ACK) { n_ack++; gate_ack(&gate, node); } else n_ap++;
     last_seen_ms = now_ms();
 
@@ -279,16 +280,20 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
 // ---------------- Tasks ----------------
 #if POKE_HZ > 0
 // Polite Wi-Fi: Null frame to the AP at 6 Mbps; its OFDM ACK gives us CSI.
+// Two interleaved slots: APs get POKE_HZ/s whatever happens, and devices
+// share another POKE_HZ/s (a slot with no device to poke stays silent).
 static void poke_task(void *arg) {
     uint8_t frame[NULL_FRAME_LEN];
-    int rr = 0;
+    int rr[2] = {0, 0}, slot = 0;
     TickType_t wake = xTaskGetTickCount();
-    TickType_t period = pdMS_TO_TICKS(1000 / POKE_HZ);
+    TickType_t period = pdMS_TO_TICKS(500 / POKE_HZ);
     if (period == 0) period = 1;
     for (;;) {
         vTaskDelayUntil(&wake, period);
+        int devs = slot;
+        slot ^= 1;
         if (scanning) continue;
-        int target = next_poke_target(&nodes, node_ch, cur_ch, &rr, &gate);
+        int target = next_poke_target(&nodes, node_ch, cur_ch, &rr[devs], &gate, devs);
         if (target < 0) continue;
         uint8_t ta[6];
         poke_ta(my_mac, target, ta);
@@ -460,8 +465,8 @@ static void control_task(void *arg) {
 #endif
             print_devices();
             printf("STATS,%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
-                   ",%" PRIu32 ",%" PRIu32 "\n", esp_timer_get_time(), n_poke, n_tx_err,
-                   n_ack, n_ap, n_drop, n_qfull);
+                   ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 "\n", esp_timer_get_time(), n_poke,
+                   n_tx_err, n_ack, n_ap, n_drop, n_qfull, n_reply);
         }
 
         int pending = csa_ch;

@@ -190,7 +190,7 @@ CSI,<ts_us>,<node>,<kind 0=AP 1=ACK>,<ch>,<rssi>,<sig_mode>,<cwb>,<len>,<b0 b1 .
 STATE,<ts_us>,<motion|still>,<short×1000>,<long×1000>     on-board verdict changes
 CALIB,<ts_us>,<wait|collect|fast|track>,<boot|button|rssi|channel>,<quiet×1e6>,<short_thr×1e6>,<long_thr×1e6>
                                                  on every calibration change and every 5 s
-STATS,<ts_us>,<pokes>,<tx_err>,<ack_csi>,<ap_csi>,<dropped>,<queue_full>   every 5 s
+STATS,<ts_us>,<pokes>,<tx_err>,<ack_csi>,<ap_csi>,<dropped>,<queue_full>,<poke_replies>   every 5 s
                                                  (ME, LEARNED and GATE are repeated just before it)
 GATE,<idx>,<beacon_rssi>,<yield_pct|-1>,<pokes>,<ok|weak|silent>   per poked AP / device, every 5 s
 POKING,<idx>,<mac>                               devices being poked (nodes 8..11), every 5 s
