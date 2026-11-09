@@ -223,14 +223,81 @@ int main(void) {
     // Round-robin poke target: only nodes on the current channel
     int nch[MAX_NODES] = {6, 11};
     int rr = 0;
-    CHECK(next_poke_target(&ct, nch, 6, &rr) == 0);
-    CHECK(next_poke_target(&ct, nch, 6, &rr) == 0);        // only one on ch 6
+    poke_gate_t pg; gate_init(&pg);
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 0);
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 0);        // only one on ch 6
     nch[1] = 6;
-    CHECK(next_poke_target(&ct, nch, 6, &rr) == 1);
-    CHECK(next_poke_target(&ct, nch, 6, &rr) == 0);        // alternates
-    CHECK(next_poke_target(&ct, nch, 1, &rr) == -1);       // none on ch 1
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 1);
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 0);        // alternates
+    CHECK(next_poke_target(&ct, nch, 1, &rr, &pg) == -1);       // none on ch 1
     node_table_t empty = {0};
-    rr = 0; CHECK(next_poke_target(&empty, nch, 6, &rr) == -1);
+    rr = 0; CHECK(next_poke_target(&empty, nch, 6, &rr, &pg) == -1);
+
+    // Poke gating. Beacon RSSI average with hysteresis:
+    gate_init(&pg);
+    CHECK(gate_state(&pg, 0) == GATE_OK && pg.yield[0] == -1);   // unknown = OK
+    gate_rssi(&pg, 0, -50);
+    CHECK(pg.rssi_x16[0] / 16 == -50 && gate_state(&pg, 0) == GATE_OK);
+    gate_rssi(&pg, 1, -82);
+    CHECK(gate_state(&pg, 1) == GATE_WEAK);                     // the far 2nd AP
+    for (int i = 0; i < 40; i++) gate_rssi(&pg, 1, -79);
+    CHECK(gate_state(&pg, 1) == GATE_WEAK);                     // inside hysteresis
+    for (int i = 0; i < 40; i++) gate_rssi(&pg, 1, -70);
+    CHECK(gate_state(&pg, 1) == GATE_OK);                       // climbed back
+    gate_rssi(&pg, 1, -95);
+    CHECK(gate_state(&pg, 1) == GATE_OK);                       // one bad beacon isn't enough
+    gate_rssi(&pg, 9, -50); gate_rssi(&pg, -1, -50);             // out of range: ignored
+    gate_ack(&pg, 9); gate_sent(&pg, -1);
+    gate_rssi(&pg, 2, 0);
+    CHECK(pg.rssi_x16[2] != 0);                                 // 0 dBm isn't "none"
+
+    // Weak AP leaves the rotation: every poke goes to the router
+    gate_init(&pg); rr = 0;
+    gate_rssi(&pg, 0, -55); gate_rssi(&pg, 1, -82);
+    int hits[2] = {0, 0};
+    for (int i = 0; i < 200; i++) hits[next_poke_target(&ct, nch, 6, &rr, &pg)]++;
+    CHECK(hits[0] == 200 && hits[1] == 0);
+
+    // Yield: a window of POKE_EVAL_N pokes is judged when the next one goes,
+    // so the last poke's ACK counts (send, then ACK, as on the air)
+    gate_init(&pg);
+    for (int i = 0; i < POKE_EVAL_N; i++) gate_sent(&pg, 1);
+    CHECK(pg.yield[1] == -1);
+    for (int i = 0; i < 5; i++) gate_ack(&pg, 1);
+    gate_sent(&pg, 1);                                          // judges, opens next
+    CHECK(pg.yield[1] == 10 && gate_state(&pg, 1) == GATE_SILENT);
+    gate_ack(&pg, 1);
+    for (int i = 0; i < POKE_EVAL_N - 1; i++) { gate_sent(&pg, 1); gate_ack(&pg, 1); }
+    CHECK(pg.yield[1] == 10);                                   // not judged yet
+    gate_sent(&pg, 1);
+    CHECK(pg.yield[1] == 100 && gate_state(&pg, 1) == GATE_OK); // every poke answered
+    for (int i = 0; i < POKE_EVAL_N; i++) gate_ack(&pg, 1);     // stray extra ACKs
+    for (int i = 0; i < POKE_EVAL_N; i++) gate_sent(&pg, 1);
+    CHECK(pg.yield[1] == 100);                                  // capped
+
+    // Silent AP gets only trial pokes, and can come back
+    gate_init(&pg); rr = 0;
+    pg.yield[1] = 0;
+    hits[0] = hits[1] = 0;
+    for (int i = 0; i < 100 * POKE_TRIAL_EVERY; i++)
+        hits[next_poke_target(&ct, nch, 6, &rr, &pg)]++;
+    CHECK(hits[1] == 100 && hits[0] == 100 * (POKE_TRIAL_EVERY - 1));
+    pg.yield[1] = 90;
+    hits[0] = hits[1] = 0;
+    for (int i = 0; i < 100; i++) hits[next_poke_target(&ct, nch, 6, &rr, &pg)]++;
+    CHECK(hits[0] == 50 && hits[1] == 50);                     // back to even split
+
+    // Everything out: the strongest AP on the channel is still poked
+    gate_init(&pg); rr = 0;
+    gate_rssi(&pg, 0, -88); gate_rssi(&pg, 1, -84);
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 1);
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 1);
+    nch[1] = 11;
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) == 0);        // only one here
+    gate_init(&pg); pg.yield[0] = 0; nch[1] = 6; pg.yield[1] = 0;
+    CHECK(next_poke_target(&ct, nch, 6, &rr, &pg) >= 0);        // no RSSI yet: still pokes
+    CHECK(strcmp(gate_name(GATE_WEAK), "weak") == 0 && strcmp(gate_name(GATE_SILENT), "silent") == 0
+          && strcmp(gate_name(GATE_OK), "ok") == 0);
 
     // ---------- Motion detector ----------
     int8_t cb[128] = {0};

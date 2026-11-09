@@ -68,6 +68,7 @@
 
 static node_table_t nodes;
 static int node_ch[MAX_NODES];   // channel each node was last heard on
+static poke_gate_t gate;          // which APs are worth poking
 static QueueHandle_t q;
 static uint8_t my_mac[6];
 static volatile uint32_t cal_request;   // set by the button, consumed by print_task
@@ -208,7 +209,10 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     int idx = node_add(&nodes, b.bssid);
     last_seen_ms = now_ms();
     found_ch = b.ds_ch ? b.ds_ch : pkt->rx_ctrl.channel;
-    if (idx >= 0) node_ch[idx] = found_ch;
+    if (idx >= 0) {
+        node_ch[idx] = found_ch;
+        gate_rssi(&gate, idx, pkt->rx_ctrl.rssi);
+    }
 
     if (!scanning && !csa_ch && csa_should_switch(b.csa_ch, cur_ch, MAX_CH)) {
         csa_at_ms = now_ms() + (uint32_t)b.csa_cnt * 103;   // 1 TU ≈ 1.024 ms
@@ -237,7 +241,7 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
     xQueueSend(probe_q, &r, 0);
 #endif
     if (kind == CSI_DROP) { n_drop++; return; }
-    if (kind == CSI_KIND_ACK) n_ack++; else n_ap++;
+    if (kind == CSI_KIND_ACK) { n_ack++; gate_ack(&gate, node); } else n_ap++;
     last_seen_ms = now_ms();
 
     s_pkt.ts = esp_timer_get_time();
@@ -265,7 +269,7 @@ static void poke_task(void *arg) {
     for (;;) {
         vTaskDelayUntil(&wake, period);
         if (scanning) continue;
-        int target = next_poke_target(&nodes, node_ch, cur_ch, &rr);
+        int target = next_poke_target(&nodes, node_ch, cur_ch, &rr, &gate);
         if (target < 0) continue;
         uint8_t ta[6];
         poke_ta(my_mac, target, ta);
@@ -275,6 +279,7 @@ static void poke_task(void *arg) {
         pk.node = target;
         if (esp_wifi_80211_tx(WIFI_IF_STA, frame, sizeof frame, true) == ESP_OK) {
             n_poke++;
+            gate_sent(&gate, target);
         } else {
             pk.node = -1;
             n_tx_err++;
@@ -336,6 +341,11 @@ static void control_task(void *arg) {
                 printf("LEARNED,%d,%02x:%02x:%02x:%02x:%02x:%02x\n", i,
                        m[0], m[1], m[2], m[3], m[4], m[5]);
             }
+#if POKE_HZ > 0
+            for (int i = 0; i < printed; i++)
+                printf("GATE,%d,%d,%d,%d,%s\n", i, gate.rssi_x16[i] / 16, gate.yield[i],
+                       gate.sent[i], gate_name(gate_state(&gate, i)));
+#endif
             printf("STATS,%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
                    ",%" PRIu32 ",%" PRIu32 "\n", esp_timer_get_time(), n_poke, n_tx_err,
                    n_ack, n_ap, n_drop, n_qfull);
@@ -422,6 +432,7 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(err);
 
+    gate_init(&gate);
     buzzer_init();                           // never fatal
 #if CAL_BUTTON_GPIO >= 0
     gpio_config_t btn = { .pin_bit_mask = 1ULL << CAL_BUTTON_GPIO, .mode = GPIO_MODE_INPUT,

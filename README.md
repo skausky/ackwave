@@ -44,13 +44,15 @@ The board sends the router a 24-byte Null data frame (default 100/s) at **6 Mbps
 
 The Null frame's sender address is **made up**, not the board's own MAC. The ESP32's radio consumes ACKs addressed to itself and never reports CSI for them, but an ACK to an address it doesn't own is reported like any passing frame. Each AP gets its own made-up address (the board's MAC with the locally-administered bit flipped, plus the AP's index in the last byte), so the ACK's receiver address (`dmac`) says exactly that it answers our poke and which AP sent it. Frames from other devices can't be mistaken for ACKs. On a real ESP32-S3 this gives about 97 ACK CSI per second from 100 pokes. A **probe mode** logs every callback so this can be verified on your hardware (see [Bring-up](#bring-up-probe-mode)).
 
+Pokes are split evenly over the APs being poked, so a far AP that rarely answers costs the router ACKs: learning a second AP at -82 dBm once dropped the router from 97 to 43 ACK/s. So an AP leaves the rotation when its beacons average below -80 dBm (it rejoins above -77) or when it answers under 20 % of a 50-poke window. A silent AP still gets 1 poke in 50 so it can come back, and if every AP on the channel is out, the strongest is poked anyway, so a single far router works as before. Each AP's state is printed in the `GATE` line every 5 s.
+
 > Only point this at your own router. The firmware pokes only access points whose SSID matches `MY_SSID` (set in `main/my_network.h`).
 
 ## Architecture
 
 ```
  router ──beacons──────────────► ESP32-S3 (station mode, never associates)
-        ◄──Null frame (6 Mbps)── poke_task   100/s, round-robin over APs on this channel
+        ◄──Null frame (6 Mbps)── poke_task   100/s, round-robin over good APs on this channel
         ──ACK (OFDM)───────────►
                                  promisc_cb  beacons: learn BSSIDs by SSID, follow CSA hops
                                  csi_cb      classify: AP frame / ACK / drop → queue
@@ -95,7 +97,7 @@ All protocol and decision logic lives in [`main/csi_core.h`](main/csi_core.h), w
 
 | Suite | What it covers |
 |---|---|
-| `test/test_core.c` | 148 checks: beacon/IE parsing (truncated, reordered, hidden SSID), CSA validation, Null-frame builder, made-up poke address, ACK classifier (dmac match, foreign frames, window, one-ACK-per-poke, 32-bit wrap), wrap-safe timeouts, poke round-robin, detector (band-pass scores, top-K, hysteresis of both windows, long-window cap, quiet-level percentile, tracking limits and clamps, recalibration delay, RSSI-step detection), serial format, plus a 200,000-frame fuzzer, all under AddressSanitizer + UBSan |
+| `test/test_core.c` | 175 checks: beacon/IE parsing (truncated, reordered, hidden SSID), CSA validation, Null-frame builder, made-up poke address, ACK classifier (dmac match, foreign frames, window, one-ACK-per-poke, 32-bit wrap), wrap-safe timeouts, poke round-robin and gating (RSSI hysteresis, yield windows, trial pokes, strongest fallback), detector (band-pass scores, top-K, hysteresis of both windows, long-window cap, quiet-level percentile, tracking limits and clamps, recalibration delay, RSSI-step detection), serial format, plus a 200,000-frame fuzzer, all under AddressSanitizer + UBSan |
 | `tools/test_pipeline.py` | End to end on synthetic multipath CSI (beacons at 10 Hz + ACKs at 40 Hz, plus malformed lines) in five scenarios: calibration → motion → channel hop → motion; **motion during calibration**; **board moved** (RSSI step → one recalibration); **board moved somewhere noisier** without an RSSI change (must not get stuck in motion, and the quiet level must converge to the new spot's); and **two real captures** from an ESP32-S3 (`test/data`: a still room, which must give no motion, and a person moving). Checks detection within 1 s, release within 10 s, no false motion, and **C vs Python agreement** on every run |
 | `tools/test_probe_report.py` | The bring-up report on a synthetic probe log |
 | `tools/test_gui.py` | GUI state tracking, reboot handling and rendering (headless) |
@@ -180,7 +182,8 @@ STATE,<ts_us>,<motion|still>,<short×1000>,<long×1000>     on-board verdict cha
 CALIB,<ts_us>,<wait|collect|fast|track>,<boot|button|rssi|channel>,<quiet×1e6>,<short_thr×1e6>,<long_thr×1e6>
                                                  on every calibration change and every 5 s
 STATS,<ts_us>,<pokes>,<tx_err>,<ack_csi>,<ap_csi>,<dropped>,<queue_full>   every 5 s
-                                                 (ME and LEARNED are repeated just before it)
+                                                 (ME, LEARNED and GATE are repeated just before it)
+GATE,<idx>,<beacon_rssi>,<yield_pct|-1>,<pokes>,<ok|weak|silent>   per AP, every 5 s (POKE_HZ > 0)
 BUZZER,<off|gpioN|error,...>
 BUTTON,<gpioN|error,gpioN|recalibrate>
 PROBE,...                                        only with CSI_PROBE=1

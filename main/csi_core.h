@@ -166,18 +166,109 @@ static inline int classify_csi(const node_table_t *t, poke_state_t *pk,
     return CSI_DROP;
 }
 
-// Round-robin over nodes heard on `ch`. Returns node index or -1.
+// ---------- Poke gating ----------
+// Pokes are split evenly over the APs in the rotation, so a far AP that
+// rarely answers costs the good ones ACKs (seen: learning a -82 dBm second AP
+// dropped the router from 97 to 43 ACK/s). An AP leaves the rotation when its
+// beacons are weak or it answers too few pokes. A silent AP still gets one
+// trial poke in POKE_TRIAL_EVERY so it can earn its way back; a weak one
+// rejoins when its beacons get stronger. If every AP on the channel is out,
+// the strongest is poked anyway, so a single far router behaves as before.
+#define POKE_MIN_RSSI    (-80)   // dBm, beacon average; below = weak
+#define POKE_RSSI_HYST   3       // weak until it climbs back to MIN + HYST
+#define POKE_MIN_YIELD   20      // % of pokes answered; below = silent
+#define POKE_EVAL_N      50      // pokes per yield verdict
+#define POKE_TRIAL_EVERY 50      // 1 in N pokes goes to a silent AP
+
+enum { GATE_OK = 0, GATE_WEAK = 1, GATE_SILENT = 2 };
+
+// Every field has one writer (noted), all ints, all on the Wi-Fi core.
+typedef struct {
+    int  rssi_x16[MAX_NODES];   // beacon RSSI average x16, 0 = none yet (beacon cb)
+    bool weak[MAX_NODES];       // RSSI verdict with hysteresis (beacon cb)
+    int  acked[MAX_NODES];      // ACKs matched, running total (CSI cb)
+    int  sent[MAX_NODES];       // pokes sent, running total (poke task)
+    int  base_sent[MAX_NODES], base_acked[MAX_NODES];   // window start (poke task)
+    int  yield[MAX_NODES];      // last verdict in %, -1 = not judged yet (poke task)
+    int  since_trial;           // pokes since the last trial (poke task)
+    int  trial_rr;              // (poke task)
+} poke_gate_t;
+
+static inline void gate_init(poke_gate_t *g) {
+    memset(g, 0, sizeof *g);
+    for (int i = 0; i < MAX_NODES; i++) g->yield[i] = -1;
+}
+
+// Beacon from node i heard at `rssi` dBm
+static inline void gate_rssi(poke_gate_t *g, int i, int rssi) {
+    if (i < 0 || i >= MAX_NODES) return;
+    int x = g->rssi_x16[i];
+    x = x ? x + (rssi * 16 - x) / 8 : rssi * 16;      // ~8-beacon average
+    if (x == 0) x = -1;                               // keep 0 meaning "none"
+    g->rssi_x16[i] = x;
+    if (x < POKE_MIN_RSSI * 16) g->weak[i] = true;
+    else if (x >= (POKE_MIN_RSSI + POKE_RSSI_HYST) * 16) g->weak[i] = false;
+}
+
+static inline void gate_ack(poke_gate_t *g, int i) {
+    if (i >= 0 && i < MAX_NODES) g->acked[i]++;
+}
+
+// Poke to node i went out. A full window of POKE_EVAL_N pokes is judged when
+// the next one goes, so the last poke's ACK has had time to arrive.
+static inline void gate_sent(poke_gate_t *g, int i) {
+    if (i < 0 || i >= MAX_NODES) return;
+    int s = g->sent[i] - g->base_sent[i];
+    if (s >= POKE_EVAL_N) {
+        int a = g->acked[i] - g->base_acked[i];
+        g->yield[i] = a >= s ? 100 : a * 100 / s;
+        g->base_sent[i] = g->sent[i];
+        g->base_acked[i] = g->acked[i];
+    }
+    g->sent[i]++;
+}
+
+static inline int gate_state(const poke_gate_t *g, int i) {
+    if (g->weak[i]) return GATE_WEAK;
+    if (g->yield[i] >= 0 && g->yield[i] < POKE_MIN_YIELD) return GATE_SILENT;
+    return GATE_OK;
+}
+static inline const char *gate_name(int s) {
+    return s == GATE_WEAK ? "weak" : s == GATE_SILENT ? "silent" : "ok";
+}
+
+// Next node to poke among those heard on `ch`, or -1. Round-robin over the
+// OK ones, with the trial and strongest-fallback rules above.
 static inline int next_poke_target(const node_table_t *t, const int *node_ch,
-                                   int ch, int *rr) {
+                                   int ch, int *rr, poke_gate_t *g) {
     int n = node_count(t);
+    if (n == 0) return -1;
+    if (++g->since_trial >= POKE_TRIAL_EVERY) {
+        for (int k = 0; k < n; k++) {
+            int i = (g->trial_rr + k) % n;
+            if (node_ch[i] == ch && gate_state(g, i) == GATE_SILENT) {
+                g->trial_rr = (i + 1) % n;
+                g->since_trial = 0;
+                return i;
+            }
+        }
+        g->since_trial = 0;
+    }
     for (int k = 0; k < n; k++) {
         int i = (*rr + k) % n;
-        if (node_ch[i] == ch) {
+        if (node_ch[i] == ch && gate_state(g, i) == GATE_OK) {
             *rr = (i + 1) % n;
             return i;
         }
     }
-    return -1;
+    int best = -1;                                    // all out: strongest one
+    for (int i = 0; i < n; i++) {
+        if (node_ch[i] != ch) continue;
+        int x = g->rssi_x16[i] ? g->rssi_x16[i] : -1000 * 16;
+        int bx = best < 0 ? 0 : g->rssi_x16[best] ? g->rssi_x16[best] : -1000 * 16;
+        if (best < 0 || x > bx) best = i;
+    }
+    return best;
 }
 
 // ---------- CSI packet + serial line format ----------
