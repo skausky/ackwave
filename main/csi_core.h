@@ -9,7 +9,10 @@
 #include <math.h>
 
 #define CSI_MAX_LEN 384
-#define MAX_NODES   8
+#define MAX_APS     8                     // APs learned from beacons: nodes 0..7
+#define MAX_DEVS    4                     // devices you picked to poke: nodes 8..11
+#define MAX_NODES   (MAX_APS + MAX_DEVS)
+#define DEV_NODE(k) (MAX_APS + (k))
 
 // ---------- Beacon parsing ----------
 typedef struct {
@@ -66,28 +69,155 @@ static inline bool older_than(uint32_t now, uint32_t then, uint32_t limit) {
 }
 
 // ---------- Node table (single writer, many readers) ----------
+// APs fill slots 0..n-1 (Wi-Fi task is the only writer). Device slots
+// MAX_APS.. are set and cleared by the control task; dev_mask says which
+// are live, and a slot's MAC is only rewritten while its bit is clear.
 typedef struct {
     uint8_t mac[MAX_NODES][6];
     int n;
+    int dev_mask;
 } node_table_t;
 
 static inline int node_count(const node_table_t *t) {
     return __atomic_load_n(&t->n, __ATOMIC_ACQUIRE);
 }
+static inline bool node_active(const node_table_t *t, int i) {
+    if (i < 0 || i >= MAX_NODES) return false;
+    if (i < MAX_APS) return i < node_count(t);
+    return (__atomic_load_n(&t->dev_mask, __ATOMIC_ACQUIRE) >> (i - MAX_APS)) & 1;
+}
 static inline int node_find(const node_table_t *t, const uint8_t *mac) {
-    int n = node_count(t);
-    for (int i = 0; i < n; i++)
-        if (memcmp(t->mac[i], mac, 6) == 0) return i;
+    if (!mac) return -1;
+    for (int i = 0; i < MAX_NODES; i++)
+        if (node_active(t, i) && memcmp(t->mac[i], mac, 6) == 0) return i;
     return -1;
 }
+static inline bool node_is_ap(int i) { return i >= 0 && i < MAX_APS; }
 static inline int node_add(node_table_t *t, const uint8_t *mac) {
     int i = node_find(t, mac);
     if (i >= 0) return i;
-    if (t->n >= MAX_NODES) return -1;
+    if (t->n >= MAX_APS) return -1;
     memcpy(t->mac[t->n], mac, 6);
     __atomic_store_n(&t->n, t->n + 1, __ATOMIC_RELEASE);  // publish after copy
     return t->n - 1;
 }
+// Device slot k: put `mac` in (slot must be clear) / take it out
+static inline void dev_set(node_table_t *t, int k, const uint8_t *mac) {
+    if (k < 0 || k >= MAX_DEVS) return;
+    memcpy(t->mac[DEV_NODE(k)], mac, 6);
+    __atomic_or_fetch(&t->dev_mask, 1 << k, __ATOMIC_RELEASE);
+}
+static inline void dev_clear(node_table_t *t, int k) {
+    if (k >= 0 && k < MAX_DEVS) __atomic_and_fetch(&t->dev_mask, ~(1 << k), __ATOMIC_RELEASE);
+}
+// Slot holding `mac`, else a free slot (*is_new = true), else -1
+static inline int dev_slot_for(const node_table_t *t, const uint8_t *mac, bool *is_new) {
+    int free_k = -1;
+    for (int k = 0; k < MAX_DEVS; k++) {
+        if (node_active(t, DEV_NODE(k))) {
+            if (memcmp(t->mac[DEV_NODE(k)], mac, 6) == 0) { *is_new = false; return k; }
+        } else if (free_k < 0) {
+            free_k = k;
+        }
+    }
+    *is_new = true;
+    return free_k;
+}
+
+// ---------- Devices on our network (listen only) ----------
+// Every data frame whose BSSID is one of our APs names a client device. We
+// note it with the signal strength of frames it sent itself (the AP's
+// frames to it say nothing about where it is). Neighbors' networks never
+// match a BSSID of ours, so only our own devices are listed.
+#define MAX_SEEN 32
+
+typedef struct {
+    uint8_t  mac[6];
+    int      rssi_x16;          // average of frames it sent, x16; 0 = none yet
+    uint32_t n_tx, n_rx;        // frames it sent / frames sent to it
+    uint32_t last_ms;
+    bool     used;
+} seen_dev_t;
+
+typedef struct { seen_dev_t d[MAX_SEEN]; } seen_list_t;
+
+// f = 802.11 frame without FCS. Returns the entry touched, or -1.
+static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t *f,
+                            int len, int rssi, uint32_t now_ms) {
+    if (!f || len < 24 || (f[0] & 0x0C) != 0x08) return -1;     // data frames only
+    int ds = f[1] & 0x03;                                        // ToDS | FromDS<<1
+    const uint8_t *bssid, *dev;
+    bool sent_by_dev;
+    if (ds == 1)      { bssid = f + 4;  dev = f + 10; sent_by_dev = true;  }  // to AP
+    else if (ds == 2) { bssid = f + 10; dev = f + 4;  sent_by_dev = false; }  // from AP
+    else return -1;                                     // ad-hoc / mesh backhaul
+    if (dev[0] & 0x01) return -1;                       // group address
+    if (!node_is_ap(node_find(t, bssid))) return -1;    // not our network
+    if (node_is_ap(node_find(t, dev))) return -1;       // an AP of ours, not a device
+    int k = -1;
+    for (int i = 0; i < MAX_SEEN && k < 0; i++)         // already listed?
+        if (l->d[i].used && memcmp(l->d[i].mac, dev, 6) == 0) k = i;
+    for (int i = 0; i < MAX_SEEN && k < 0; i++)         // free entry?
+        if (!l->d[i].used) k = i;
+    if (k < 0) {                                        // full: evict the stalest
+        k = 0;
+        for (int i = 1; i < MAX_SEEN; i++)
+            if ((int32_t)(l->d[k].last_ms - l->d[i].last_ms) > 0) k = i;
+    }
+    seen_dev_t *e = &l->d[k];
+    if (!e->used || memcmp(e->mac, dev, 6) != 0) {
+        memset(e, 0, sizeof *e);
+        memcpy(e->mac, dev, 6);
+        e->used = true;
+    }
+    if (sent_by_dev) {
+        e->n_tx++;
+        int x = e->rssi_x16;
+        x = x ? x + (rssi * 16 - x) / 8 : rssi * 16;
+        e->rssi_x16 = x ? x : -1;
+    } else {
+        e->n_rx++;
+    }
+    e->last_ms = now_ms;
+    return k;
+}
+
+// Commands from the PC, one per line:
+//   POKE,<mac>     start poking a device of ours (mac as 6 hex pairs with ':')
+//   UNPOKE,<mac>   stop
+//   UNPOKE,all
+enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL };
+
+static inline bool parse_mac(const char *s, uint8_t out[6]) {
+    for (int i = 0; i < 6; i++) {
+        int v = 0;
+        for (int j = 0; j < 2; j++) {
+            char c = *s++;
+            int h = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                  : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+            if (h < 0) return false;
+            v = v * 16 + h;
+        }
+        out[i] = (uint8_t)v;
+        if (i < 5 && *s++ != ':') return false;
+    }
+    return *s == '\0' || *s == '\r' || *s == '\n';
+}
+
+static inline int parse_cmd(const char *line, uint8_t mac[6]) {
+    if (!line) return CMD_NONE;
+    if (strncmp(line, "UNPOKE,all", 10) == 0 &&
+        (line[10] == '\0' || line[10] == '\r' || line[10] == '\n')) return CMD_UNPOKE_ALL;
+    if (strncmp(line, "UNPOKE,", 7) == 0) return parse_mac(line + 7, mac) ? CMD_UNPOKE : CMD_NONE;
+    if (strncmp(line, "POKE,", 5) == 0) {
+        if (!parse_mac(line + 5, mac) || (mac[0] & 0x01)) return CMD_NONE;  // no group MACs
+        return CMD_POKE;
+    }
+    return CMD_NONE;
+}
+
+// True if the MAC is locally administered: phones' private / random addresses
+static inline bool mac_is_random(const uint8_t *m) { return (m[0] & 0x02) != 0; }
 
 // ---------- "Polite Wi-Fi" poking ----------
 // Every 802.11 device ACKs a unicast frame addressed to it before checking
@@ -199,7 +329,15 @@ static inline void gate_init(poke_gate_t *g) {
     for (int i = 0; i < MAX_NODES; i++) g->yield[i] = -1;
 }
 
-// Beacon from node i heard at `rssi` dBm
+// Forget everything about slot i (only while nothing else touches it)
+static inline void gate_reset(poke_gate_t *g, int i) {
+    if (i < 0 || i >= MAX_NODES) return;
+    g->rssi_x16[i] = 0; g->weak[i] = false;
+    g->base_sent[i] = g->sent[i]; g->base_acked[i] = g->acked[i];
+    g->yield[i] = -1;
+}
+
+// Beacon (or, for a device, any frame it sent) from node i heard at `rssi` dBm
 static inline void gate_rssi(poke_gate_t *g, int i, int rssi) {
     if (i < 0 || i >= MAX_NODES) return;
     int x = g->rssi_x16[i];
@@ -241,32 +379,29 @@ static inline const char *gate_name(int s) {
 // OK ones, with the trial and strongest-fallback rules above.
 static inline int next_poke_target(const node_table_t *t, const int *node_ch,
                                    int ch, int *rr, poke_gate_t *g) {
-    int n = node_count(t);
-    if (n == 0) return -1;
+    const int n = MAX_NODES;
     if (++g->since_trial >= POKE_TRIAL_EVERY) {
+        g->since_trial = 0;
         for (int k = 0; k < n; k++) {
             int i = (g->trial_rr + k) % n;
-            if (node_ch[i] == ch && gate_state(g, i) == GATE_SILENT) {
+            if (node_active(t, i) && node_ch[i] == ch && gate_state(g, i) == GATE_SILENT) {
                 g->trial_rr = (i + 1) % n;
-                g->since_trial = 0;
                 return i;
             }
         }
-        g->since_trial = 0;
     }
     for (int k = 0; k < n; k++) {
         int i = (*rr + k) % n;
-        if (node_ch[i] == ch && gate_state(g, i) == GATE_OK) {
+        if (node_active(t, i) && node_ch[i] == ch && gate_state(g, i) == GATE_OK) {
             *rr = (i + 1) % n;
             return i;
         }
     }
-    int best = -1;                                    // all out: strongest one
+    int best = -1, bx = 0;                            // all out: strongest one
     for (int i = 0; i < n; i++) {
-        if (node_ch[i] != ch) continue;
+        if (!node_active(t, i) || node_ch[i] != ch) continue;
         int x = g->rssi_x16[i] ? g->rssi_x16[i] : -1000 * 16;
-        int bx = best < 0 ? 0 : g->rssi_x16[best] ? g->rssi_x16[best] : -1000 * 16;
-        if (best < 0 || x > bx) best = i;
+        if (best < 0 || x > bx) { best = i; bx = x; }
     }
     return best;
 }
@@ -544,12 +679,14 @@ static inline float md_update(motion_det_t *d, int node, int kind, int64_t ts, i
     return s->score_s;
 }
 
-// Highest short / long score among streams heard within stale_s, or -1
+// Highest short / long score among AP streams heard within stale_s, or -1.
+// Device links are scored too (CSI lines carry them to the PC) but don't
+// decide motion yet.
 static inline void md_max_scores(const motion_det_t *d, int64_t now_us,
                                  float *short_out, float *long_out) {
     float bs = -1, bl = -1;
     int64_t stale = (int64_t)(d->c.stale_s * 1e6f);
-    for (int i = 0; i < MAX_STREAMS; i++) {
+    for (int i = 0; i < MAX_APS * 2; i++) {
         const md_stream_t *s = &d->s[i];
         if (!s->n || s->score_s < 0 || now_us - s->t_last > stale) continue;
         if (s->score_s > bs) bs = s->score_s;

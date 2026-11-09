@@ -101,8 +101,8 @@ int main(void) {
     CHECK(node_count(&t) == 2 && node_find(&t, AP2) == 1);
     uint8_t m[6] = {2, 0, 0, 0, 0, 0};
     CHECK(node_find(&t, m) == -1);
-    for (int i = 0; i < MAX_NODES; i++) { m[5] = (uint8_t)i; node_add(&t, m); }
-    CHECK(node_count(&t) == MAX_NODES);
+    for (int i = 0; i < MAX_APS; i++) { m[5] = (uint8_t)i; node_add(&t, m); }
+    CHECK(node_count(&t) == MAX_APS);
     m[5] = 0xfe; CHECK(node_add(&t, m) == -1);   // full
 
     // Timer wraparound
@@ -232,6 +232,112 @@ int main(void) {
     CHECK(next_poke_target(&ct, nch, 1, &rr, &pg) == -1);       // none on ch 1
     node_table_t empty = {0};
     rr = 0; CHECK(next_poke_target(&empty, nch, 6, &rr, &pg) == -1);
+
+    // Device slots: nodes MAX_APS.., found by MAC, poked like APs
+    {
+        static const uint8_t TV[6] = {0x3c,0x22,0xfb,0x01,0x02,0x03};
+        static const uint8_t PLUG[6] = {0x50,0x02,0x91,0x0a,0x0b,0x0c};
+        node_table_t dt = {0};
+        node_add(&dt, AP1);
+        bool is_new = false;
+        int k = dev_slot_for(&dt, TV, &is_new);
+        CHECK(k == 0 && is_new);
+        CHECK(node_find(&dt, TV) == -1);                       // not live yet
+        dev_set(&dt, k, TV);
+        CHECK(node_find(&dt, TV) == DEV_NODE(0) && !node_is_ap(DEV_NODE(0)));
+        CHECK(dev_slot_for(&dt, TV, &is_new) == 0 && !is_new); // same device, same slot
+        CHECK(dev_slot_for(&dt, PLUG, &is_new) == 1 && is_new);
+        for (int j = 1; j < MAX_DEVS; j++) { uint8_t x[6] = {2,0,0,0,0,(uint8_t)j}; dev_set(&dt, j, x); }
+        CHECK(dev_slot_for(&dt, PLUG, &is_new) == -1);         // all slots taken
+        dev_clear(&dt, 2);
+        CHECK(dev_slot_for(&dt, PLUG, &is_new) == 2);
+        CHECK(node_count(&dt) == 1);                           // APs unaffected
+        // An ACK from the TV's made-up poke address is classified as the TV
+        uint8_t tat[6]; poke_ta(ME, DEV_NODE(0), tat);
+        CHECK(poke_ta_node(ME, tat) == DEV_NODE(0));
+        poke_state_t dpk = {DEV_NODE(0), 100};
+        int dn = -9;
+        CHECK(classify_csi(&dt, &dpk, Z, tat, ME, 0, 128, 150, WIN, &dn) == CSI_KIND_ACK
+              && dn == DEV_NODE(0));
+        CHECK(classify_csi(&dt, &dpk, TV, BC, ME, 1, 384, 200, WIN, &dn) == CSI_KIND_AP
+              && dn == DEV_NODE(0));                           // TV's own frames
+        // Poke rotation covers the AP and the TV on the same channel
+        int dch[MAX_NODES] = {0};
+        dch[0] = 6; dch[DEV_NODE(0)] = 6;
+        dt.dev_mask = 1;
+        poke_gate_t dg; gate_init(&dg);
+        int drr = 0, got[MAX_NODES] = {0};
+        for (int j = 0; j < 100; j++) got[next_poke_target(&dt, dch, 6, &drr, &dg)]++;
+        CHECK(got[0] == 50 && got[DEV_NODE(0)] == 50);
+        dev_clear(&dt, 0);
+        memset(got, 0, sizeof got);
+        for (int j = 0; j < 10; j++) got[next_poke_target(&dt, dch, 6, &drr, &dg)]++;
+        CHECK(got[0] == 10);                                   // removed: no more pokes
+        // gate_reset clears a reused slot's verdicts
+        dg.yield[DEV_NODE(1)] = 3; gate_rssi(&dg, DEV_NODE(1), -90);
+        gate_reset(&dg, DEV_NODE(1));
+        CHECK(gate_state(&dg, DEV_NODE(1)) == GATE_OK && dg.rssi_x16[DEV_NODE(1)] == 0);
+
+        // Device list from data frames on our network
+        seen_list_t sl; memset(&sl, 0, sizeof sl);
+        uint8_t df[24] = {0};
+        df[0] = 0x88; df[1] = 0x01;                            // QoS data, ToDS
+        memcpy(df + 4, AP1, 6); memcpy(df + 10, PLUG, 6); memcpy(df + 16, AP1, 6);
+        int e = seen_note(&sl, &dt, df, 24, -55, 1000);
+        CHECK(e >= 0 && memcmp(sl.d[e].mac, PLUG, 6) == 0 && sl.d[e].n_tx == 1
+              && sl.d[e].rssi_x16 / 16 == -55);
+        df[1] = 0x02;                                          // FromDS: AP -> device
+        memcpy(df + 4, PLUG, 6); memcpy(df + 10, AP1, 6);
+        CHECK(seen_note(&sl, &dt, df, 24, -40, 1100) == e && sl.d[e].n_rx == 1
+              && sl.d[e].rssi_x16 / 16 == -55 && sl.d[e].last_ms == 1100); // AP's RSSI ignored
+        memcpy(df + 4, BC, 6);
+        CHECK(seen_note(&sl, &dt, df, 24, -40, 1100) == -1);   // broadcast
+        df[1] = 0x01; memcpy(df + 4, AP2, 6); memcpy(df + 10, PLUG, 6);
+        CHECK(seen_note(&sl, &dt, df, 24, -40, 1100) == -1);   // AP2 isn't ours here
+        df[1] = 0x03; memcpy(df + 4, AP1, 6);
+        CHECK(seen_note(&sl, &dt, df, 24, -40, 1100) == -1);   // mesh backhaul
+        df[1] = 0x01; df[0] = 0x80;
+        CHECK(seen_note(&sl, &dt, df, 24, -40, 1100) == -1);   // beacon, not data
+        df[0] = 0x88;
+        CHECK(seen_note(&sl, &dt, df, 23, -40, 1100) == -1);   // truncated
+        CHECK(seen_note(&sl, &dt, NULL, 24, -40, 1100) == -1);
+        for (int j = 0; j < MAX_SEEN + 5; j++) {               // fills, then evicts stalest
+            uint8_t x[6] = {0x02,0,0,0,1,(uint8_t)j};
+            memcpy(df + 10, x, 6);
+            CHECK(seen_note(&sl, &dt, df, 24, -60, 2000 + j) >= 0);
+        }
+        int listed = 0, plug_listed = 0;
+        for (int j = 0; j < MAX_SEEN; j++) {
+            listed += sl.d[j].used;
+            plug_listed |= sl.d[j].used && memcmp(sl.d[j].mac, PLUG, 6) == 0;
+        }
+        CHECK(listed == MAX_SEEN && !plug_listed);             // PLUG was the stalest
+        uint8_t rnd[6] = {0xda,0xa1,0x19,0,0,1};
+        CHECK(mac_is_random(rnd) && !mac_is_random(PLUG));
+
+        // Commands
+        uint8_t cm[6];
+        char cb_[64], up_[32];
+        #define CMD(fmt_tail, pre, m) (snprintf(cb_, sizeof cb_, "%s%02x:%02x:%02x:%02x:%02x:%02x" fmt_tail, \
+            pre, (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]), cb_)
+        CHECK(parse_cmd(CMD("", "POKE,", PLUG), cm) == CMD_POKE && memcmp(cm, PLUG, 6) == 0);
+        for (char *q = strcpy(up_, CMD("\r\n", "POKE,", PLUG)); *q; q++)
+            if (*q >= 'a' && *q <= 'f') *q -= 32;              // upper-case hex
+        CHECK(parse_cmd(up_, cm) == CMD_POKE && memcmp(cm, PLUG, 6) == 0);
+        CHECK(parse_cmd(CMD("", "UNPOKE,", PLUG), cm) == CMD_UNPOKE);
+        CHECK(parse_cmd("UNPOKE,all", cm) == CMD_UNPOKE_ALL);
+        CHECK(parse_cmd("UNPOKE,allx", cm) == CMD_NONE);
+        CHECK(parse_cmd(CMD("", "POKE,", BC), cm) == CMD_NONE);   // broadcast refused
+        CHECK(parse_cmd(CMD("z", "POKE,", PLUG), cm) == CMD_NONE); // trailing junk
+        cb_[strlen(cb_) - 4] = '\0';                              // 5 bytes only
+        CHECK(parse_cmd(cb_, cm) == CMD_NONE);
+        CMD("", "POKE,", PLUG); cb_[6] = 'g';
+        CHECK(parse_cmd(cb_, cm) == CMD_NONE);                   // not hex
+        CMD("", "POKE,", PLUG); for (char *q = cb_; *q; q++) if (*q == ':') *q = '-';
+        CHECK(parse_cmd(cb_, cm) == CMD_NONE);                   // wrong separator
+        #undef CMD
+        CHECK(parse_cmd("HELLO", cm) == CMD_NONE && parse_cmd(NULL, cm) == CMD_NONE);
+    }
 
     // Poke gating. Beacon RSSI average with hysteresis:
     gate_init(&pg);
@@ -507,6 +613,9 @@ int main(void) {
     // Fuzz: random frames must never crash or over-read (ASan watches)
     srand(1);
     int fuzzed = 0;
+    static seen_list_t fz_seen;
+    node_table_t fz_nodes = {0};
+    node_add(&fz_nodes, AP1);
     for (int it = 0; it < 200000; it++) {
         int len = rand() % 300;
         uint8_t *buf = malloc(len ? len : 1);
@@ -514,6 +623,9 @@ int main(void) {
         if (len) buf[0] = 0x80;
         if (len > 40 && (it & 1)) { buf[36] = 0; buf[37] = 9; }
         parse_beacon(buf, len, "MyNetwork", &b);
+        if (len) buf[0] = 0x88;                               // same bytes as a data frame
+        if (len >= 16 && (it & 2)) memcpy(buf + ((it & 4) ? 4 : 10), AP1, 6);  // "our" BSSID
+        seen_note(&fz_seen, &fz_nodes, buf, len, -50, (uint32_t)it);
         free(buf);
         fuzzed++;
     }

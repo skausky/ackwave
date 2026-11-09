@@ -11,6 +11,7 @@
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "hal/usb_serial_jtag_ll.h"
 #include "csi_core.h"
 
 // Your network name lives in main/my_network.h (git-ignored, so it is never
@@ -68,7 +69,9 @@
 
 static node_table_t nodes;
 static int node_ch[MAX_NODES];   // channel each node was last heard on
-static poke_gate_t gate;          // which APs are worth poking
+static poke_gate_t gate;          // which APs / devices are worth poking
+static seen_list_t seen;          // devices heard on our network
+static portMUX_TYPE seen_mux = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t q;
 static uint8_t my_mac[6];
 static volatile uint32_t cal_request;   // set by the button, consumed by print_task
@@ -201,6 +204,22 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;
     }
 #endif
+    if (type == WIFI_PKT_DATA) {
+        const uint8_t *f = pkt->payload;
+        int flen = (int)pkt->rx_ctrl.sig_len - 4;
+        int rssi = pkt->rx_ctrl.rssi;
+        taskENTER_CRITICAL(&seen_mux);
+        seen_note(&seen, &nodes, f, flen, rssi, now_ms());
+        taskEXIT_CRITICAL(&seen_mux);
+        if (flen >= 24 && (f[1] & 0x03) == 1) {        // sent by a device: if we poke it,
+            int dn = node_find(&nodes, f + 10);        // its signal and channel matter
+            if (dn >= MAX_APS) {
+                gate_rssi(&gate, dn, rssi);
+                node_ch[dn] = pkt->rx_ctrl.channel;
+            }
+        }
+        return;
+    }
     if (type != WIFI_PKT_MGMT) return;
     beacon_info_t b;
     parse_beacon(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, MY_SSID, &b);
@@ -305,6 +324,93 @@ static int sweep(void) {
     return got;
 }
 
+// True if `mac` was heard on our network (copied out under the lock)
+static bool seen_has(const uint8_t *mac) {
+    bool found = false;
+    taskENTER_CRITICAL(&seen_mux);
+    for (int i = 0; i < MAX_SEEN && !found; i++)
+        found = seen.d[i].used && memcmp(seen.d[i].mac, mac, 6) == 0;
+    taskEXIT_CRITICAL(&seen_mux);
+    return found;
+}
+
+#define MACF "%02x:%02x:%02x:%02x:%02x:%02x"
+#define MACA(m) (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]
+
+static __attribute__((unused)) void print_poking(void) {   // unused when POKE_HZ = 0
+    for (int k = 0; k < MAX_DEVS; k++)
+        if (node_active(&nodes, DEV_NODE(k)))
+            printf("POKING,%d," MACF "\n", DEV_NODE(k), MACA(nodes.mac[DEV_NODE(k)]));
+}
+
+// POKE / UNPOKE from the PC. Only devices already heard on our network.
+static void run_cmd(const char *line) {
+    uint8_t mac[6];
+    int cmd = parse_cmd(line, mac);
+    if (cmd == CMD_UNPOKE_ALL) {
+        for (int k = 0; k < MAX_DEVS; k++) dev_clear(&nodes, k);
+        printf("UNPOKED,all\n");
+    } else if (cmd == CMD_UNPOKE) {
+        int n = node_find(&nodes, mac);
+        if (n >= MAX_APS) dev_clear(&nodes, n - MAX_APS);
+        printf("UNPOKED," MACF "\n", MACA(mac));
+    } else if (cmd == CMD_POKE) {
+        bool is_new;
+        int k = dev_slot_for(&nodes, mac, &is_new);
+        if (node_is_ap(node_find(&nodes, mac))) {
+            printf("REFUSED," MACF ",is-an-ap\n", MACA(mac));
+        } else if (!seen_has(mac)) {
+            printf("REFUSED," MACF ",not-seen-on-network\n", MACA(mac));
+        } else if (k < 0) {
+            printf("REFUSED," MACF ",full\n", MACA(mac));
+        } else {
+            if (is_new) {                  // slot is idle: nothing else writes it now
+                gate_reset(&gate, DEV_NODE(k));
+                node_ch[DEV_NODE(k)] = cur_ch;
+                dev_set(&nodes, k, mac);
+            }
+            printf("POKING,%d," MACF "\n", DEV_NODE(k), MACA(mac));
+        }
+    } else {
+        printf("REFUSED,bad-command\n");
+    }
+}
+
+// Commands arrive on the USB port, which this build uses for output only,
+// so read its RX FIFO directly (never blocks, works with no PC attached).
+static void poll_cmds(void) {
+    static char buf[48];
+    static int n;
+    uint8_t c;
+    while (usb_serial_jtag_ll_rxfifo_data_available() &&
+           usb_serial_jtag_ll_read_rxfifo(&c, 1) == 1) {
+        if (c == '\n' || c == '\r') {
+            if (n) { buf[n] = '\0'; run_cmd(buf); }
+            n = 0;
+        } else if (n < (int)sizeof buf - 1) {
+            buf[n++] = (char)c;
+        } else {
+            n = 0;                         // overlong line: drop it
+        }
+    }
+}
+
+static void print_devices(void) {
+    seen_list_t copy;
+    taskENTER_CRITICAL(&seen_mux);
+    copy = seen;
+    taskEXIT_CRITICAL(&seen_mux);
+    uint32_t now = now_ms();
+    for (int i = 0; i < MAX_SEEN; i++) {
+        const seen_dev_t *e = &copy.d[i];
+        if (!e->used) continue;
+        uint32_t age = now - e->last_ms;
+        if ((int32_t)age < 0) age = 0;
+        printf("DEV," MACF ",%d,%" PRIu32 ",%" PRIu32 ",%" PRIu32 "\n", MACA(e->mac),
+               e->rssi_x16 / 16, e->n_tx, e->n_rx, age);
+    }
+}
+
 // The only task that changes channels
 static void control_task(void *arg) {
     int printed = 0;
@@ -314,6 +420,7 @@ static void control_task(void *arg) {
            my_mac[3], my_mac[4], my_mac[5]);
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+        poll_cmds();
 
         for (int n = node_count(&nodes); printed < n; printed++) {
             const uint8_t *m = nodes.mac[printed];
@@ -342,10 +449,13 @@ static void control_task(void *arg) {
                        m[0], m[1], m[2], m[3], m[4], m[5]);
             }
 #if POKE_HZ > 0
-            for (int i = 0; i < printed; i++)
-                printf("GATE,%d,%d,%d,%d,%s\n", i, gate.rssi_x16[i] / 16, gate.yield[i],
-                       gate.sent[i], gate_name(gate_state(&gate, i)));
+            for (int i = 0; i < MAX_NODES; i++)
+                if (node_active(&nodes, i))
+                    printf("GATE,%d,%d,%d,%d,%s\n", i, gate.rssi_x16[i] / 16, gate.yield[i],
+                           gate.sent[i], gate_name(gate_state(&gate, i)));
+            print_poking();
 #endif
+            print_devices();
             printf("STATS,%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
                    ",%" PRIu32 ",%" PRIu32 "\n", esp_timer_get_time(), n_poke, n_tx_err,
                    n_ack, n_ap, n_drop, n_qfull);
