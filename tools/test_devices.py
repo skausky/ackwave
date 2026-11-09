@@ -78,6 +78,19 @@ def test_verdict_ignores_device_links():
           'device link is still scored')
 
 
+def test_frames_yield_to_acks():
+    """A router's own frames decide only while its ACK stream is silent."""
+    from analyze import Stream
+    det = MotionDetector()
+    t = 100_000_000
+    for key, sc in (((0, 0), 5.0), ((0, 1), 1.0)):
+        s = det.streams[key] = Stream()
+        s.n, s.t_last, s.score_s, s.score_l = 50, t, sc, sc
+    check(det.max_scores(t) == (1.0, 1.0), 'ACKs live: frames ignored')
+    det.streams[(0, 1)].t_last = t - det.c['stale_s'] * 1e6 - 1
+    check(det.max_scores(t) == (5.0, 5.0), 'no ACKs: frames decide')
+
+
 def test_oui():
     with tempfile.TemporaryDirectory() as tmp:
         js = os.path.join(tmp, 'master_oui.json')
@@ -211,6 +224,7 @@ def test_prefs_and_format():
 def main():
     test_parse()
     test_verdict_ignores_device_links()
+    test_frames_yield_to_acks()
     test_oui()
     test_auto_picks_stationary()
     test_drop_silent_and_reboot_resync()

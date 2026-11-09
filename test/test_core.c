@@ -430,6 +430,31 @@ int main(void) {
     CHECK(strcmp(gate_name(GATE_WEAK), "weak") == 0 && strcmp(gate_name(GATE_SILENT), "silent") == 0
           && strcmp(gate_name(GATE_OK), "ok") == 0);
 
+    // Verdict streams: a router's own frames only count while its ACKs don't
+    {
+        static motion_det_t vd;
+        md_cfg_t vc; md_cfg_default(&vc);
+        md_init(&vd, &vc, 0);
+        const int64_t T = 100000000;
+        md_stream_t *fr = &vd.s[0 * 2 + CSI_KIND_AP], *ack = &vd.s[0 * 2 + CSI_KIND_ACK];
+        md_stream_t *dev = &vd.s[DEV_NODE(0) * 2 + CSI_KIND_ACK];
+        fr->n = 50;  fr->t_last = T;  fr->score_s = 5;  fr->score_l = 4;
+        ack->n = 50; ack->t_last = T; ack->score_s = 1; ack->score_l = 1;
+        dev->n = 50; dev->t_last = T; dev->score_s = 9; dev->score_l = 9;
+        float vs, vl;
+        md_max_scores(&vd, T, &vs, &vl);
+        CHECK(vs == 1 && vl == 1);                 // ACK live: frames and device ignored
+        ack->t_last = T - (int64_t)(vc.stale_s * 1e6f) - 1;
+        md_max_scores(&vd, T, &vs, &vl);
+        CHECK(vs == 5 && vl == 4);                 // no ACKs (e.g. POKE_HZ=0): frames decide
+        ack->n = 0; ack->t_last = T;
+        md_max_scores(&vd, T, &vs, &vl);
+        CHECK(vs == 5);                            // never had ACKs: frames decide
+        ack->n = 50; ack->score_s = -1;            // ACKs live but still warming up
+        md_max_scores(&vd, T, &vs, &vl);
+        CHECK(vs == -1);                           // frames still don't decide
+    }
+
     // ---------- Motion detector ----------
     int8_t cb[128] = {0};
     float amp[N_SC];

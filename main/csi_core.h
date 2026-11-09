@@ -692,16 +692,23 @@ static inline float md_update(motion_det_t *d, int node, int kind, int64_t ts, i
     return s->score_s;
 }
 
-// Highest short / long score among AP streams heard within stale_s, or -1.
-// Device links are scored too (CSI lines carry them to the PC) but don't
-// decide motion yet.
+// Highest short / long score among the deciding streams heard within
+// stale_s, or -1. Deciding: AP streams only (device links are scored and
+// streamed but don't decide yet), and an AP's own-frames stream only while
+// it has no live ACK stream. The ACKs are one known frame type at a steady
+// 100/s; a router's own frames are sparse mixed traffic and alone caused
+// most false starts on a router that sends them (8 of 14 in one session).
+static inline bool md_live(const md_stream_t *s, int64_t now_us, int64_t stale) {
+    return s->n && now_us - s->t_last <= stale;
+}
 static inline void md_max_scores(const motion_det_t *d, int64_t now_us,
                                  float *short_out, float *long_out) {
     float bs = -1, bl = -1;
     int64_t stale = (int64_t)(d->c.stale_s * 1e6f);
     for (int i = 0; i < MAX_APS * 2; i++) {
         const md_stream_t *s = &d->s[i];
-        if (!s->n || s->score_s < 0 || now_us - s->t_last > stale) continue;
+        if (!md_live(s, now_us, stale) || s->score_s < 0) continue;
+        if (i % 2 == CSI_KIND_AP && md_live(&d->s[i + 1], now_us, stale)) continue;
         if (s->score_s > bs) bs = s->score_s;
         if (s->score_l > bl) bl = s->score_l;
     }

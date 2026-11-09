@@ -227,9 +227,14 @@ class MotionDetector:
     def max_scores(self, now_us):
         """(short, long): highest scores among live streams, None if none."""
         stale = self.c['stale_s'] * 1e6
-        live = [s for (src, _k), s in self.streams.items()      # APs decide, as on
-                if src < MAX_APS and s.score_s is not None       # the board
-                and now_us - s.t_last <= stale]
+        def alive(key):
+            s = self.streams.get(key)
+            return s is not None and now_us - s.t_last <= stale
+        # As on the board: APs decide, and an AP's own frames only while it
+        # has no live ACK stream (they're sparse mixed traffic)
+        live = [s for (src, k), s in self.streams.items()
+                if src < MAX_APS and s.score_s is not None and now_us - s.t_last <= stale
+                and not (k == 0 and alive((src, 1)))]
         if not live:
             return None, None
         return max(s.score_s for s in live), max(s.score_l for s in live)
