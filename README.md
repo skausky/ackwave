@@ -11,14 +11,14 @@ Detects human motion in a room using **Wi-Fi Channel State Information (CSI)**, 
 Everything runs from one script in the project folder. Plug the board in, then:
 
 ```bash
-cd ~/source/ackwave
+cd ackwave
 ./csi              # menu: pick what you want
 ```
 
 | Command | What it does |
 |---|---|
 | `./csi gui` | **Live view.** It also logs everything in the background, just like `record`. Close the window to stop; the summary is printed and saved. |
-| `./csi record` | **Log motion with clock times, no window** (e.g. overnight). The PC stays awake; **Ctrl+C** stops it and prints a summary. |
+| `./csi record` | **Log motion with clock times, no window** (e.g. overnight or while you're out). The PC stays awake; **Ctrl+C** stops it and prints a summary. |
 | `./csi history` | **Look back** at the last session: a zoomable timeline and a list of motion periods. `./csi history --list` shows all sessions; `./csi history 11-08` opens the one from 8 Nov. |
 | `./csi demo` | The GUI on fake data, no board needed |
 | `./csi flash` | Build and flash the firmware (uses ESP-IDF v5.3.2 at `~/esp/esp-idf-v5.3.2`) |
@@ -27,7 +27,7 @@ cd ~/source/ackwave
 
 Only one program can read the board at a time: close the GUI before recording, and stop a recording before opening the GUI. The script says so if the board is busy or unplugged.
 
-Sessions from both `gui` and `record` are saved to `~/source/ackwave/sessions/`: `events-<start>.log` is readable text with clock times, and `raw-<start>.log.gz` holds all the data (about 0.5 GB per night).
+Sessions from both `gui` and `record` are saved to `sessions/` in the project folder: `events-<start>.log` is readable text with clock times, and `raw-<start>.log.gz` holds all the data (about 55 MB per hour).
 
 **In the GUI:** the badge shows `CALIBRATING`, `STILL` or `MOTION`.
 - **Top plot:** both scores as multiples of the room's quiet level, with the thresholds as lines. The **30 s / 2 min / 10 min** buttons (or keys 1/2/3) choose how much it shows.
@@ -73,7 +73,7 @@ Per stream (node × beacon/ACK), for every packet:
 
 The **short window** reacts within a fraction of a second to clear movement. The **long window** catches weak but sustained movement, which noise can't imitate for 4 s. Motion is reported if either window crosses its threshold, with hysteresis. What one packet can add to the long window is capped, so a big burst can't hold it on for long. Everything is time-based, so a 10 Hz beacon stream and a 100 Hz ACK stream score alike.
 
-**Router glitches are ignored.** Some routers briefly switch to a very different channel shape and then snap back. An AT&T gateway did this every 20 min 2 s all night, for 0.1–1 s each time. Each packet's normalised shape is compared to a 1 s average of the recent ones. A packet that differs by more than 0.4 is skipped: the router glitches measured 0.53–0.62, while people moving, even right next to the board, stayed at 0.39 or below. A new shape that lasts 5 s is accepted as real, for example when the board is moved.
+**Router glitches are ignored.** Some routers briefly switch to a very different channel shape and then snap back. One ISP-supplied gateway did this every 20 min 2 s, around the clock, for 0.1–1 s each time. Each packet's normalised shape is compared to a 1 s average of the recent ones. A packet that differs by more than 0.4 is skipped: the router glitches measured 0.53–0.62, while people moving, even right next to the board, stayed at 0.39 or below. A new shape that lasts 5 s is accepted as real, for example when the board is moved.
 
 ### Auto-calibration
 
@@ -85,7 +85,7 @@ Thresholds are **multiples of the room's quiet level** (short ×2.8, long ×1.4)
 - **It recalibrates by itself** after a channel change, or when the signal strength steps by more than 4 dB and stays there. Moving the board does that; a person walking past only causes a brief dip.
 - **The BOOT button** (`CAL_BUTTON_GPIO`, GPIO 0) recalibrates on demand, starting 5 s after the press so you can step away.
 
-On a real ESP32-S3 the still room peaked at 2.0× (short) and 1.1× (long) the quiet level. A person moving scored 5–7× (short), and lighter movement 1.6–1.9× (long). Overnight, the long score stayed under 1.1× 99 % of the time in a quiet hour, while movement in bed, confirmed by a mmWave sensor next to the board, reached 1.2–1.5×. That is why the long threshold is 1.4×.
+On a real ESP32-S3 the still room peaked at 2.0× (short) and 1.1× (long) the quiet level. A person moving scored 5–7× (short), and lighter movement 1.6–1.9× (long). In a quiet hour the long score stayed under 1.1× 99 % of the time, while small movements of a person lying down, confirmed by a mmWave sensor next to the board, reached 1.2–1.5×. That is why the long threshold is 1.4×.
 
 The C and Python versions are tested against each other on synthetic and real captures: scores agree to within 10⁻⁶, and verdicts and calibration events match exactly.
 
@@ -99,7 +99,7 @@ All protocol and decision logic lives in [`main/csi_core.h`](main/csi_core.h), w
 | `tools/test_pipeline.py` | End to end on synthetic multipath CSI (beacons at 10 Hz + ACKs at 40 Hz, plus malformed lines) in five scenarios: calibration → motion → channel hop → motion; **motion during calibration**; **board moved** (RSSI step → one recalibration); **board moved somewhere noisier** without an RSSI change (must not get stuck in motion, and the quiet level must converge to the new spot's); and **two real captures** from an ESP32-S3 (`test/data`: a still room, which must give no motion, and a person moving). Checks detection within 1 s, release within 10 s, no false motion, and **C vs Python agreement** on every run |
 | `tools/test_probe_report.py` | The bring-up report on a synthetic probe log |
 | `tools/test_gui.py` | GUI state tracking, reboot handling and rendering (headless) |
-| `tools/test_record.py` | The overnight recorder's event log and summary, with a fake clock |
+| `tools/test_record.py` | The session recorder's event log and summary, with a fake clock |
 
 ```bash
 pip install -r requirements.txt
@@ -141,13 +141,13 @@ Requires ESP-IDF v5.x and an ESP32-S3.
 
 **Placement matters more than any setting.** The board is most sensitive along the line between it and the router, and close to either device. Place it so the area you want to watch lies between the two.
 
-### Recording overnight
+### Recording (any length, e.g. overnight)
 
 ```bash
 make record          # or: python tools/record.py [port] [--out DIR] [--no-raw]
 ```
 
-It finds the board, keeps the PC from sleeping while it runs, and reconnects if the board is unplugged. It writes a readable log with clock times to `~/source/ackwave/sessions/events-<start>.log` (`03:12:45  MOTION started (short x4.2, long x1.9)` … `still again after 17 s`), and the full data to `raw-<start>.log.gz` (about 0.5 GB per night) for later analysis. Press **Ctrl+C** to stop: it prints a summary of every motion period. Blips shorter than 2 s are listed separately; overnight they came about 5 times an hour and mostly matched no other sensor, so treat them as noise unless they cluster. `make gui` opens the live GUI on the board; close it first, since only one program can use the port.
+It finds the board, keeps the PC from sleeping while it runs, and reconnects if the board is unplugged. It writes a readable log with clock times to `sessions/events-<start>.log` in the project folder (`03:12:45  MOTION started (short x4.2, long x1.9)` … `still again after 17 s`), and the full data to `raw-<start>.log.gz` (about 55 MB per hour) for later analysis. Press **Ctrl+C** to stop: it prints a summary of every motion period. Blips shorter than 2 s are listed separately; in testing they came about 5 times an hour and mostly matched no other sensor, so treat them as noise unless they cluster. `make gui` opens the live GUI on the board; close it first, since only one program can use the port.
 
 ### Running unplugged
 
@@ -199,7 +199,7 @@ PROBE,...                                        only with CSI_PROBE=1
 ├── tools/
 │   ├── gui.py              live GUI
 │   ├── analyze.py          text analyzer + Python detector
-│   ├── record.py           overnight recorder: readable motion log + summary
+│   ├── record.py           session recorder: readable motion log + summary
 │   ├── probe_report.py     hardware bring-up report
 │   ├── fake_csi.py         synthetic data generator
 │   └── test_*.py           Python tests

@@ -74,7 +74,7 @@ def schedule(t_end):
 # Scenario steps: ('still', s) | ('motion', s) | ('hop',) |
 # ('relocate', rssi_change_db, noise_factor): the board is moved (new multipath) |
 # ('glitch', s): the router briefly switches to a very different channel shape
-# and snaps back (seen on a real AT&T gateway every ~20 min); not motion
+# and snaps back (seen on a real ISP gateway every ~20 min); not motion
 DEFAULT = [('still', 15), ('motion', 6), ('still', 8), ('hop',),
            ('still', 16), ('motion', 4), ('still', 10)]
 

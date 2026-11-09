@@ -27,25 +27,25 @@ LIVE VIEW (GUI)
       red = motion, orange ticks = brief blips, grey = calibrating
 
 
-RECORD OVERNIGHT (no window)
-----------------------------
+RECORD (no window, any time of day)
+-----------------------------------
     ./csi record
 
   - Logs motion with clock times. Keeps the PC awake.
-  - In the morning press Ctrl+C: it prints a summary of the night.
+  - Press Ctrl+C when done (e.g. next morning): it prints a summary.
 
 
 LOOK BACK AT A PAST SESSION
 ---------------------------
     ./csi history              the latest session (picture + list of motion)
     ./csi history --list       all sessions with their motion counts
-    ./csi history 11-08        the session from 8 November
+    ./csi history 11-08        a session by date (month-day)
 
 
 WHERE THE FILES GO
 ------------------
     ~/source/ackwave/sessions/events-<date>.log     readable: times of every motion
-    ~/source/ackwave/sessions/raw-<date>.log.gz     all the raw data (~0.5 GB per night)
+    ~/source/ackwave/sessions/raw-<date>.log.gz     all the raw data (~55 MB per hour)
 
 Both the GUI and record write these.
 
