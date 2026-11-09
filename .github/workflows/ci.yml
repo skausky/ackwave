@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: make test
+
+  firmware-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: default
+            defs: ""
+          - name: probe + passive buzzer
+            defs: "CSI_PROBE=1 BUZZER_GPIO=4"
+          - name: beacons only + active buzzer
+            defs: "POKE_HZ=0 BUZZER_GPIO=4 BUZZER_ACTIVE=1"
+    name: firmware (${{ matrix.variant.name }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.2
+          target: esp32s3
+          command: CSI_DEFS="${{ matrix.variant.defs }}" idf.py build

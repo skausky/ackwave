@@ -1,0 +1,87 @@
+ACKWAVE (CSI MOTION SENSOR) - HOW TO RUN
+========================================
+
+The project lives in:  ~/source/ackwave
+Every command below starts from there:
+
+    cd ~/source/ackwave
+
+Not sure what to run? Just type this for a menu:
+
+    ./csi
+
+
+LIVE VIEW (GUI)
+---------------
+    ./csi gui
+
+  - Opens the live graph. It also LOGS everything in the background.
+  - To stop: close the window (or press Ctrl+C in the terminal).
+    A summary of all motion is printed and saved.
+  - Buttons at the top right:
+      30 s / 2 min / 10 min ... how much detail to show   (keys 1 / 2 / 3)
+      Pause ................... freeze the view to zoom/pan with the toolbar
+                                (logging keeps going; press Live to go back)
+                                (key: space bar)
+  - Middle panel = everything since the GUI opened, with clock times:
+      red = motion, orange ticks = brief blips, grey = calibrating
+
+
+RECORD OVERNIGHT (no window)
+----------------------------
+    ./csi record
+
+  - Logs motion with clock times. Keeps the PC awake.
+  - In the morning press Ctrl+C: it prints a summary of the night.
+
+
+LOOK BACK AT A PAST SESSION
+---------------------------
+    ./csi history              the latest session (picture + list of motion)
+    ./csi history --list       all sessions with their motion counts
+    ./csi history 11-08        the session from 8 November
+
+
+WHERE THE FILES GO
+------------------
+    ~/source/ackwave/sessions/events-<date>.log     readable: times of every motion
+    ~/source/ackwave/sessions/raw-<date>.log.gz     all the raw data (~0.5 GB per night)
+
+Both the GUI and record write these.
+
+
+OTHER COMMANDS
+--------------
+    ./csi demo        GUI on fake data (no board needed)
+    ./csi flash       build + flash the firmware onto the ESP32
+    ./csi test        run all the tests
+    ./csi shortcut    add "CSI Motion" to the app menu (opens the live view)
+    ./csi help        list of commands
+
+
+GOOD TO KNOW
+------------
+  * Only ONE program can use the board at a time.
+    Close the GUI before recording, and stop recording before opening the GUI.
+    (The script tells you if the board is busy or unplugged.)
+
+  * After plugging in / powering on, the board calibrates for about 10 s.
+    Keep still during that time.
+
+  * To recalibrate (e.g. after moving the board): press the BOOT button.
+    It waits 5 s so you can step away, then measures the room again.
+
+  * The board works best when the area you want to watch is between
+    the ESP32 and the router.
+
+  * "Brief blips" (under 2 s) are mostly noise. Real movement shows up
+    as longer red periods.
+
+
+OPTIONAL: RUN FROM ANY FOLDER
+-----------------------------
+Run this once:
+
+    echo 'alias csi="~/source/ackwave/csi"' >> ~/.bashrc && source ~/.bashrc
+
+Then you can just type:  csi gui   /   csi record   /   csi history

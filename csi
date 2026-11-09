@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# One entry point for everything. Run with no arguments for a menu.
+#   ./csi gui        live view of the board (also logs, like record)
+#   ./csi record     log motion with clock times until Ctrl+C (e.g. overnight)
+#   ./csi history    look back at a logged session (newest; or: ./csi history --list)
+#   ./csi demo       GUI on fake data (no board needed)
+#   ./csi flash      build and flash the firmware (ESP-IDF v5.3.2)
+#   ./csi test       run all tests
+#   ./csi shortcut   add "CSI Motion" to the desktop app menu
+set -u
+cd "$(dirname "$(readlink -f "$0")")"
+ROOT=$PWD
+IDF=$HOME/esp/esp-idf-v5.3.2
+
+if [ -x .venv/bin/python ]; then PY=$ROOT/.venv/bin/python; else PY=python3; fi
+
+need_python() {
+    if ! "$PY" -c 'import numpy, serial, matplotlib' 2>/dev/null; then
+        echo "Python packages are missing. Set them up once with:"
+        echo "  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+        exit 1
+    fi
+}
+
+find_port() {                      # prints the board's port, or explains what's wrong
+    local port
+    port=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1)
+    if [ -z "$port" ]; then
+        echo "No board found. Plug the ESP32 in with a USB data cable and try again." >&2
+        return 1
+    fi
+    if command -v fuser >/dev/null && fuser "$port" >/dev/null 2>&1; then
+        echo "$port is in use by another program (another GUI or a recording?)." >&2
+        echo "Close it first: only one program can read the board at a time." >&2
+        return 1
+    fi
+    echo "$port"
+}
+
+cmd_gui() {
+    need_python
+    local port; port=$(find_port) || exit 1
+    echo "Opening the live view on $port (close the window to stop)."
+    exec "$PY" tools/gui.py "$port"
+}
+
+cmd_record() {
+    need_python
+    local port; port=$(find_port) || exit 1
+    exec "$PY" tools/record.py "$port"
+}
+
+cmd_history() {
+    need_python
+    exec "$PY" tools/history.py "$@"
+}
+
+cmd_demo() {
+    need_python
+    echo "GUI on fake data (close the window to stop)."
+    "$PY" tools/fake_csi.py --realtime --loop | "$PY" tools/gui.py -
+}
+
+cmd_flash() {
+    if [ ! -f main/my_network.h ]; then          # git-ignored: the name is never committed
+        local name
+        read -rp "Your Wi-Fi network name (no password needed): " name
+        [ -n "$name" ] || { echo "No name given."; exit 1; }
+        name=${name//\\/\\\\}; name=${name//\"/\\\"}
+        printf '// Local only (git-ignored). See my_network.h.example.\n#define MY_SSID "%s"\n' \
+            "$name" > main/my_network.h
+        echo "Saved to main/my_network.h (stays on this PC, not in git)."
+    fi
+    local port; port=$(find_port) || exit 1
+    if [ ! -f "$IDF/export.sh" ]; then
+        echo "ESP-IDF v5.3.2 not found at $IDF"; exit 1
+    fi
+    # shellcheck disable=SC1091
+    . "$IDF/export.sh" >/dev/null 2>&1
+    case "$(idf.py --version 2>/dev/null)" in
+        *v5.3.2*) ;;
+        *) echo "Wrong ESP-IDF version: $(idf.py --version 2>&1)"; exit 1 ;;
+    esac
+    idf.py build && idf.py -p "$port" flash
+}
+
+cmd_test() { make test PY="$PY"; }
+
+cmd_shortcut() {
+    local dir=$HOME/.local/share/applications
+    mkdir -p "$dir"
+    cat > "$dir/csi-motion.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=CSI Motion
+Comment=Live Wi-Fi motion view from the ESP32
+Exec=$ROOT/csi gui
+Icon=network-wireless
+Terminal=true
+Categories=Utility;
+EOF
+    echo "Added \"CSI Motion\" to the app menu (search for it). It opens a terminal"
+    echo "next to the GUI so you can see messages; close either to stop."
+}
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; }
+
+menu() {
+    echo "CSI motion sensor"
+    echo "  1) Live view (GUI)"
+    echo "  2) Record motion (e.g. overnight, Ctrl+C to stop)"
+    echo "  3) History: look back at the last session"
+    echo "  4) Demo GUI on fake data"
+    echo "  5) Build and flash firmware"
+    echo "  6) Run tests"
+    read -rp "Choose 1-6: " c
+    case "$c" in
+        1) cmd_gui ;; 2) cmd_record ;; 3) cmd_history ;; 4) cmd_demo ;; 5) cmd_flash ;;
+        6) cmd_test ;;
+        *) echo "Nothing chosen." ;;
+    esac
+}
+
+case "${1:-}" in
+    "") menu ;;
+    gui) cmd_gui ;;
+    record) cmd_record ;;
+    history) shift; cmd_history "$@" ;;
+    demo) cmd_demo ;;
+    flash) cmd_flash ;;
+    test) cmd_test ;;
+    shortcut) cmd_shortcut ;;
+    -h|--help|help) usage ;;
+    *) echo "Unknown command: $1"; usage; exit 1 ;;
+esac

@@ -1,0 +1,458 @@
+// Host-side tests for csi_core.h. From the repo root: make test-c
+// (or: gcc -std=c11 -Wall -Wextra -g -fsanitize=address,undefined
+//      -Imain test/test_core.c -o test_core && ./test_core)
+#include <stdlib.h>
+#include "csi_core.h"
+
+static int passes = 0, fails = 0;
+#define CHECK(c) do { if (c) passes++; else { fails++; \
+    printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
+
+static const uint8_t AP1[6] = {0xaa,0xbb,0xcc,0xdd,0xee,0xf0};
+static const uint8_t AP2[6] = {0xaa,0xbb,0xcc,0xdd,0xee,0xf1};
+
+typedef struct { uint8_t b[512]; int n; } frame_t;
+
+static void frame_start(frame_t *f, uint8_t fc0, const uint8_t bssid[6]) {
+    memset(f, 0, sizeof *f);
+    f->b[0] = fc0;
+    memset(f->b + 4, 0xff, 6);     // addr1 broadcast
+    memcpy(f->b + 10, bssid, 6);   // addr2
+    memcpy(f->b + 16, bssid, 6);   // addr3 = BSSID
+    f->b[32] = 0x64;               // beacon interval 100 TU
+    f->b[34] = 0x01;               // capability: ESS
+    f->n = 36;
+}
+static void add_ie(frame_t *f, uint8_t id, uint8_t len, const void *v, int actual) {
+    f->b[f->n++] = id;
+    f->b[f->n++] = len;
+    memcpy(f->b + f->n, v, actual);
+    f->n += actual;
+}
+#define IE(f, id, s) add_ie(f, id, sizeof(s) - 1, s, sizeof(s) - 1)
+
+// Copy to an exact-size heap buffer so ASan catches any over-read
+static beacon_info_t parse(const frame_t *f) {
+    uint8_t *p = malloc(f->n ? f->n : 1);
+    memcpy(p, f->b, f->n);
+    beacon_info_t b;
+    parse_beacon(p, f->n, "MyNetwork", &b);
+    free(p);
+    return b;
+}
+
+int main(void) {
+    frame_t f; beacon_info_t b;
+
+    // Normal beacon
+    frame_start(&f, 0x80, AP1);
+    IE(&f, 0, "MyNetwork"); IE(&f, 1, "\x82\x84\x8b\x96"); IE(&f, 3, "\x06");
+    b = parse(&f);
+    CHECK(b.ok && b.ssid_match); CHECK(b.ds_ch == 6);
+    CHECK(b.csa_ch == 0); CHECK(memcmp(b.bssid, AP1, 6) == 0);
+
+    // SSID mismatches: different, longer, shorter, hidden
+    frame_start(&f, 0x80, AP1); IE(&f, 0, "Neighbor");   b = parse(&f); CHECK(b.ok && !b.ssid_match);
+    frame_start(&f, 0x80, AP1); IE(&f, 0, "MyNetwork2"); b = parse(&f); CHECK(!b.ssid_match);
+    frame_start(&f, 0x80, AP1); IE(&f, 0, "MyNetwor");   b = parse(&f); CHECK(!b.ssid_match);
+    frame_start(&f, 0x80, AP1); IE(&f, 0, ""); IE(&f, 3, "\x06");
+    b = parse(&f); CHECK(!b.ssid_match && b.ds_ch == 6);
+
+    // CSA: switch to ch 11 in 5 beacons
+    frame_start(&f, 0x80, AP2);
+    IE(&f, 0, "MyNetwork"); IE(&f, 3, "\x06"); IE(&f, 37, "\x01\x0b\x05");
+    b = parse(&f);
+    CHECK(b.ssid_match && b.csa_ch == 11 && b.csa_cnt == 5);
+    CHECK(memcmp(b.bssid, AP2, 6) == 0);
+    CHECK(csa_should_switch(11, 6, 13));
+    CHECK(!csa_should_switch(6, 6, 13));    // same channel
+    CHECK(!csa_should_switch(36, 6, 13));   // 5 GHz
+    CHECK(!csa_should_switch(12, 6, 11));   // outside US range
+    CHECK(!csa_should_switch(0, 6, 13));
+
+    // Malformed CSA (too short) is ignored
+    frame_start(&f, 0x80, AP1); IE(&f, 0, "MyNetwork"); IE(&f, 37, "\x01\x0b");
+    b = parse(&f); CHECK(b.ssid_match && b.csa_ch == 0);
+
+    // IE order doesn't matter
+    frame_start(&f, 0x80, AP1); IE(&f, 3, "\x0b"); IE(&f, 0, "MyNetwork");
+    b = parse(&f); CHECK(b.ssid_match && b.ds_ch == 11);
+
+    // Truncated IEs: no over-read, partial IE ignored
+    frame_start(&f, 0x80, AP1); IE(&f, 0, "MyNetwork"); add_ie(&f, 3, 10, "\x06", 1);
+    b = parse(&f); CHECK(b.ssid_match && b.ds_ch == 0);
+    frame_start(&f, 0x80, AP1); add_ie(&f, 0, 9, "My", 2);
+    b = parse(&f); CHECK(b.ok && !b.ssid_match);
+    frame_start(&f, 0x80, AP1); IE(&f, 0, "MyNetwork"); f.b[f.n++] = 3;   // lone ID byte
+    b = parse(&f); CHECK(b.ssid_match && b.ds_ch == 0);
+
+    // Not a beacon / too short / NULL / no IEs
+    frame_start(&f, 0x40, AP1); IE(&f, 0, "MyNetwork"); b = parse(&f); CHECK(!b.ok);
+    frame_start(&f, 0x50, AP1); IE(&f, 0, "MyNetwork"); b = parse(&f); CHECK(!b.ok);
+    frame_start(&f, 0x80, AP1); f.n = 30; b = parse(&f); CHECK(!b.ok);
+    parse_beacon(NULL, 100, "MyNetwork", &b); CHECK(!b.ok);
+    frame_start(&f, 0x80, AP1); b = parse(&f); CHECK(b.ok && !b.ssid_match);
+
+    // Node table
+    node_table_t t = {0};
+    CHECK(node_add(&t, AP1) == 0);
+    CHECK(node_add(&t, AP1) == 0);           // dedupe
+    CHECK(node_add(&t, AP2) == 1);
+    CHECK(node_count(&t) == 2 && node_find(&t, AP2) == 1);
+    uint8_t m[6] = {2, 0, 0, 0, 0, 0};
+    CHECK(node_find(&t, m) == -1);
+    for (int i = 0; i < MAX_NODES; i++) { m[5] = (uint8_t)i; node_add(&t, m); }
+    CHECK(node_count(&t) == MAX_NODES);
+    m[5] = 0xfe; CHECK(node_add(&t, m) == -1);   // full
+
+    // Timer wraparound
+    CHECK(elapsed_ms(5, 0xFFFFFFFBu) == 10);
+    CHECK(deadline_passed(5, 0xFFFFFFFEu));
+    CHECK(!deadline_passed(0xFFFFFFFEu, 5));
+    CHECK(older_than(3000, 0, 2000));
+    CHECK(!older_than(2000, 0, 2000));                     // exactly the limit
+    CHECK(!older_than(100, 150, 2000));                    // stamped after `now`
+    CHECK(older_than(2005, 0xFFFFFFFBu, 2000));            // across the wrap
+    CHECK(!older_than(5, 0xFFFFFFFBu, 2000));
+
+    // CSI line formatting
+    static csi_pkt_t p;
+    p.ts = 1234567890123LL; p.src = 1; p.kind = CSI_KIND_ACK; p.ch = 6; p.rssi = -42;
+    p.sig_mode = 1; p.cwb = 0; p.len = 4;
+    p.buf[0] = -128; p.buf[1] = 127; p.buf[2] = 0; p.buf[3] = -1;
+    char line[2048];
+    const char *want = "CSI,1234567890123,1,1,6,-42,1,0,4,-128 127 0 -1\n";
+    int n = format_csi_line(line, sizeof line, &p);
+    CHECK(n == (int)strlen(want) && strcmp(line, want) == 0);
+    p.len = CSI_MAX_LEN; p.kind = 255; p.src = 255; p.ch = 255;  // worst case
+    p.ts = INT64_MIN; p.rssi = -128; p.sig_mode = 255; p.cwb = 255;
+    memset(p.buf, -128, sizeof p.buf);
+    CHECK(format_csi_line(line, sizeof line, &p) > 0);
+    CHECK(format_csi_line(line, 20, &p) == -1);                   // too small
+    p.len = 0; CHECK(format_csi_line(line, sizeof line, &p) > 0);
+
+    // ---------- Polite Wi-Fi poking ----------
+    static const uint8_t ME[6] = {0x24,0x0a,0xc4,0x11,0x22,0x33};
+    uint8_t nf[NULL_FRAME_LEN];
+    build_null_frame(nf, AP1, ME);
+    CHECK(nf[0] == 0x48 && nf[1] == 0x01);                 // null data, ToDS
+    CHECK(nf[2] == 0 && nf[3] == 0);                       // duration (driver)
+    CHECK(memcmp(nf + 4, AP1, 6) == 0);                    // RA = AP
+    CHECK(memcmp(nf + 10, ME, 6) == 0);                    // TA = us
+    CHECK(memcmp(nf + 16, AP1, 6) == 0);                   // BSSID
+    CHECK(nf[22] == 0 && nf[23] == 0);                     // seq (driver)
+    // Must not be mistaken for a beacon by our own sniffer
+    parse_beacon(nf, NULL_FRAME_LEN, "MyNetwork", &b); CHECK(!b.ok);
+
+    uint8_t ack[10] = {0xD4, 0, 0, 0};
+    memcpy(ack + 4, ME, 6);
+    CHECK(is_ack_to(ack, 10, ME));
+    CHECK(!is_ack_to(ack, 9, ME));                         // truncated
+    CHECK(!is_ack_to(ack, 10, AP1));                       // someone else's
+    ack[0] = 0xC4; CHECK(!is_ack_to(ack, 10, ME));         // CTS, not ACK
+    CHECK(!is_ack_to(NULL, 10, ME));
+
+    // Made-up poke TA: never our MAC, unicast, one per node, reversible
+    uint8_t ta0[6], ta1[6], ta7[6];
+    poke_ta(ME, 0, ta0); poke_ta(ME, 1, ta1); poke_ta(ME, MAX_NODES - 1, ta7);
+    CHECK(memcmp(ta0, ME, 6) != 0 && memcmp(ta0 + 1, ME + 1, 5) == 0);
+    CHECK((ta0[0] & 0x01) == 0);                           // unicast
+    CHECK((ta0[0] & 0x02) != (ME[0] & 0x02));              // local bit flipped
+    CHECK(memcmp(ta0, ta1, 6) != 0);
+    static const uint8_t TA1_VEC[6] = {0x26,0x0a,0xc4,0x11,0x22,0x34};  // also in test_probe_report.py
+    CHECK(memcmp(ta1, TA1_VEC, 6) == 0);
+    CHECK(poke_ta_node(ME, ta0) == 0 && poke_ta_node(ME, ta1) == 1);
+    CHECK(poke_ta_node(ME, ta7) == MAX_NODES - 1);
+    CHECK(poke_ta_node(ME, ME) == -1);                     // our own MAC is not a TA
+    CHECK(poke_ta_node(ME, AP1) == -1);
+    CHECK(poke_ta_node(ME, NULL) == -1);
+    uint8_t tax[6]; memcpy(tax, ta0, 6); tax[5] = (uint8_t)(ta0[5] + MAX_NODES);
+    CHECK(poke_ta_node(ME, tax) == -1);                    // beyond the node table
+    static const uint8_t MEW[6] = {0x24,0x0a,0xc4,0x11,0x22,0xfe};
+    uint8_t taw[6]; poke_ta(MEW, 3, taw);
+    CHECK(taw[5] == 0x01 && poke_ta_node(MEW, taw) == 3);  // last-byte wrap
+    static const uint8_t MEL[6] = {0x0a,0x0a,0xc4,0x11,0x22,0x33};  // already local
+    uint8_t tal[6]; poke_ta(MEL, 0, tal);
+    CHECK(memcmp(tal, MEL, 6) != 0 && (tal[0] & 0x01) == 0);
+    // Poke frame carries the made-up TA
+    build_null_frame(nf, AP1, ta0);
+    CHECK(memcmp(nf + 10, ta0, 6) == 0);
+
+    // Classifier: table holds AP1 (0) and AP2 (1). ACKs report mac 00:..:00.
+    static const uint8_t Z[6] = {0};
+    static const uint8_t BC[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
+    node_table_t ct = {0};
+    node_add(&ct, AP1); node_add(&ct, AP2);
+    poke_state_t pk = {-1, 0};
+    int node = -9;
+    const uint32_t WIN = 10000;
+    CHECK(classify_csi(&ct, &pk, AP2, BC, ME, 1, 384, 100, WIN, &node) == CSI_KIND_AP && node == 1);
+    CHECK(classify_csi(&ct, &pk, Z, ta1, ME, 0, 128, 100, WIN, &node) == CSI_DROP);  // no poke out
+
+    pk.node = 1; pk.sent_us = 1000;
+    node = -9;
+    CHECK(classify_csi(&ct, &pk, Z, ta1, ME, 1, 384, 1200, WIN, &node) == CSI_DROP); // HT, not an ACK
+    CHECK(classify_csi(&ct, &pk, Z, ta0, ME, 0, 128, 1200, WIN, &node) == CSI_DROP); // ACK for node 0
+    CHECK(classify_csi(&ct, &pk, Z, ME, ME, 0, 128, 1200, WIN, &node) == CSI_DROP);  // to our real MAC
+    static const uint8_t OTHER[6] = {0x20,0x4e,0xf6,0x8f,0xb1,0x17};
+    CHECK(classify_csi(&ct, &pk, OTHER, OTHER, ME, 0, 128, 1200, WIN, &node) == CSI_DROP); // foreign
+    static const uint8_t FOREIGN_RA[6] = {0xc4,0x38,0x75,0x85,0x70,0x8d};
+    CHECK(classify_csi(&ct, &pk, Z, FOREIGN_RA, ME, 0, 128, 1200, WIN, &node) == CSI_DROP); // other's ACK
+    CHECK(pk.node == 1 && node == -9);                                                     // still pending
+    CHECK(classify_csi(&ct, &pk, Z, ta1, ME, 0, 128, 1200, WIN, &node) == CSI_KIND_ACK && node == 1);
+    CHECK(pk.node == -1);                                                                  // consumed
+    CHECK(classify_csi(&ct, &pk, Z, ta1, ME, 0, 128, 1300, WIN, &node) == CSI_DROP);     // 2nd ACK
+    // Known AP frames still pass while a poke is pending, and don't consume it
+    pk.node = 0; pk.sent_us = 2000;
+    CHECK(classify_csi(&ct, &pk, AP1, BC, ME, 0, 128, 2100, WIN, &node) == CSI_KIND_AP && pk.node == 0);
+    // Late ACK is dropped; on-time one passes
+    CHECK(classify_csi(&ct, &pk, Z, ta0, ME, 0, 128, 2000 + WIN + 1, WIN, &node) == CSI_DROP);
+    CHECK(classify_csi(&ct, &pk, Z, ta0, ME, 0, 128, 2000 + WIN, WIN, &node) == CSI_KIND_ACK);
+    // CSI stamped before the poke (poke state updated mid-callback) is not an ACK
+    pk.node = 0; pk.sent_us = 5000;
+    CHECK(classify_csi(&ct, &pk, Z, ta0, ME, 0, 128, 4990, WIN, &node) == CSI_DROP);
+    // Window across the 32-bit microsecond wrap (~71 min)
+    pk.node = 0; pk.sent_us = 0xFFFFFF00u;
+    CHECK(classify_csi(&ct, &pk, Z, ta0, ME, 0, 128, 0x100u, WIN, &node) == CSI_KIND_ACK);
+    // Too-short CSI is not trusted
+    pk.node = 0; pk.sent_us = 10;
+    CHECK(classify_csi(&ct, &pk, Z, ta0, ME, 0, 64, 20, WIN, &node) == CSI_DROP);
+    // NULL dmac never matches
+    CHECK(classify_csi(&ct, &pk, Z, NULL, ME, 0, 128, 20, WIN, &node) == CSI_DROP);
+
+    // Round-robin poke target: only nodes on the current channel
+    int nch[MAX_NODES] = {6, 11};
+    int rr = 0;
+    CHECK(next_poke_target(&ct, nch, 6, &rr) == 0);
+    CHECK(next_poke_target(&ct, nch, 6, &rr) == 0);        // only one on ch 6
+    nch[1] = 6;
+    CHECK(next_poke_target(&ct, nch, 6, &rr) == 1);
+    CHECK(next_poke_target(&ct, nch, 6, &rr) == 0);        // alternates
+    CHECK(next_poke_target(&ct, nch, 1, &rr) == -1);       // none on ch 1
+    node_table_t empty = {0};
+    rr = 0; CHECK(next_poke_target(&empty, nch, 6, &rr) == -1);
+
+    // ---------- Motion detector ----------
+    int8_t cb[128] = {0};
+    float amp[N_SC];
+    cb[2 * 1] = 3;  cb[2 * 1 + 1] = 4;                    // subcarrier 1: |3j+4| = 5
+    cb[2 * 63 + 1] = -7;                                  // subcarrier 63 -> last slot
+    cb[2 * 30 + 1] = 100;                                 // guard band, must be skipped
+    CHECK(lltf_amplitudes(cb, 128, amp));
+    CHECK(amp[0] == 5.0f && amp[N_SC - 1] == 7.0f);
+    float total = 0; for (int i = 0; i < N_SC; i++) total += amp[i];
+    CHECK(total == 12.0f);                                // DC/guards ignored
+    CHECK(!lltf_amplitudes(cb, 127, amp));
+    CHECK(!lltf_amplitudes(NULL, 128, amp));
+
+    // Top-K mean: the 8 largest of 52, regardless of order
+    float e[N_SC];
+    for (int i = 0; i < N_SC; i++) e[i] = (float)((i * 37) % N_SC);   // a permutation of 0..51
+    CHECK(fabsf(md_top_mean(e) - (51 + 50 + 49 + 48 + 47 + 46 + 45 + 44) / 8.0f) < 1e-5f);
+    for (int i = 0; i < N_SC; i++) e[i] = 1.0f;
+    CHECK(md_top_mean(e) == 1.0f);
+
+    static motion_det_t md;
+    md_cfg_t mc;
+    md_cfg_default(&mc);
+    md_init(&md, &mc, 0);
+    CHECK(md.phase == MD_CAL_WAIT && md.why == MD_WHY_BOOT && md_take_cal_event(&md));
+    CHECK(!md_take_cal_event(&md));                          // consumed
+    CHECK(strcmp(md_phase_name(MD_CAL_TRACK), "track") == 0 && strcmp(md_why_name(9), "?") == 0);
+    for (int i = 0; i < 128; i += 2) { cb[i] = 0; cb[i + 1] = 40; }   // flat channel
+    CHECK(md_update(&md, -1, 0, 0, -50, cb, 128) < 0);       // bad node
+    CHECK(md_update(&md, MAX_NODES, 0, 0, -50, cb, 128) < 0);
+    CHECK(md_update(&md, 0, 2, 0, -50, cb, 128) < 0);        // bad kind
+    int8_t zero[128] = {0};
+    CHECK(md_update(&md, 0, 0, 0, -50, zero, 128) < 0);      // all-zero CSI
+    // Steady channel: no score during warm-up, then ~0; no verdict before a floor
+    float sc = -1;
+    int first_score = -1, changes = 0;
+    for (int i = 0; i < 300; i++) {
+        sc = md_update(&md, 0, 1, i * 10000LL, -50, cb, 128);
+        if (sc >= 0 && first_score < 0) first_score = i;
+        changes += md_eval(&md, i * 10000LL) != 0;
+    }
+    CHECK(changes == 0);
+    CHECK(first_score == 200);                               // warm_s = 2 s at 100 Hz
+    CHECK(sc >= 0 && sc < 1e-6f && !md.motion);
+    CHECK(md.phase == MD_CAL_COLLECT && md.floor == 0);
+    // A wildly changing channel during collect: still no verdict (no floor yet)
+    for (int i = 300; i < 400; i++) {
+        for (int j = 0; j < 128; j += 2) cb[j + 1] = (int8_t)(((i * 7 + j * 13) % 60) + 10);
+        md_update(&md, 0, 1, i * 10000LL, -50, cb, 128);
+        changes += md_eval(&md, i * 10000LL) != 0 || md.motion;
+    }
+    CHECK(changes == 0 && md.s[1].score_s > 0.05f);          // changing a lot, but no floor
+
+    // ---- Floor (auto-calibration), driven with synthetic short scores ----
+    md_init(&md, &mc, 0);
+    int64_t tt = 0;
+    #define FEED(score, secs) for (int k_ = 0; k_ < (secs) * 10; k_++, tt += 100000) \
+                                  md_floor_step(&md, tt, (score))
+    FEED(0.04f, 9.85);                                       // 99 samples: not enough
+    CHECK(md.phase == MD_CAL_COLLECT && md.floor == 0);
+    FEED(0.04f, 1);
+    CHECK(md.phase == MD_CAL_FAST && fabsf(md.floor - 0.04f) < 1e-7f);
+    // Mostly movement with brief pauses: floor stays at the quiet level
+    for (int k = 0; k < 400; k++, tt += 100000) md_floor_step(&md, tt, k % 5 ? 0.20f : 0.04f);
+    CHECK(fabsf(md.floor - 0.04f) < 1e-7f && md.phase == MD_CAL_FAST);
+    for (int k = 0; md.ring_n < MD_RING - 1; k++, tt += 100000)
+        md_floor_step(&md, tt, k % 5 ? 0.20f : 0.04f);
+    CHECK(md.phase == MD_CAL_FAST && fabsf(md.floor - 0.04f) < 1e-7f);
+    md_floor_step(&md, tt, 0.04f); tt += 100000;
+    FEED(0.04f, 1);
+    CHECK(md.phase == MD_CAL_TRACK && fabsf(md.floor - 0.04f) < 1e-7f);   // full: 120 s
+    // Tracking: rises at most 1 %/s ...
+    FEED(0.08f, 10);                                         // 20 % of the ring still quiet
+    CHECK(fabsf(md.floor - 0.04f) < 1e-7f);                  // p10 unchanged: floor holds
+    for (int i = 0; i < MD_RING; i++) md.ring[i] = 0.08f;    // now the whole room got noisier
+    for (int k = 0; k < 10; k++) { tt += 1000000; md_floor_step(&md, tt, 0.08f); }
+    CHECK(fabsf(md.floor - 0.04f * powf(1.01f, 10)) < 1e-5f); // ... rises only 1 %/s
+    for (int k = 0; k < 80; k++) { tt += 1000000; md_floor_step(&md, tt, 0.08f); }
+    CHECK(fabsf(md.floor - 0.08f) < 1e-7f);                  // and gets there (ln 2 / 1 % = 70 s)
+    // ... but falls at once
+    FEED(0.01f, 120);
+    CHECK(fabsf(md.floor - 0.01f) < 1e-7f);
+    // Clamped both ways
+    FEED(0.0001f, 120);
+    CHECK(md.floor == mc.floor_lo);
+    md_init(&md, &mc, tt);
+    FEED(5.0f, 11);
+    CHECK(md.floor == mc.floor_hi);
+    // Negative scores (no live stream) are not sampled
+    md_init(&md, &mc, tt);
+    FEED(-1.0f, 20);
+    CHECK(md.ring_n == 0 && md.floor == 0);
+    // Recalibration with a delay: nothing happens before it, then collect
+    md_recalibrate(&md, tt, 5000000, MD_WHY_BUTTON);
+    CHECK(md.phase == MD_CAL_WAIT && md.why == MD_WHY_BUTTON && md_take_cal_event(&md));
+    FEED(0.04f, 4.9);
+    CHECK(md.phase == MD_CAL_WAIT && md.ring_n == 0 && !md_take_cal_event(&md));
+    FEED(0.04f, 0.2);
+    CHECK(md.phase == MD_CAL_COLLECT && md.ring_n > 0 && md_take_cal_event(&md));
+    #undef FEED
+
+    // ---- Verdict hysteresis, scores set directly ----
+    md_init(&md, &mc, 0);
+    md.floor = 0.04f; md.phase = MD_CAL_TRACK;
+    md.collect_from = INT64_MAX;                             // freeze the floor
+    md_stream_t *st = &md.s[1];
+    st->n = 10; st->t_last = 1000000;
+    #define SET(sv, lv) (st->score_s = (sv) * 0.04f, st->score_l = (lv) * 0.04f)
+    SET(1.0f, 1.0f); CHECK(md_eval(&md, 1000000) == 0 && !md.motion);
+    SET(2.9f, 1.0f); CHECK(md_eval(&md, 1000000) == 1 && md.m_short && !md.m_long);
+    SET(2.1f, 1.0f); CHECK(md_eval(&md, 1000000) == 0 && md.motion);       // above off
+    SET(1.9f, 1.0f); CHECK(md_eval(&md, 1000000) == -1 && !md.motion);
+    SET(1.0f, 1.45f); CHECK(md_eval(&md, 1000000) == 1 && md.m_long && !md.m_short);
+    SET(1.0f, 1.25f); CHECK(md_eval(&md, 1000000) == 0 && md.motion);      // above off
+    SET(1.0f, 1.15f); CHECK(md_eval(&md, 1000000) == -1);
+    SET(2.9f, 1.6f); CHECK(md_eval(&md, 1000000) == 1);                    // both
+    SET(1.0f, 1.6f); CHECK(md_eval(&md, 1000000) == 0 && md.motion);       // long holds it
+    SET(5.0f, 5.0f);
+    CHECK(md_eval(&md, 1000000 + 2100000) == -1);                          // stale stream
+    float ms, ml;
+    md_max_scores(&md, 1000000 + 2100000, &ms, &ml);
+    CHECK(ms < 0 && ml < 0);
+    md.floor = 0;                                            // floor lost -> still
+    st->t_last = 5000000; SET(9.0f, 9.0f);
+    CHECK(md_eval(&md, 5000000) == 0 && !md.motion);
+    #undef SET
+
+    // Long-window input is capped at long_cap x floor; the short window isn't
+    md_init(&md, &mc, 0);
+    md.floor = 0.04f;
+    for (int i = 0; i < 1000; i++) {
+        for (int j = 0; j < 128; j += 2) cb[j + 1] = (int8_t)(((i * 7 + j * 13) % 60) + 10);
+        md_update(&md, 0, 1, i * 10000LL, -50, cb, 128);
+    }
+    CHECK(md.s[1].score_s > mc.long_cap * 0.04f);
+    CHECK(md.s[1].score_l > 0 && md.s[1].score_l <= mc.long_cap * 0.04f * 1.0001f);
+
+    // ---- RSSI step = board moved -> recalibrate ----
+    md_init(&md, &mc, 0);
+    md_take_cal_event(&md);
+    for (int i = 0; i < 128; i += 2) { cb[i] = 0; cb[i + 1] = 40; }
+    int recal_at = -1;
+    for (int i = 0; i < 3000; i++) {                         // 30 s at 100 Hz
+        int r = -60;
+        if (i >= 1500 && i < 1600) r = -70;                  // 1 s dip: someone walks past
+        md_update(&md, 0, 1, i * 10000LL, r, cb, 128);
+        if (md.why == MD_WHY_RSSI && recal_at < 0) recal_at = i;
+    }
+    CHECK(recal_at < 0);                                     // brief dip ignored
+    for (int i = 3000; i < 4500; i++) {                      // board moved: -60 -> -52 dBm
+        md_update(&md, 0, 1, i * 10000LL, -52, cb, 128);
+        if (md.why == MD_WHY_RSSI && recal_at < 0) recal_at = i;
+    }
+    CHECK(recal_at > 3000 && recal_at < 3800);               // within ~8 s
+    CHECK(md.phase == MD_CAL_WAIT && md.floor == 0);
+    int recals = 0;                                          // and only once
+    for (int i = 4500; i < 6000; i++) {
+        int before = md.cal_event; md.cal_event = false;
+        md_update(&md, 0, 1, i * 10000LL, -52, cb, 128);
+        recals += md.cal_event; md.cal_event = before;
+    }
+    CHECK(recals == 0);
+    // A channel change before any floor (start-up scan) is still the boot calibration
+    md_init(&md, &mc, 0);
+    md_reset(&md, 1000000);
+    CHECK(md.why == MD_WHY_BOOT && md.phase == MD_CAL_WAIT);
+    md.floor = 0.04f;
+    // Channel change: streams cleared, settle, recalibrate
+    md_reset(&md, 70000000);
+    CHECK(md.why == MD_WHY_CHANNEL && md.phase == MD_CAL_WAIT && md.s[1].n == 0);
+    CHECK(md_update(&md, 0, 1, 70500000, -50, cb, 128) < 0 && md.s[1].n == 0);   // settling
+
+    // Glitch filter: a brief, very different shape is ignored; a lasting one is accepted
+    md_init(&md, &mc, 0);
+    int8_t flat[128], odd[128];
+    for (int i = 0; i < 128; i += 2) {
+        flat[i] = odd[i] = 0;
+        flat[i + 1] = 40;
+        odd[i + 1] = (i / 2) % 2 ? 70 : 10;                   // shape distance ~0.75
+    }
+    tt = 0;
+    for (int i = 0; i < 300; i++, tt += 10000) md_update(&md, 0, 1, tt, -50, flat, 128);
+    uint32_t n0 = md.s[1].n;
+    int ignored = 0;
+    for (int i = 0; i < 30; i++, tt += 10000)                 // 0.3 s router glitch
+        ignored += md_update(&md, 0, 1, tt, -50, odd, 128) < 0;
+    CHECK(ignored == 30 && md.s[1].n_glitch == 30 && md.s[1].n == n0);
+    sc = md_update(&md, 0, 1, tt, -50, flat, 128);           // snaps back: unaffected
+    tt += 10000;
+    CHECK(sc >= 0 && sc < 1e-6f && md.s[1].n == n0 + 1);
+    // Small changes pass straight through
+    int8_t near_flat[128];
+    memcpy(near_flat, flat, sizeof flat);
+    for (int i = 1; i < 128; i += 4) near_flat[i] = 50;
+    CHECK(md_update(&md, 0, 1, tt, -50, near_flat, 128) >= 0);
+    tt += 10000;
+    CHECK(md.s[1].n_glitch == 30);
+    // A new shape that lasts (board moved, furniture shifted) is accepted after glitch_hold
+    int64_t t_odd = tt;
+    while (md_update(&md, 0, 1, tt, -50, odd, 128) < 0 && tt - t_odd < 10000000) tt += 10000;
+    CHECK(tt - t_odd >= mc.glitch_hold_us - 10000 && tt - t_odd <= mc.glitch_hold_us);   // since the last good packet
+    uint32_t g = md.s[1].n_glitch;
+    tt += 10000;
+    CHECK(md_update(&md, 0, 1, tt, -50, odd, 128) >= 0 && md.s[1].n_glitch == g);
+
+    // Fuzz: random frames must never crash or over-read (ASan watches)
+    srand(1);
+    int fuzzed = 0;
+    for (int it = 0; it < 200000; it++) {
+        int len = rand() % 300;
+        uint8_t *buf = malloc(len ? len : 1);
+        for (int i = 0; i < len; i++) buf[i] = (uint8_t)rand();
+        if (len) buf[0] = 0x80;
+        if (len > 40 && (it & 1)) { buf[36] = 0; buf[37] = 9; }
+        parse_beacon(buf, len, "MyNetwork", &b);
+        free(buf);
+        fuzzed++;
+    }
+    printf("fuzz: %d random frames parsed without crashing\n", fuzzed);
+
+    printf("%d passed, %d failed\n", passes, fails);
+    if (fails == 0) printf("ALL C TESTS PASSED\n");
+    return fails ? 1 : 0;
+}
