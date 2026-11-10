@@ -25,6 +25,7 @@ CFG = dict(
     settle_us=1_000_000,                 # ignore data after a channel change
     on_short=2.8, off_short=2.0,         # thresholds, multiples of the floor
     on_long=1.4, off_long=1.2,
+    short_gate=1.2,                      # short window starts motion only if long > this x floor (0 = off)
     long_cap=3.0,                        # long window input cap, x floor
     sample_us=100_000, floor_every_us=1_000_000,
     floor_min_n=100, floor_pct=10, floor_up_per_s=0.01,
@@ -308,7 +309,7 @@ class MotionDetector:
         if f <= 0:
             self.m_short = self.m_long = False
         else:
-            if not self.m_short and ms > c['on_short'] * f:
+            if not self.m_short and ms > c['on_short'] * f and ml > c['short_gate'] * f:
                 self.m_short = True
             elif self.m_short and ms < c['off_short'] * f:
                 self.m_short = False

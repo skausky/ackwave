@@ -514,6 +514,7 @@ typedef struct {
     int64_t settle_us;              // ignore data this long after a channel change
     float   on_short, off_short;    // thresholds, multiples of the floor
     float   on_long, off_long;
+    float   short_gate;             // short window starts motion only if long > this x floor (0 = off)
     float   long_cap;               // long window input cap, multiple of the floor
     int64_t sample_us;              // floor sample period
     int64_t floor_every_us;         // floor update period
@@ -544,6 +545,7 @@ static inline void md_cfg_default(md_cfg_t *c) {
     c->settle_us = 1000000;
     c->on_short = 2.8f;  c->off_short = 2.0f;
     c->on_long = 1.4f;   c->off_long = 1.2f;
+    c->short_gate = 1.2f;
     c->long_cap = 3.0f;
     c->sample_us = 100000;  c->floor_every_us = 1000000;
     c->floor_min_n = 100;   c->floor_pct = 10;
@@ -843,7 +845,7 @@ static inline int md_eval(motion_det_t *d, int64_t now_us) {
     if (f <= 0) {
         d->m_short = d->m_long = false;
     } else {
-        if (!d->m_short && ms > c->on_short * f) d->m_short = true;
+        if (!d->m_short && ms > c->on_short * f && ml > c->short_gate * f) d->m_short = true;
         else if (d->m_short && ms < c->off_short * f) d->m_short = false;
         if (!d->m_long && ml > c->on_long * f) d->m_long = true;
         else if (d->m_long && ml < c->off_long * f) d->m_long = false;

@@ -173,7 +173,7 @@ It finds the board, keeps the PC from sleeping while it runs, and reconnects if 
 
 ### Running unplugged
 
-The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion, dim **blue** = calibrating, dim **yellow** = looking for the router, **off** = still. It flashes **white** for half a second at power-on. With a buzzer, each event has its own sound:
+The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion (brighter = stronger), **amber fading over 30 s** = motion just ended, a quick dim **purple** flicker = a blip too faint to count (sometimes far-away movement), slow dim **blue pulse** = calibrating, dim **yellow** = looking for the router, **off** = still. It flashes **white** for half a second at power-on. With a buzzer, each event has its own sound:
 
 High and loud = something is happening, soft and falling = settling down, low = a problem.
 

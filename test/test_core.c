@@ -574,8 +574,9 @@ int main(void) {
     st->n = 10; st->t_last = 1000000;
     #define SET(sv, lv) (st->score_s = (sv) * 0.04f, st->score_l = (lv) * 0.04f)
     SET(1.0f, 1.0f); CHECK(md_eval(&md, 1000000) == 0 && !md.motion);
-    SET(2.9f, 1.0f); CHECK(md_eval(&md, 1000000) == 1 && md.m_short && !md.m_long);
-    SET(2.1f, 1.0f); CHECK(md_eval(&md, 1000000) == 0 && md.motion);       // above off
+    SET(2.9f, 1.0f); CHECK(md_eval(&md, 1000000) == 0 && !md.motion);      // a blip: long flat
+    SET(2.9f, 1.25f); CHECK(md_eval(&md, 1000000) == 1 && md.m_short && !md.m_long);
+    SET(2.1f, 1.0f); CHECK(md_eval(&md, 1000000) == 0 && md.motion);       // above off, gate no longer matters
     SET(1.9f, 1.0f); CHECK(md_eval(&md, 1000000) == -1 && !md.motion);
     SET(1.0f, 1.45f); CHECK(md_eval(&md, 1000000) == 1 && md.m_long && !md.m_short);
     SET(1.0f, 1.25f); CHECK(md_eval(&md, 1000000) == 0 && md.motion);      // above off

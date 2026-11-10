@@ -214,12 +214,18 @@ static void buzzer_init(void) {
 
 
 // ---------------- Status LED (on-board WS2812) ----------------
-// red = motion, dim blue = calibrating, dim yellow = looking for the router,
-// off = still. Only control_task writes it (led_update), so no locking.
+// red = motion (brighter = stronger), amber fading over 30 s = motion just
+// ended, quick dim purple = a blip too faint to count, slow blue pulse =
+// calibrating, dim yellow = looking for the router, off = still.
+// Only control_task writes it (led_update); print_task sets the inputs.
 // A missing LED can't be detected; on a pin with nothing on it this is harmless.
-enum { LED_STILL, LED_MOTION, LED_CAL, LED_SEARCH };
 static bool led_ok;
 static volatile bool led_motion, led_cal;    // set by print_task
+static volatile uint8_t led_strength;        // motion score / threshold x10 (10 = at threshold)
+static volatile uint32_t led_blip_ms;        // when a too-faint blip was last seen, 0 = never
+static volatile uint32_t led_ended_ms;       // when motion last ended, 0 = never
+#define LED_FADE_MS  30000                   // "recent motion" amber fade
+#define LED_BLIP_MS  150
 static rmt_channel_handle_t led_chan;
 static rmt_encoder_handle_t led_enc;
 
@@ -262,19 +268,32 @@ static void led_hello(void) {                // white for 0.5 s at power-on
     led_rgb(0, 0, 0);
 }
 
-static void led_show(int what) {
-    static int shown = -1;
-    if (!led_ok || what == shown) return;
-    const uint8_t b = LED_BRIGHT, d = LED_BRIGHT / 5 ? LED_BRIGHT / 5 : 1;
-    bool ok = what == LED_MOTION ? led_rgb(b, 0, 0)
-            : what == LED_CAL    ? led_rgb(0, 0, d)
-            : what == LED_SEARCH ? led_rgb(d, d, 0)
-            :                      led_rgb(0, 0, 0);
-    if (ok) shown = what;                    // else retry next poll
-}
+static uint32_t clock_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 static void led_update(bool searching) {
-    led_show(searching ? LED_SEARCH : led_motion ? LED_MOTION : led_cal ? LED_CAL : LED_STILL);
+    static uint32_t shown = UINT32_MAX;      // last colour sent, 0x00RRGGBB
+    if (!led_ok) return;
+    const int B = LED_BRIGHT, d = B / 5 ? B / 5 : 1;
+    uint32_t t = clock_ms(), ended = led_ended_ms, blip = led_blip_ms;
+    int r = 0, g = 0, b = 0;
+    if (searching) {
+        r = g = d;
+    } else if (led_cal) {                    // 2 s triangle pulse, dim
+        uint32_t ph = t % 2000, tri = ph < 1000 ? ph : 2000 - ph;
+        b = 1 + (int)((2 * d - 1) * tri / 1000);
+    } else if (led_motion) {                 // B/3 at the threshold .. B at 3x
+        int k = led_strength < 10 ? 10 : led_strength > 30 ? 30 : led_strength;
+        r = B / 3 + (B - B / 3) * (k - 10) / 20;
+    } else if (ended && t - ended < LED_FADE_MS) {
+        int a = (B / 3) * (int)(LED_FADE_MS - (t - ended)) / LED_FADE_MS;
+        if (a >= 2) { r = a; g = a / 2; }    // amber; below 2 it would turn red
+    }
+    if (!r && !g && !b && !searching && !led_cal && !led_motion &&
+        blip && t - blip < LED_BLIP_MS) {
+        r = b = d;
+    }
+    uint32_t c = (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+    if (c != shown && led_rgb(r, g, b)) shown = c;   // else retry next poll
 }
 
 // ---------------- Probe mode (hardware bring-up) ----------------
@@ -665,6 +684,16 @@ static void print_task(void *arg) {
 
         md_update(&det, p.src, p.kind, p.ts, p.rssi, p.buf, p.len);
         int change = md_eval(&det, p.ts);
+        {                                    // LED inputs: strength, faint blips
+            float ms, ml, f = det.floor;
+            md_max_scores(&det, p.ts, &ms, &ml);
+            if (f > 0) {
+                float k = ms / (det.c.on_short * f), kl = ml / (det.c.on_long * f);
+                k = (kl > k ? kl : k) * 10.0f;
+                led_strength = k > 255 ? 255 : k < 0 ? 0 : (uint8_t)k;
+                if (!det.motion && ms > det.c.on_short * f) led_blip_ms = clock_ms() | 1;
+            }
+        }
         bool cal = det.phase <= MD_CAL_COLLECT;  // no quiet level yet
         if (led_cal && !cal) buzzer_play(&TUNE_READY);   // calibrated: watching now
         led_cal = cal;
@@ -680,6 +709,7 @@ static void print_task(void *arg) {
                    (int)(ms * 1000), (int)(ml * 1000));
             beep_at = change > 0 ? p.ts + (int64_t)BEEP_AFTER_MS * 1000 : -1;
             if (change < 0 && beeped) buzzer_play(&TUNE_STILL);
+            if (change < 0) led_ended_ms = clock_ms() | 1;
             beeped = false;
         }
         if (beep_at >= 0 && p.ts >= beep_at) {  // lasted long enough: not a brief blip
