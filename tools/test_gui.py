@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Headless test of gui.py: state tracking, reboot/loop handling, and drawing."""
+import re
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt  # noqa: E402
@@ -45,7 +47,7 @@ def main():
     word, _col, detail = s.link_health()
     assert word == 'WEAK' and 'router ACK' in detail, (word, detail)   # demo: 40 ACKs/s
     view.draw()
-    assert 'peak x' in view.recent.get_text() and 'link WEAK' in view.health.get_text()
+    assert re.search(r' x\d+\.\d', view.recent.get_text()) and 'link WEAK' in view.health.get_text()
     view.details = True
     view.draw()
     assert 'pokes' in view.info.get_text(), "details show the raw counters"
@@ -54,8 +56,11 @@ def main():
     assert len(s.dop.rows) > 20 and s.doppler_text().startswith('Doppler')
     assert view.bottom == 'doppler'
     view.draw()
-    assert 'breathing' in view.info.get_text()
-    assert 'Doppler' in view.ax_wf.get_title(loc='left') and 'Doppler' in view.info.get_text()
+    tile = {k: [p.get_text() for p in v] for k, v in view.tiles.items()}
+    assert tile['breathing'][0] == 'BREATHING' and tile['breathing'][1], tile
+    assert tile['doppler'][1] and tile['quiet level'][1] not in ('', 'measuring'), tile
+    assert 'breathing' in view.ax_br.get_title(loc='left')
+    assert 'Doppler' in view.ax_wf.get_title(loc='left') and s.doppler_text().startswith('Doppler')
     view.bottom = 'subcarriers'
     view.draw()
     assert 'normalised amplitude' in view.ax_wf.get_title(loc='left')

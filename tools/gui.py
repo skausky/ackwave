@@ -24,9 +24,10 @@ and dotted. Your mode and picks are remembered in sessions/devices.json.
 Shows: short-window motion score per stream (node x beacon/ACK) and the
 long-window score, both as multiples of the room's quiet level, with the two
 thresholds; the PC's verdict (shaded), the board's own verdict (STATE lines),
-calibration periods, a Doppler spectrogram of the router's ACKs (experimental,
-see doppler.py; key w swaps in the subcarrier waterfall), a breathing-rate
-readout (experimental, breathing.py; needs someone still near the path), and live
+calibration periods, router scans the detector ignored (grey), a Doppler
+spectrogram of the router's ACKs (experimental, doppler.py; key w swaps in the
+subcarrier waterfall), a breathing-rate strip (experimental, breathing.py;
+needs someone still near the path), header tiles for both, and live
 packet rates / firmware counters. The quiet level comes from the board's
 CALIB lines (so PC and board agree); without them the PC measures its own.
 """
@@ -49,6 +50,8 @@ from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 BG, PANEL, FG, DIM = '#101418', '#171c22', '#e6e9ed', '#7d8794'
 MOTION_C, STILL_C, LONG_C, CAL_C = '#ff5a4f', '#3ecf8e', '#f2f4f7', '#7d8794'
 BRIEF_C = '#ffb547'
+SCAN_C = '#9aa5b8'                              # router scans (ignored by the detector)
+GRID_C = '#2a313a'
 WINDOWS = (30.0, 120.0, 600.0)                  # selectable detail windows (s)
 BRIEF_S = 2.0                                   # as record.py: shorter = brief blip
 COLORS = ['#4ea8ff', '#ffb547', '#b48cff', '#5fd4d0', '#ff7eb6', '#c3e88d', '#f78c6c', '#89ddff']
@@ -67,6 +70,7 @@ class State:
         self.hist_t, self.hist_s, self.hist_l = [], [], []
         self.hist_motion, self.hist_cal = [], []     # [wall0, wall1 or None]
         self.hist_peak = []                          # peak short score per hist_motion entry
+        self.hist_scans = []                         # [wall0, wall1]: router scans ignored
         self.wall_off, self.last_wall = None, None
         self.reset()
 
@@ -85,6 +89,8 @@ class State:
         self.wf = defaultdict(deque)              # (src, kind) -> deque[(t, vec)]
         self.dop = Doppler(keep_s=self.window_s)  # router-ACK Doppler spectra
         self.br = Breathing()                     # router-ACK breathing rate
+        self.br_hist = deque()                    # (t, reading) for the breathing strip
+        self.scan_spans = []                      # [t0, t1]: router scan suspected
         self.motion_spans = []                    # [t0, t1 or None]
         self.board_states = deque()               # (t, motion: bool)
         self.board_motion = None
@@ -152,7 +158,10 @@ class State:
         self.rssi[key] = d['rssi']
         s = self.det.on_csi(d)
         self.dop.feed(d, t)
-        self.br.feed(d, t)
+        r = self.br.feed(d, t)
+        if r is not None:
+            self.br_hist.append((t, r))
+        self._scan(d, t)
         a = d['amp'][VALID]
         if a.mean() > 0:
             self.wf[key].append((t, a / a.mean()))
@@ -194,6 +203,20 @@ class State:
         if ms is not None and self.hist_motion and self.hist_motion[-1][1] is None:
             self.hist_peak[-1] = max(self.hist_peak[-1], ms / f)
 
+    def _scan(self, d, t):
+        """Track router scans the detector is filtering (ACK gaps, see md_update)."""
+        st = self.det.streams.get((d['src'], 1))
+        if d['kind'] != 1 or st is None or d['ts'] >= st.scan_until:
+            return
+        end = st.scan_until / 1e6
+        w = self.wall()
+        if self.scan_spans and t <= self.scan_spans[-1][1] + 1:
+            self.scan_spans[-1][1] = max(self.scan_spans[-1][1], end)
+            self.hist_scans[-1][1] = max(self.hist_scans[-1][1], self.wall(end))
+        else:
+            self.scan_spans.append([t, end])
+            self.hist_scans.append([w, self.wall(end)])
+
     def _close_spans(self):
         """End open session spans (before a reboot / loop resets the board time)."""
         if self.wall_off is None:
@@ -226,18 +249,28 @@ class State:
             return f"motion for {fmt_age(now - a)}"
         return f"last motion {fmt_age(now - b)} ago"
 
-    def doppler_text(self):
-        """The last second's Doppler reading, for the header."""
+    def doppler_reading(self):
+        """The last second's Doppler: None (no data), {} (nothing moving) or
+        dict(f=Hz, speed=m/s, step=looks like a router step)."""
         rows = [r for r in self.dop.rows if r[0] >= self.now - 1.0]
         if not rows:
-            return 'Doppler: waiting'
+            return None
         fs = [f['f'] for _t, _p, f in rows if f['f'] > 0]
         if len(fs) < 2:                          # one window alone is often noise
-            return 'Doppler: nothing moving'
+            return {}
         f = float(np.median(fs))
         low = np.median([x['low'] for _t, _p, x in rows])
-        txt = f"Doppler {f:4.1f} Hz (~{f * self.dop_wavelength() / 2:.2f} m/s)"
-        return txt + ('  step-like: router?' if low >= 0.75 and f < LOW_HZ else '')
+        return dict(f=f, speed=f * self.dop_wavelength() / 2, step=low >= 0.75 and f < LOW_HZ)
+
+    def doppler_text(self):
+        """The Doppler reading as one line."""
+        r = self.doppler_reading()
+        if r is None:
+            return 'Doppler: waiting'
+        if not r:
+            return 'Doppler: nothing moving'
+        txt = f"Doppler {r['f']:4.1f} Hz (~{r['speed']:.2f} m/s)"
+        return txt + ('  step-like: router?' if r['step'] else '')
 
     def dop_wavelength(self):
         from doppler import wavelength
@@ -275,6 +308,9 @@ class State:
         while self.board_states and self.board_states[0][0] < t0:
             self.board_states.popleft()
         self.motion_spans = [s for s in self.motion_spans if s[1] is None or s[1] >= t0]
+        self.scan_spans = [s for s in self.scan_spans if s[1] >= t0]
+        while self.br_hist and self.br_hist[0][0] < t0:
+            self.br_hist.popleft()
         self.cal_spans = [s for s in self.cal_spans if s[1] is None or s[1] >= t0]
 
     def label(self, key):
@@ -313,34 +349,47 @@ class View:
         plt.rcParams.update({'font.family': 'DejaVu Sans', 'font.size': 9,
                              'text.color': FG, 'axes.labelcolor': DIM,
                              'xtick.color': DIM, 'ytick.color': DIM})
-        self.fig = plt.figure(figsize=(11, 8.4), facecolor=BG)
+        self.fig = plt.figure(figsize=(11.5, 9.4), facecolor=BG)
         try:
             self.fig.canvas.manager.set_window_title('CSI motion sensor')
         except AttributeError:
             pass
         self.details = False                     # 'd': raw firmware counters
         self.bottom = 'doppler'                  # 'w': 'doppler' or 'subcarriers'
-        gs = self.fig.add_gridspec(4, 1, height_ratios=[0.5, 2.05, 1.0, 0.75],
-                                   left=0.07, right=0.97, top=0.97, bottom=0.06, hspace=0.42)
+        # header | live window: motion score, Doppler, breathing | whole session
+        gs = self.fig.add_gridspec(5, 1, height_ratios=[0.62, 1.75, 0.72, 0.42, 0.9],
+                                   left=0.07, right=0.97, top=0.975, bottom=0.05, hspace=0.5)
         self.ax_head = self.fig.add_subplot(gs[0])
         self.ax_score = self.fig.add_subplot(gs[1])
-        self.ax_tl = self.fig.add_subplot(gs[2])
-        self.ax_wf = self.fig.add_subplot(gs[3])
-        for ax in (self.ax_score, self.ax_tl, self.ax_wf):
+        self.ax_wf = self.fig.add_subplot(gs[2])
+        self.ax_br = self.fig.add_subplot(gs[3])
+        self.ax_tl = self.fig.add_subplot(gs[4])
+        for ax in (self.ax_score, self.ax_tl, self.ax_wf, self.ax_br):
             ax.set_facecolor(PANEL)
             for sp in ax.spines.values():
-                sp.set_color('#2a313a')
+                sp.set_color(GRID_C)
         self.ax_head.axis('off')
         head = dict(ha='left', transform=self.ax_head.transAxes)
         mono = dict(head, family='DejaVu Sans Mono')
-        self.badge = self.ax_head.text(0.0, 0.55, '', fontsize=22, fontweight='bold',
+        self.badge = self.ax_head.text(0.0, 0.58, '', fontsize=24, fontweight='bold',
                                        va='center', **head)
-        self.since = self.ax_head.text(0.0, 0.0, '', fontsize=9.5, va='center', color=DIM,
+        self.since = self.ax_head.text(0.0, 0.16, '', fontsize=9.5, va='center', color=DIM,
                                        **head)
         self.health = self.ax_head.text(0.2, 1.0, '', fontsize=9.5, fontweight='bold',
                                         va='top', **mono)
-        self.info = self.ax_head.text(0.2, 0.62, '', fontsize=9, va='top', color=FG, **mono)
-        self.recent = self.ax_head.text(0.66, 0.5, '', fontsize=8.5, va='top', color=FG,
+        # three tiles: label / big value / small detail
+        self.tiles = {}
+        for i, name in enumerate(('breathing', 'doppler', 'quiet level')):
+            x = 0.2 + i * 0.152
+            self.tiles[name] = (
+                self.ax_head.text(x, 0.66, name.upper(), fontsize=7.5, fontweight='bold',
+                                  color=DIM, va='center', **head),
+                self.ax_head.text(x, 0.40, '', fontsize=13, fontweight='bold', va='center', **head),
+                self.ax_head.text(x, 0.14, '', fontsize=8, color=DIM, va='center', **head))
+        self.footer = self.ax_head.text(0.2, -0.12, '', fontsize=7.5, color=DIM, va='center',
+                                        **head)
+        self.info = self.ax_head.text(0.2, 0.72, '', fontsize=9, va='top', color=FG, **mono)
+        self.recent = self.ax_head.text(0.66, 0.54, '', fontsize=8.5, va='top', color=FG,
                                         linespacing=1.25, **mono)
         self.ax_score.set_ylabel('motion score')
         self.ax_wf.set_ylabel('subcarrier')
@@ -438,11 +487,18 @@ class View:
             quiet = f"quiet {det.floor:.4f} ({det.phase}, {src})"
         else:
             quiet = f"measuring quiet level ({det.phase}, {det.why}) - keep still"
+        for parts in self.tiles.values():
+            for p in parts:
+                p.set_visible(not self.details)
+        self.footer.set_visible(not self.details)
+        self.info.set_visible(self.details)
         if not self.details:
-            rows = [quiet + f"   {breathing_text(s.br.last)}",
-                    f"board says {board}   {s.doppler_text()}",
-                    f"devices {len(dv.devs)} heard, poking {len(dv.poking)}/{MAX_DEVS} "
-                    f"({dv.mode})   d = details  w = view"]
+            self._tiles(board, src)
+            rows = ['']
+            self.footer.set_text(
+                f"board says {board}  ·  {len(dv.devs)} devices heard, poking {len(dv.poking)}"
+                f"/{MAX_DEVS} ({dv.mode})  ·  d details  ·  w view"
+                + ('   ·   PAUSED' if self.paused else ''))
         else:
             ch = f"ch {s.channel[0]} ({s.channel[1] or 'start'})" if s.channel else 'searching'
             rows = [f"{ch}   {quiet}, why {det.why}"]
@@ -457,20 +513,86 @@ class View:
                             f"tx err {st['tx_err']}")
                 rows.append(f"queue drops {st['qfull']}  router replies {st.get('reply', 0)}"
                             f"  APs {len(s.nodes)}   d = less")
-        if self.paused:
+        if self.paused and self.details:
             rows[0] += '   [PAUSED]'
         self.info.set_text('\n'.join(rows))
 
-        lines = ['recent motion']
+        lines = ['recent motion           peak']
         for a, dur, peak, going in s.recent_motion():
             what = f"now {fmt_age(dur)}" if going else fmt_age(dur)
             if not going and dur < BRIEF_S:
                 what = 'brief'
             lines.append(f"{time.strftime('%H:%M:%S', time.localtime(a))}  "
-                         f"{what:9s} peak x{peak:.1f}")
+                         f"{what:12s} x{peak:.1f}")
         if len(lines) == 1:
             lines.append('none yet')
         self.recent.set_text('\n'.join(lines))
+
+    def _tiles(self, board, src):
+        """Fill the breathing / Doppler / quiet-level tiles."""
+        s, det = self.s, self.s.det
+        def put(name, value, color, detail):
+            _lab, val, sub_ = self.tiles[name]
+            val.set_text(value)
+            val.set_color(color)
+            sub_.set_text(detail)
+        r = s.br.last
+        if r is None:
+            put('breathing', '…', DIM, 'collecting 40 s')
+        elif r['level'] == 'none':
+            put('breathing', '—', DIM, 'none found')
+        else:
+            put('breathing', f"{r['rate']:.0f} /min", STILL_C if r['level'] == 'clear' else BRIEF_C,
+                f"{r['level']} · last 40 s")
+        d = s.doppler_reading()
+        if d is None:
+            put('doppler', '…', DIM, 'collecting')
+        elif not d:
+            put('doppler', '—', DIM, 'nothing moving')
+        elif d['step']:
+            put('doppler', f"{d['f']:.1f} Hz", BRIEF_C, 'step-like: router?')
+        else:
+            put('doppler', f"{d['f']:.1f} Hz", FG, f"~{d['speed']:.2f} m/s")
+        if det.floor > 0:
+            put('quiet level', f"{det.floor:.4f}", FG, f"{det.phase} · from {src}")
+        else:
+            put('quiet level', 'measuring', CAL_C, 'keep still')
+
+    def _scans(self, ax, t0, label_y=None):
+        """Grey bands where the detector was filtering a router scan."""
+        first = True
+        for a, b in self.s.scan_spans:
+            if b < t0:
+                continue
+            ax.axvspan(max(a, t0), b, color=SCAN_C, alpha=0.16, lw=0)
+            if label_y is not None and first:
+                ax.text(max(a, t0), label_y, ' router scan (ignored)', color=SCAN_C,
+                        fontsize=7.5, va='top')
+                first = False
+
+    def _breathing(self, t0, t1):
+        """Breathing-rate strip on the same clock as the score plot."""
+        s, ax = self.s, self.ax_br
+        ax.cla()
+        ax.set_facecolor(PANEL)
+        ax.axhspan(12, 20, color=STILL_C, alpha=0.05, lw=0)      # typical resting range
+        pts = [(t, r) for t, r in s.br_hist if t >= t0]
+        for level, col, size in (('possible', BRIEF_C, 14), ('clear', STILL_C, 22)):
+            p = [(t, r['rate']) for t, r in pts if r['level'] == level]
+            if p:
+                ax.scatter(*zip(*p), s=size, color=col, lw=0, zorder=3)
+        none = [t for t, r in pts if r['level'] == 'none']
+        if none:
+            ax.scatter(none, [1.5] * len(none), s=4, color=DIM, lw=0, alpha=0.6)
+        ax.set_xlim(t0, t1)
+        ax.set_ylim(0, 36)
+        ax.set_yticks([0, 12, 24, 36])
+        ax.set_ylabel('/min')
+        ax.grid(color=GRID_C, lw=0.6)
+        self._clock_axis(ax)
+        ax.set_title("breathing rate (experimental): green = clear, amber = possible; "
+                     "needs someone still near the board-router line, covers the last 40 s",
+                     color=DIM, fontsize=8.5, loc='left')
 
     def draw(self):
         s, ax = self.s, self.ax_score
@@ -517,6 +639,7 @@ class View:
             gaps = np.where(np.diff(t) > max(0.5, win / 600))[0] + 1
             t, v = np.insert(t, gaps, np.nan), np.insert(v, gaps, np.nan)
             ax.plot(t, v, color=LONG_C, lw=2.2, label='long (4 s)')
+        self._scans(ax, t0, label_y=ymax * 0.97)
         for h in s.hops:
             if h >= t0:
                 ax.axvline(h, color=FG, lw=0.8, alpha=0.5)
@@ -543,6 +666,7 @@ class View:
                       labelcolor=FG, fontsize=8, ncol=4)
 
         self._timeline()
+        self._breathing(t0, t1)
         self.ax_wf.cla()
         self.ax_wf.set_facecolor(PANEL)
         self.ax_wf.set_xlabel('')
@@ -558,6 +682,7 @@ class View:
             self.ax_wf.imshow(m, aspect='auto', origin='lower', cmap='magma', vmin=0, vmax=2,
                               extent=(ts[0], ts[-1] if len(ts) > 1 else ts[0] + 0.1, 0, len(VALID)),
                               interpolation='nearest')
+            self.ax_wf.set_xlim(ts[0], ts[-1] if len(ts) > 1 else ts[0] + 0.1)
             self._clock_axis(self.ax_wf)
             self.ax_wf.set_title(f"normalised amplitude, {s.label(key)}",
                                  color=DIM, fontsize=8.5, loc='left')
@@ -577,6 +702,8 @@ class View:
                       vmax=20, extent=(ts[0], ts[-1], 0, FREQS[-1]), interpolation='nearest')
             ax.set_xlim(t0, t1)
             self._clock_axis(ax)
+        ax.set_xlim(t0, t1)
+        self._scans(ax, t0)
         ax.set_ylim(0, FREQS[-1])
         ax.axhline(LOW_HZ, color=DIM, lw=0.6, ls=':')
         ax.set_title("Doppler of the router ACKs, dB over the quiet room (experimental): movement = "
@@ -597,7 +724,7 @@ class View:
         s, ax = self.s, self.ax_tl
         ax.cla()
         ax.set_facecolor(PANEL)
-        ax.grid(color='#2a313a', lw=0.6)
+        ax.grid(color=GRID_C, lw=0.6)
         on_s, on_l = s.det.c['on_short'], s.det.c['on_long']
         ymax = on_s * 1.8
         day = 86400.0                             # matplotlib dates: days since 1970
@@ -615,6 +742,9 @@ class View:
             ax.broken_barh(long_, (0, ymax), color=MOTION_C, alpha=0.35, lw=0)
         if brief:
             ax.vlines(brief, 0, ymax * 0.25, color=BRIEF_C, lw=0.8, alpha=0.8)
+        if s.hist_scans:                          # router scans the detector ignored
+            ax.vlines([a / day for a, _b in s.hist_scans], ymax * 0.85, ymax, color=SCAN_C,
+                      lw=1.0, alpha=0.9)
         if s.hist_t:
             t = np.array(s.hist_t, float) + 0.5
             for vals, col, lw in ((s.hist_s, COLORS[0], 0.7), (s.hist_l, LONG_C, 1.1)):
@@ -632,8 +762,9 @@ class View:
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M' if end - start > 300 else '%H:%M:%S', tz=tz))
         n_long, n_brief = s.session_counts()
         since = time.strftime('%H:%M', time.localtime(start))
-        title = (f"session since {since}: {n_long} motion period(s), {n_brief} brief blip(s)"
-                 "   (red = motion, orange ticks = brief, grey = calibrating)")
+        title = (f"session since {since}: {n_long} motion period(s), {n_brief} brief blip(s), "
+                 f"{len(s.hist_scans)} router scan(s) ignored   (red = motion, orange = brief, "
+                 "grey ticks at top = router scan, grey = calibrating)")
         if self.log_name:
             title += f"   logging to {self.log_name}"
         ax.set_title(title, color=DIM, fontsize=8.5, loc='left')
