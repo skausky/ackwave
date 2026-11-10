@@ -31,9 +31,13 @@ CFG = dict(
     floor_lo=0.005, floor_hi=0.2,
     rssi_tau_fast=5.0, rssi_tau_slow=60.0, rssi_step_db=4.0,
     rssi_min_age_us=10_000_000,
-    glitch_shape=0.2,                    # ignore packets whose shape jumps this far...
+    glitch_shape=0.4,                    # ignore packets whose shape jumps this far...
     glitch_hold_us=5_000_000,            # ...unless the new shape lasts this long
     tau_ref=1.0,                         # shape reference average (s)
+    scan_shape=0.2,                      # stricter limit around a router scan:
+    scan_gap_us=100_000,                 # a gap this long...
+    scan_gap_ratio=4.0,                  # ...and this many typical intervals
+    scan_hold_us=2_000_000,              # strict for this long after it
 )
 SETTLE_US = CFG['settle_us']
 TOP_K = 8
@@ -118,11 +122,14 @@ def parse_line(line):
 
 class Stream:
     __slots__ = ('n', 'n_glitch', 't_start', 't_last', 'rssi_t0', 'score_s', 'score_l',
+                 't_heard', 'scan_until', 'scan_gap_at', 'iv_us',
                  'rssi_f', 'rssi_s', 'lp', 'hp', 'es', 'el', 'ref')
 
     def __init__(self):
         self.n = self.n_glitch = 0
         self.t_start = self.t_last = self.rssi_t0 = 0
+        self.t_heard = self.scan_until = self.scan_gap_at = 0
+        self.iv_us = 0.0
         self.score_s = self.score_l = None
         self.rssi_f = self.rssi_s = 0.0
         self.lp = self.hp = self.es = self.el = self.ref = None
@@ -182,18 +189,32 @@ class MotionDetector:
         x = a / mean
         s = self.streams.setdefault((d['src'], d['kind']), Stream())
         if s.n > 0:
-            # Glitch check (see md_update): ignore a sudden big shape change
-            # unless it lasts glitch_hold
+            # Scan check (see md_update), ACK streams only: a gap far longer than
+            # usual means the router is scanning other channels; stricter for scan_hold
+            gap = ts - s.t_heard
+            if (d['kind'] == 1 and gap > c['scan_gap_us'] and s.iv_us > 0
+                    and gap > c['scan_gap_ratio'] * s.iv_us):
+                s.scan_until = ts + c['scan_hold_us']
+                s.scan_gap_at = ts
+            elif gap >= 0:                   # typical interval: falls fast, rises slowly
+                w = 0.5 if gap < s.iv_us else 0.05
+                s.iv_us = s.iv_us + w * (gap - s.iv_us) if s.iv_us > 0 else float(gap)
+            s.t_heard = ts
+            # Glitch check: ignore a sudden big shape change unless it lasts glitch_hold
             since = ts - s.t_last
-            if (np.abs(x - s.ref).mean() > c['glitch_shape']
+            scan = ts < s.scan_until
+            if (np.abs(x - s.ref).mean() > c['scan_shape' if scan else 'glitch_shape']
                     and since < c['glitch_hold_us']):
                 s.n_glitch += 1
+                if scan:                     # stay strict, but not past glitch_hold after the gap
+                    s.scan_until = min(ts + c['scan_hold_us'], s.scan_gap_at + c['glitch_hold_us'])
                 return None
             a_r = 1.0 if since >= c['glitch_hold_us'] else _alpha(max(0, since) * 1e-6, c['tau_ref'])
             s.ref += a_r * (x - s.ref)
         if s.n == 0:
             s.lp, s.hp, s.ref = x.copy(), x.copy(), x.copy()
             s.es, s.el = np.zeros_like(x), np.zeros_like(x)
+            s.t_heard, s.scan_until, s.scan_gap_at, s.iv_us = ts, 0, 0, 0.0
             s.t_start = s.rssi_t0 = ts
             s.rssi_f = s.rssi_s = float(d['rssi'])
         else:
@@ -227,9 +248,12 @@ class MotionDetector:
     def max_scores(self, now_us):
         """(short, long): highest scores among live streams, None if none."""
         stale = self.c['stale_s'] * 1e6
-        def alive(key):
+        def alive(key):                  # live, or mid router-scan (md_scanning)
             s = self.streams.get(key)
-            return s is not None and now_us - s.t_last <= stale
+            if s is None or s.n == 0:
+                return False
+            return (now_us - s.t_last <= stale
+                    or (now_us - s.t_heard <= stale and now_us < s.scan_until))
         # As on the board: APs decide, and an AP's own frames only while it
         # has no live ACK stream (they're sparse mixed traffic)
         live = [s for (src, k), s in self.streams.items()

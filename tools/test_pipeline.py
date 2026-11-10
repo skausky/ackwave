@@ -25,9 +25,9 @@ HOLD_S = 10.0           # ...and cleared within this of its end
 
 
 # ---------------------------------------------------------------- runners
-def run_python(lines):
+def run_python(lines, cfg=None):
     """Feeds lines like the board would. Returns a dict of everything observed."""
-    det = MotionDetector()
+    det = MotionDetector(cfg)
     det.take_cal_event()
     r = dict(scores={}, states=[], calib=[], floors=[], verdict=[], n_csi=0, n_bad=0,
              hops=[], det=det)
@@ -267,9 +267,27 @@ def test_router_scan():
     steps = [('still', 25), ('scan', 3.5), ('still', 20), ('motion', 4), ('still', 12)]
     meta, lines, py = scenario('scan', steps)
     got = motion_times(py['states'])
-    ignored = sum(s.n_glitch for s in py['det'].streams.values())
-    print(f"router scan at 25-28.5 s (motion from 45 s): motion {got}, {ignored} packets ignored")
-    assert ignored > 50, "scan packets weren't ignored"
+    def ignored(t0_s, t1_s, cfg=None):       # glitches per stream between t0 and t1
+        def ts(line):
+            try:
+                return int(line.split(',')[1])
+            except (IndexError, ValueError):
+                return 0
+        def upto(t_s):
+            r = run_python([l for l in lines if ts(l) < t_s * 1e6], cfg)
+            return {k: s.n_glitch for k, s in r['det'].streams.items()}
+        a, b = upto(t0_s), upto(t1_s)
+        return {k: v - a.get(k, 0) for k, v in b.items()}
+    in_scan = ignored(0, 30)
+    print(f"router 0 scan at 25-28.5 s (motion from 45 s): motion {got}, "
+          f"{sum(in_scan.values())} scan packets ignored")
+    # 3 switched bursts x 0.325 s x 40 ACKs/s = 39 packets, all of them ignored
+    assert in_scan.get((0, 1), 0) >= 39, "the scanning router's packets weren't ignored"
+    assert not in_scan.get((1, 1), 0), "the other router's packets were ignored"
+    # The scan rule must not filter any extra packets of the real movement
+    # (the synthetic movement is strong enough that the normal limit drops a few)
+    moving, moving_no_scan_rule = ignored(44.9, 70), ignored(44.9, 70, dict(scan_shape=0.4))
+    assert moving == moving_no_scan_rule, f"scan rule filtered movement: {moving_no_scan_rule} -> {moving}"
     assert not [m for m in got if m[0] < 44.9], f"router scan flagged as motion: {got}"
     check_motion_found('scan', py, meta)
     check_c_agrees('scan', py, lines)

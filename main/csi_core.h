@@ -504,6 +504,13 @@ typedef struct {
                                     // ones by more than this is ignored...
     int64_t glitch_hold_us;         // ...unless the new shape lasts this long
     float   tau_ref;                // shape reference average (s)
+    // Router background scans: the stream goes quiet in gaps (the router is on
+    // another channel) and comes back with a milder shape switch. Right after
+    // such a gap, and while that switch lasts, the stricter limit applies.
+    float   scan_shape;             // glitch limit while a scan is suspected
+    int64_t scan_gap_us;            // a gap at least this long...
+    float   scan_gap_ratio;         // ...and this many typical intervals means a scan
+    int64_t scan_hold_us;           // stricter limit for this long after it
 } md_cfg_t;
 
 static inline void md_cfg_default(md_cfg_t *c) {
@@ -520,13 +527,19 @@ static inline void md_cfg_default(md_cfg_t *c) {
     c->floor_lo = 0.005f;   c->floor_hi = 0.2f;
     c->rssi_tau_fast = 5.0f; c->rssi_tau_slow = 60.0f;
     c->rssi_step_db = 4.0f;  c->rssi_min_age_us = 10000000;
-    c->glitch_shape = 0.2f;  c->glitch_hold_us = 5000000;  c->tau_ref = 1.0f;
+    c->glitch_shape = 0.4f;  c->glitch_hold_us = 5000000;  c->tau_ref = 1.0f;
+    c->scan_shape = 0.2f;    c->scan_gap_us = 100000;  c->scan_gap_ratio = 4.0f;
+    c->scan_hold_us = 2000000;
 }
 
 typedef struct {
     uint32_t n;
     uint32_t n_glitch;                      // packets ignored as glitches
     int64_t  t_start, t_last, rssi_t0;      // microseconds; rssi_t0 = RSSI baseline start
+    int64_t  t_heard;                       // last packet, including ignored glitches
+    int64_t  scan_until;                    // stricter glitch limit until then
+    int64_t  scan_gap_at;                   // when the last scan-like gap ended
+    float    iv_us;                         // typical packet interval
     float    score_s, score_l;              // last scores, < 0 = not ready
     float    rssi_f, rssi_s;                // fast / slow RSSI averages
     float    lp[N_SC], hp[N_SC], es[N_SC], el[N_SC];
@@ -622,16 +635,38 @@ static inline float md_update(motion_det_t *d, int node, int kind, int64_t ts, i
     md_stream_t *s = &d->s[node * 2 + kind];
     const md_cfg_t *c = &d->c;
     if (s->n > 0) {
+        // Scan check, ACK streams only (steady 100/s; a router's own frames are
+        // bursty): a gap far longer than usual means the router left the
+        // channel for a background scan (people never stop the ACKs). Until
+        // scan_hold after it, the stricter scan_shape limit applies below.
+        int64_t gap = ts - s->t_heard;
+        if (kind == CSI_KIND_ACK && gap > c->scan_gap_us && s->iv_us > 0 &&
+            (float)gap > c->scan_gap_ratio * s->iv_us) {
+            s->scan_until = ts + c->scan_hold_us;
+            s->scan_gap_at = ts;
+        } else if (gap >= 0) {               // typical interval: falls fast, rises slowly
+            float g = (float)gap, w = g < s->iv_us ? 0.5f : 0.05f;
+            s->iv_us = s->iv_us > 0 ? s->iv_us + w * (g - s->iv_us) : g;
+        }
+        s->t_heard = ts;
         // Glitch check: some routers briefly switch to a very different channel
         // shape and snap back (seen every ~20 min). People never change the
         // shape that much that fast, so ignore such packets; a new shape that
         // lasts glitch_hold is real (e.g. the board was moved) and is accepted.
+        // Around a scan the switch is milder (0.26-0.34), hence scan_shape;
+        // people moving reach that only in single packets and never stop the
+        // ACKs, so the normal limit stays loose and can't lock out movement.
         float dist = 0;
         for (int i = 0; i < N_SC; i++) dist += fabsf(a[i] / mean - s->ref[i]);
         dist /= N_SC;
         int64_t since = ts - s->t_last;
-        if (dist > c->glitch_shape && since < c->glitch_hold_us) {
+        bool scan = ts < s->scan_until;
+        if (dist > (scan ? c->scan_shape : c->glitch_shape) && since < c->glitch_hold_us) {
             s->n_glitch++;
+            if (scan) {                      // the switch lasts: stay strict, but never
+                int64_t u = ts + c->scan_hold_us, cap = s->scan_gap_at + c->glitch_hold_us;
+                s->scan_until = u < cap ? u : cap;   // past glitch_hold after the gap
+            }
             return -1;
         }
         float a_r = since >= c->glitch_hold_us ? 1.0f
@@ -643,6 +678,9 @@ static inline float md_update(motion_det_t *d, int node, int kind, int64_t ts, i
             s->lp[i] = s->hp[i] = s->ref[i] = a[i] / mean;
             s->es[i] = s->el[i] = 0;
         }
+        s->t_heard = ts;
+        s->scan_until = s->scan_gap_at = 0;
+        s->iv_us = 0;
         s->t_start = ts;
         s->rssi_f = s->rssi_s = (float)rssi;
         s->rssi_t0 = ts;
@@ -701,6 +739,11 @@ static inline float md_update(motion_det_t *d, int node, int kind, int64_t ts, i
 static inline bool md_live(const md_stream_t *s, int64_t now_us, int64_t stale) {
     return s->n && now_us - s->t_last <= stale;
 }
+// An ACK stream mid router-scan: it may score nothing for a few seconds (its
+// packets are ignored), but the router's own frames must not take over then
+static inline bool md_scanning(const md_stream_t *s, int64_t now_us, int64_t stale) {
+    return s->n && now_us - s->t_heard <= stale && now_us < s->scan_until;
+}
 static inline void md_max_scores(const motion_det_t *d, int64_t now_us,
                                  float *short_out, float *long_out) {
     float bs = -1, bl = -1;
@@ -708,7 +751,8 @@ static inline void md_max_scores(const motion_det_t *d, int64_t now_us,
     for (int i = 0; i < MAX_APS * 2; i++) {
         const md_stream_t *s = &d->s[i];
         if (!md_live(s, now_us, stale) || s->score_s < 0) continue;
-        if (i % 2 == CSI_KIND_AP && md_live(&d->s[i + 1], now_us, stale)) continue;
+        if (i % 2 == CSI_KIND_AP && (md_live(&d->s[i + 1], now_us, stale) ||
+                                     md_scanning(&d->s[i + 1], now_us, stale))) continue;
         if (s->score_s > bs) bs = s->score_s;
         if (s->score_l > bl) bl = s->score_l;
     }

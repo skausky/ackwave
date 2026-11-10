@@ -76,9 +76,9 @@ def schedule(t_end):
 # ('relocate', rssi_change_db, noise_factor): the board is moved (new multipath) |
 # ('glitch', s): the router briefly switches to a very different channel shape
 # and snaps back (seen on a real ISP gateway every ~20 min); not motion |
-# ('scan', s): the router scans other channels: no packets for 175 ms of every
-# 0.5 s, and every other burst comes back with a milder (~0.3) shape change.
-# Seen every 20 min 2 s on another gateway; scored ~11x before it was filtered
+# ('scan', s): router 0 scans other channels (router 1 carries on): no packets
+# from it for 175 ms of every 0.5 s, and every other burst comes back with a
+# milder (~0.3) shape change. Seen every 20 min 2 s on another gateway
 DEFAULT = [('still', 15), ('motion', 6), ('still', 8), ('hop',),
            ('still', 16), ('motion', 4), ('still', 10)]
 
@@ -171,7 +171,7 @@ def generate(seed=0, scenario=DEFAULT):
         h = links[src].copy()
         if any(a <= t < b for a, b in glitch_spans):
             h = h * glitch_shape
-        scan = [a for a, b in scan_spans if a <= t < b]
+        scan = [a for a, b in scan_spans if a <= t < b] if src == 0 else []
         if scan:
             cycle, phase = divmod(t - scan[0], 0.5)
             if phase < 0.175:                    # off channel: nothing heard
