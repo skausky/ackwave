@@ -638,6 +638,7 @@ void app_main(void) {
 
     gate_init(&gate);
     buzzer_init();                           // never fatal
+    buzzer_beep(300);                        // power-on beep: shows the wiring works
     led_init();                              // never fatal
     led_hello();
 #if CAL_BUTTON_GPIO >= 0
