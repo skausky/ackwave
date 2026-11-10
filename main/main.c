@@ -77,6 +77,9 @@
 #define BUZZER_HZ      2700      // tone for a passive piezo (try a sweep: BEEP,700,<hz>)
 #endif
 #define BEEP_MS        150
+#ifndef BUZZER_SOFT_HZ
+#define BUZZER_SOFT_HZ 2000      // pitch of the quieter status sounds
+#endif
 #ifndef BEEP_AFTER_MS
 #define BEEP_AFTER_MS  2000      // beep once motion has lasted this long; 0 = at once
 #endif
@@ -117,8 +120,18 @@ static void set_ch(int ch) {
 // ---------------- Optional buzzer ----------------
 // A piezo can't be detected electrically, so it's opt-in via BUZZER_GPIO.
 // Any setup failure just disables it; capture keeps running.
+// Sounds are short tunes played by their own task, so a beep never holds up
+// sensing; a new tune cuts off the one playing.
 static bool buzzer_ok;
-static esp_timer_handle_t buzz_off_timer;
+static QueueHandle_t tune_q;
+
+typedef struct { uint16_t hz, ms; } note_t;  // hz 0 = rest
+typedef struct { note_t n[4]; } tune_t;      // ends at the first ms == 0
+
+static const tune_t TUNE_HELLO  = {{{BUZZER_SOFT_HZ, 70}, {3000, 70}, {BUZZER_HZ, 120}}};  // rising chirp
+static const tune_t TUNE_READY  = {{{BUZZER_SOFT_HZ, 50}, {0, 80}, {BUZZER_SOFT_HZ, 50}}}; // two soft blips
+static const tune_t TUNE_MOTION = {{{BUZZER_HZ, BEEP_MS}}};                                  // one loud beep
+static const tune_t TUNE_LOST   = {{{BUZZER_SOFT_HZ, 150}, {1200, 300}}};                   // falling tone
 
 static void buzzer_set(bool on) {
 #if BUZZER_ACTIVE
@@ -129,17 +142,32 @@ static void buzzer_set(bool on) {
 #endif
 }
 
-static void buzz_off_cb(void *arg) { buzzer_set(false); }
-
-// Pitch of the next beeps (passive piezo only; an active buzzer has its own).
-// 0 = back to BUZZER_HZ.
+// Pitch of the next note (passive piezo only; an active buzzer has its own)
 static void buzzer_pitch(int hz) {
 #if !BUZZER_ACTIVE
-    if (BUZZER_GPIO >= 0 && buzzer_ok)
-        ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, hz > 0 ? hz : BUZZER_HZ);
+    ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, hz);
 #else
     (void)hz;
 #endif
+}
+
+static void buzzer_task(void *arg) {
+    tune_t t;
+    xQueueReceive(tune_q, &t, portMAX_DELAY);
+    for (;;) {
+        bool cut = false;
+        for (int i = 0; i < 4 && t.n[i].ms && !cut; i++) {
+            if (t.n[i].hz) buzzer_pitch(t.n[i].hz);
+            buzzer_set(t.n[i].hz != 0);
+            cut = xQueueReceive(tune_q, &t, pdMS_TO_TICKS(t.n[i].ms)) == pdTRUE;
+        }
+        buzzer_set(false);
+        if (!cut) xQueueReceive(tune_q, &t, portMAX_DELAY);
+    }
+}
+
+static void buzzer_play(const tune_t *t) {
+    if (buzzer_ok) xQueueOverwrite(tune_q, t);
 }
 
 static void buzzer_init(void) {
@@ -163,10 +191,12 @@ static void buzzer_init(void) {
         };
         err = ledc_channel_config(&c);
     }
+    if (err == ESP_OK) err = gpio_set_drive_capability(BUZZER_GPIO, GPIO_DRIVE_CAP_3);  // ~40 mA: louder
 #endif
     if (err == ESP_OK) {
-        esp_timer_create_args_t a = { .callback = buzz_off_cb, .name = "buzz_off" };
-        err = esp_timer_create(&a, &buzz_off_timer);
+        tune_q = xQueueCreate(1, sizeof(tune_t));
+        if (!tune_q || xTaskCreate(buzzer_task, "buzzer", 2048, NULL, 2, NULL) != pdPASS)
+            err = ESP_ERR_NO_MEM;
     }
     if (err != ESP_OK) {
         printf("BUZZER,error,%s\n", esp_err_to_name(err));   // keep going without it
@@ -177,13 +207,6 @@ static void buzzer_init(void) {
     printf("BUZZER,gpio%d\n", BUZZER_GPIO);
 }
 
-static void buzzer_beep(int ms) {
-    if (!buzzer_ok) return;
-    esp_timer_stop(buzz_off_timer);          // fine if it wasn't running
-    buzzer_set(true);
-    if (esp_timer_start_once(buzz_off_timer, (uint64_t)ms * 1000) != ESP_OK)
-        buzzer_set(false);
-}
 
 // ---------------- Status LED (on-board WS2812) ----------------
 // red = motion, dim blue = calibrating, dim yellow = looking for the router,
@@ -445,8 +468,8 @@ static void run_cmd(const char *line) {
     int cmd = parse_cmd(line, mac);
     int hz, beep_ms = parse_beep(line, &hz);
     if (beep_ms > 0) {
-        buzzer_pitch(hz);
-        buzzer_beep(beep_ms);
+        tune_t t = {{{(uint16_t)(hz ? hz : BUZZER_HZ), (uint16_t)beep_ms}}};
+        buzzer_play(&t);
         printf(buzzer_ok ? "BEEP,%d,%d\n" : "BEEP,%d,%d,no-buzzer\n", beep_ms, hz ? hz : BUZZER_HZ);
     } else if (cmd == CMD_CAL) {
         cal_request = 1;
@@ -582,6 +605,9 @@ static void control_task(void *arg) {
             int ch = sweep();
             printf("CHANNEL,%" PRId64 ",%d,%s\n", esp_timer_get_time(),
                    ch, ch ? "scan" : "lost");
+            static bool lost;                  // sound once per loss, not every sweep
+            if (!ch && !lost) buzzer_play(&TUNE_LOST);
+            lost = !ch;
         }
     }
 }
@@ -627,7 +653,9 @@ static void print_task(void *arg) {
 
         md_update(&det, p.src, p.kind, p.ts, p.rssi, p.buf, p.len);
         int change = md_eval(&det, p.ts);
-        led_cal = det.phase <= MD_CAL_COLLECT;   // no quiet level yet
+        bool cal = det.phase <= MD_CAL_COLLECT;  // no quiet level yet
+        if (led_cal && !cal) buzzer_play(&TUNE_READY);   // calibrated: watching now
+        led_cal = cal;
         led_motion = det.motion;
         if (md_take_cal_event(&det) || p.ts >= next_calib) {
             next_calib = p.ts + CALIB_EVERY_US;
@@ -642,7 +670,7 @@ static void print_task(void *arg) {
         }
         if (beep_at >= 0 && p.ts >= beep_at) {  // lasted long enough: not a brief blip
             beep_at = -1;
-            if (det.motion) { buzzer_pitch(0); buzzer_beep(BEEP_MS); }
+            if (det.motion) buzzer_play(&TUNE_MOTION);
         }
     }
 }
@@ -657,7 +685,7 @@ void app_main(void) {
 
     gate_init(&gate);
     buzzer_init();                           // never fatal
-    buzzer_beep(300);                        // power-on beep: shows the wiring works
+    buzzer_play(&TUNE_HELLO);                // power-on chirp: shows the wiring works
     led_init();                              // never fatal
     led_hello();
 #if CAL_BUTTON_GPIO >= 0

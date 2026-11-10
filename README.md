@@ -136,7 +136,8 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    | `CSI_PROBE` | 0 | 1 = log every callback (bring-up) |
    | `BUZZER_GPIO` | -1 | piezo pin; -1 = no buzzer |
    | `BUZZER_ACTIVE` | 0 | 0 = passive piezo (PWM tone), 1 = active buzzer |
-| `BUZZER_HZ` | 2700 | tone pitch; find your buzzer's loudest with `BEEP,700,<hz>` |
+| `BUZZER_HZ` | 2700 | motion-beep pitch; find your buzzer's loudest with `BEEP,700,<hz>` |
+| `BUZZER_SOFT_HZ` | 2000 | pitch of the quieter status sounds |
 | `BEEP_AFTER_MS` | 2000 | beep once motion has lasted this long (skips brief blips); 0 = at once |
    | `CAL_BUTTON_GPIO` | 0 | button that recalibrates (BOOT on most boards); -1 = none |
    | `CAL_DELAY_S` | 5 | after a press: time to step away before measuring |
@@ -172,7 +173,14 @@ It finds the board, keeps the PC from sleeping while it runs, and reconnects if 
 
 ### Running unplugged
 
-The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion, dim **blue** = calibrating, dim **yellow** = looking for the router, **off** = still. It flashes **white** for half a second at power-on. With a buzzer it also beeps once motion has lasted 2 s, so brief blips stay silent. Serial output just goes nowhere.
+The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion, dim **blue** = calibrating, dim **yellow** = looking for the router, **off** = still. It flashes **white** for half a second at power-on. With a buzzer, each event has its own sound:
+
+| Sound | Meaning |
+|---|---|
+| rising chirp | powered on |
+| two soft blips | calibrated, watching for motion |
+| one loud beep | motion that has lasted 2 s (brief blips stay silent) |
+| low falling tone | lost the router (once per loss) | Serial output just goes nowhere.
 
 If the LED stays dark, your board has it on another pin: build with `CSI_DEFS="LED_GPIO=38"` (ESP32-S3-DevKitC-1 v1.1).
 
