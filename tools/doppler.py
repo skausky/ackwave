@@ -157,7 +157,7 @@ def main():
                     continue
                 r = dop.feed(ev[1], ev[1]['ts'] / 1e6)
                 if r and w >= t_a:
-                    print(time.strftime('%H:%M:%S', time.localtime(w)) + f"{w % 1:.2f}"[1:]
+                    print(time.strftime('%H:%M:%S', time.localtime(w)) + f".{int(w % 1 * 100):02d}"
                           + f"  {r['power']:5.2f}  {r['low']:4.0%}  {r['f']:5.1f}Hz {r['speed']:4.2f} m/s")
         except EOFError:                         # a session still being written
             pass
