@@ -75,6 +75,9 @@
 #define CALIB_EVERY_US 5000000   // CALIB line period (also sent on every change)
 #define BUZZER_HZ      2700
 #define BEEP_MS        150
+#ifndef BEEP_AFTER_MS
+#define BEEP_AFTER_MS  2000      // beep once motion has lasted this long; 0 = at once
+#endif
 #define WIFI_CORE      0         // default Wi-Fi task core
 
 static node_table_t nodes;
@@ -588,6 +591,7 @@ static void print_task(void *arg) {
     md_init(&det, &cfg, esp_timer_get_time());
     uint32_t epoch = ch_epoch;
     int64_t next_calib = 0;
+    int64_t beep_at = -1;                    // when to beep for the current motion, -1 = no
     csi_pkt_t p;
     for (;;) {
         if (!xQueueReceive(q, &p, portMAX_DELAY)) continue;
@@ -615,7 +619,11 @@ static void print_task(void *arg) {
             md_max_scores(&det, p.ts, &ms, &ml);
             printf("STATE,%" PRId64 ",%s,%d,%d\n", p.ts, change > 0 ? "motion" : "still",
                    (int)(ms * 1000), (int)(ml * 1000));
-            if (change > 0) buzzer_beep(BEEP_MS);
+            beep_at = change > 0 ? p.ts + (int64_t)BEEP_AFTER_MS * 1000 : -1;
+        }
+        if (beep_at >= 0 && p.ts >= beep_at) {  // lasted long enough: not a brief blip
+            beep_at = -1;
+            if (det.motion) buzzer_beep(BEEP_MS);
         }
     }
 }

@@ -136,6 +136,7 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    | `CSI_PROBE` | 0 | 1 = log every callback (bring-up) |
    | `BUZZER_GPIO` | -1 | piezo pin; -1 = no buzzer |
    | `BUZZER_ACTIVE` | 0 | 0 = passive piezo (PWM tone), 1 = active buzzer |
+| `BEEP_AFTER_MS` | 2000 | beep once motion has lasted this long (skips brief blips); 0 = at once |
    | `CAL_BUTTON_GPIO` | 0 | button that recalibrates (BOOT on most boards); -1 = none |
    | `CAL_DELAY_S` | 5 | after a press: time to step away before measuring |
    | `LED_GPIO` | 48 | on-board RGB LED (WS2812); 38 on DevKitC-1 v1.1; -1 = none |
@@ -170,13 +171,18 @@ It finds the board, keeps the PC from sleeping while it runs, and reconnects if 
 
 ### Running unplugged
 
-The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion, dim **blue** = calibrating, dim **yellow** = looking for the router, **off** = still. It flashes **white** for half a second at power-on. With a buzzer it also beeps when motion starts. Serial output just goes nowhere.
+The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion, dim **blue** = calibrating, dim **yellow** = looking for the router, **off** = still. It flashes **white** for half a second at power-on. With a buzzer it also beeps once motion has lasted 2 s, so brief blips stay silent. Serial output just goes nowhere.
 
 If the LED stays dark, your board has it on another pin: build with `CSI_DEFS="LED_GPIO=38"` (ESP32-S3-DevKitC-1 v1.1).
 
 ### Buzzer (optional)
 
-Wire a **passive piezo** between a free GPIO (GPIO 4 is a good choice; avoid strapping pins 0, 3, 45, 46 and USB pins 19, 20) and GND, then set `BUZZER_GPIO 4`. For an **active** buzzer (one that beeps on plain DC), also set `BUZZER_ACTIVE 1`.
+Wire a **passive piezo** between a free GPIO (GPIO 4 is a good choice; avoid strapping pins 0, 3, 45, 46 and USB pins 19, 20) and GND, then set `BUZZER_GPIO 4`. For an **active** buzzer (one that beeps on plain DC, usually sold with a voltage range like 3-24 V), also set `BUZZER_ACTIVE 1`; mind its polarity (+ to the GPIO). The easiest place for these is `main/my_network.h`, which is included first and stays out of git:
+
+```c
+#define BUZZER_GPIO   4
+#define BUZZER_ACTIVE 1
+```
 
 A piezo can't be detected electrically, so the buzzer is opt-in. If the pin can't be set up, the board prints `BUZZER,error,...` and carries on sensing.
 
