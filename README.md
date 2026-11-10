@@ -136,6 +136,7 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    | `CSI_PROBE` | 0 | 1 = log every callback (bring-up) |
    | `BUZZER_GPIO` | -1 | piezo pin; -1 = no buzzer |
    | `BUZZER_ACTIVE` | 0 | 0 = passive piezo (PWM tone), 1 = active buzzer |
+| `BUZZER_HZ` | 2700 | tone pitch; find your buzzer's loudest with `BEEP,700,<hz>` |
 | `BEEP_AFTER_MS` | 2000 | beep once motion has lasted this long (skips brief blips); 0 = at once |
    | `CAL_BUTTON_GPIO` | 0 | button that recalibrates (BOOT on most boards); -1 = none |
    | `CAL_DELAY_S` | 5 | after a press: time to step away before measuring |
@@ -177,7 +178,7 @@ If the LED stays dark, your board has it on another pin: build with `CSI_DEFS="L
 
 ### Buzzer (optional)
 
-Wire a **passive piezo** between a free GPIO (GPIO 4 is a good choice; avoid strapping pins 0, 3, 45, 46 and USB pins 19, 20) and GND, then set `BUZZER_GPIO 4`. For an **active** buzzer (one that beeps on plain DC, usually sold with a voltage range like 3-24 V), also set `BUZZER_ACTIVE 1`; mind its polarity (+ to the GPIO). The easiest place for these is `main/my_network.h`, which is included first and stays out of git:
+Wire a **passive piezo** between a free GPIO (GPIO 4 is a good choice; avoid strapping pins 0, 3, 45, 46 and USB pins 19, 20) and GND, then set `BUZZER_GPIO 4`. For an **active** buzzer (one that beeps on plain DC, usually sold with a voltage range like 3-24 V), also set `BUZZER_ACTIVE 1`; mind its polarity (+ to the GPIO). Many "active" buzzers are much louder driven with a tone at their resonance than with plain DC: try `BUZZER_ACTIVE 0` and a pitch sweep with `BEEP,700,<hz>` (one OSEPP 3-24 V buzzer peaked around 4250 Hz). The easiest place for these is `main/my_network.h`, which is included first and stays out of git:
 
 ```c
 #define BUZZER_GPIO   4
@@ -224,6 +225,7 @@ Commands to the board (one per line on the USB port; the GUI sends them):
 POKE,<mac>      poke a device heard on our network (up to 4)
 UNPOKE,<mac>    stop;  UNPOKE,all  stops all
 CAL             recalibrate, like the BOOT button
+BEEP[,<ms>[,<hz>]]  test beep (1-3000 ms, default 300; pitch 100-10000 Hz)
 ```
 
 ## Project layout

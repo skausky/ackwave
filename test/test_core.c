@@ -352,6 +352,16 @@ int main(void) {
         CHECK(parse_cmd("UNPOKE,allx", cm) == CMD_NONE);
         CHECK(parse_cmd("CAL", cm) == CMD_CAL && parse_cmd("CAL\r\n", cm) == CMD_CAL);
         CHECK(parse_cmd("CALX", cm) == CMD_NONE);
+        int hz;
+        CHECK(parse_beep("BEEP", &hz) == 300 && hz == 0);
+        CHECK(parse_beep("BEEP,150\r\n", &hz) == 150 && hz == 0);
+        CHECK(parse_beep("BEEP,500,3200", &hz) == 500 && hz == 3200);
+        CHECK(parse_beep("BEEP,0", &hz) == -1 && parse_beep("BEEP,3001", &hz) == -1);
+        CHECK(parse_beep("BEEP,", &hz) == -1 && parse_beep("BEEP,12x", &hz) == -1);
+        CHECK(parse_beep("BEEP,500,50", &hz) == -1 && parse_beep("BEEP,500,", &hz) == -1);
+        CHECK(parse_beep("BEEP,1,2,3", &hz) == -1 && parse_beep("BEEPX", &hz) == -1);
+        CHECK(parse_beep("CAL", &hz) == -1);
+        CHECK(parse_cmd("BEEP,150", cm) == CMD_NONE);
         CHECK(parse_cmd(CMD("", "POKE,", BC), cm) == CMD_NONE);   // broadcast refused
         CHECK(parse_cmd(CMD("z", "POKE,", PLUG), cm) == CMD_NONE); // trailing junk
         cb_[strlen(cb_) - 4] = '\0';                              // 5 bytes only

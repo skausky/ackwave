@@ -73,7 +73,9 @@
 #define CSI_OUT_LEN    128       // bytes sent per packet: LLTF only (all we use)
 #define STATS_MS       5000
 #define CALIB_EVERY_US 5000000   // CALIB line period (also sent on every change)
-#define BUZZER_HZ      2700
+#ifndef BUZZER_HZ
+#define BUZZER_HZ      2700      // tone for a passive piezo (try a sweep: BEEP,700,<hz>)
+#endif
 #define BEEP_MS        150
 #ifndef BEEP_AFTER_MS
 #define BEEP_AFTER_MS  2000      // beep once motion has lasted this long; 0 = at once
@@ -129,6 +131,17 @@ static void buzzer_set(bool on) {
 
 static void buzz_off_cb(void *arg) { buzzer_set(false); }
 
+// Pitch of the next beeps (passive piezo only; an active buzzer has its own).
+// 0 = back to BUZZER_HZ.
+static void buzzer_pitch(int hz) {
+#if !BUZZER_ACTIVE
+    if (BUZZER_GPIO >= 0 && buzzer_ok)
+        ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, hz > 0 ? hz : BUZZER_HZ);
+#else
+    (void)hz;
+#endif
+}
+
 static void buzzer_init(void) {
     buzzer_ok = false;
     if (BUZZER_GPIO < 0) { printf("BUZZER,off\n"); return; }
@@ -136,6 +149,7 @@ static void buzzer_init(void) {
 #if BUZZER_ACTIVE
     gpio_config_t io = { .pin_bit_mask = 1ULL << BUZZER_GPIO, .mode = GPIO_MODE_OUTPUT };
     err = gpio_config(&io);
+    if (err == ESP_OK) err = gpio_set_drive_capability(BUZZER_GPIO, GPIO_DRIVE_CAP_3);  // ~40 mA: louder
 #else
     ledc_timer_config_t t = {
         .speed_mode = LEDC_LOW_SPEED_MODE, .duty_resolution = LEDC_TIMER_10_BIT,
@@ -429,7 +443,12 @@ static __attribute__((unused)) void print_poking(void) {   // unused when POKE_H
 static void run_cmd(const char *line) {
     uint8_t mac[6];
     int cmd = parse_cmd(line, mac);
-    if (cmd == CMD_CAL) {
+    int hz, beep_ms = parse_beep(line, &hz);
+    if (beep_ms > 0) {
+        buzzer_pitch(hz);
+        buzzer_beep(beep_ms);
+        printf(buzzer_ok ? "BEEP,%d,%d\n" : "BEEP,%d,%d,no-buzzer\n", beep_ms, hz ? hz : BUZZER_HZ);
+    } else if (cmd == CMD_CAL) {
         cal_request = 1;
         printf("BUTTON,recalibrate,pc\n");
     } else if (cmd == CMD_UNPOKE_ALL) {
@@ -623,7 +642,7 @@ static void print_task(void *arg) {
         }
         if (beep_at >= 0 && p.ts >= beep_at) {  // lasted long enough: not a brief blip
             beep_at = -1;
-            if (det.motion) buzzer_beep(BEEP_MS);
+            if (det.motion) { buzzer_pitch(0); buzzer_beep(BEEP_MS); }
         }
     }
 }
