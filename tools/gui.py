@@ -68,7 +68,10 @@ HELP = '\n'.join([
     'orange    brief blip        amber   possible / router step?',
     'grey band router scan, ignored by the board',
 ])
-GRID_C = '#2a313a'
+GRID_C = '#2a313a'                              # grid lines, borders, hover
+SEL_C = '#2f3a46'                               # selected button / row
+HEAD_C = '#222932'                              # table header
+POKE_C = '#5fd4d0'                              # devices being poked
 WINDOWS = (30.0, 120.0, 600.0)                  # selectable detail windows (s)
 BRIEF_S = 2.0                                   # as record.py: shorter = brief blip
 COLORS = ['#4ea8ff', '#ffb547', '#b48cff', '#5fd4d0', '#ff7eb6', '#c3e88d', '#f78c6c', '#89ddff']
@@ -421,11 +424,11 @@ class View:
         for i, name in enumerate(('breathing', 'doppler', 'quiet level')):
             x = 0.2 + i * 0.152
             self.tiles[name] = (
-                self.ax_head.text(x, 0.66, name.upper(), fontsize=7.5, fontweight='bold',
+                self.ax_head.text(x, 0.66, name.upper(), fontsize=8, fontweight='bold',
                                   color=DIM, va='center', **head),
                 self.ax_head.text(x, 0.40, '', fontsize=13, fontweight='bold', va='center', **head),
                 self.ax_head.text(x, 0.14, '', fontsize=8, color=DIM, va='center', **head))
-        self.footer = self.ax_head.text(0.2, -0.12, '', fontsize=7.5, color=DIM, va='center',
+        self.footer = self.ax_head.text(0.2, -0.12, '', fontsize=8, color=DIM, va='center',
                                         **head)
         self.info = self.ax_head.text(0.2, 0.72, '', fontsize=9, va='top', color=FG, **mono)
         self.recent = self.ax_head.text(0.66, 0.54, '', fontsize=8.5, va='top', color=FG,
@@ -448,18 +451,18 @@ class View:
         labels = [('30 s', WINDOWS[0]), ('2 min', WINDOWS[1]), ('10 min', WINDOWS[2])]
         for i, (lab, w) in enumerate(labels):
             ax = self.fig.add_axes([0.70 + i * 0.062, 0.935, 0.056, 0.035])
-            b = Button(ax, lab, color=PANEL, hovercolor='#2a313a')
+            b = Button(ax, lab, color=PANEL, hovercolor=GRID_C)
             b.label.set_color(FG)
             b.on_clicked(lambda _e, w=w: self.set_window(w))
             self.btns[w] = b
         ax = self.fig.add_axes([0.70 + 3 * 0.062, 0.935, 0.07, 0.035])
-        self.btn_pause = Button(ax, 'Pause', color=PANEL, hovercolor='#2a313a')
+        self.btn_pause = Button(ax, 'Pause', color=PANEL, hovercolor=GRID_C)
         self.btn_pause.label.set_color(FG)
         self.btn_pause.on_clicked(lambda _e: self.toggle_pause())
         self.btn_cal = None
         if self.send:
             ax = self.fig.add_axes([0.70 - 0.095, 0.935, 0.088, 0.035])
-            self.btn_cal = Button(ax, 'Recalibrate', color=PANEL, hovercolor='#2a313a')
+            self.btn_cal = Button(ax, 'Recalibrate', color=PANEL, hovercolor=GRID_C)
             self.btn_cal.label.set_color(FG)
             self.btn_cal.on_clicked(lambda _e: self.recalibrate())
         self._mark_buttons()
@@ -467,8 +470,8 @@ class View:
     def _mark_buttons(self):
         for w, b in self.btns.items():
             b.label.set_fontweight('bold' if w == self.view_s else 'normal')
-            b.ax.set_facecolor('#2f3a46' if w == self.view_s else PANEL)
-            b.color = '#2f3a46' if w == self.view_s else PANEL
+            b.ax.set_facecolor(SEL_C if w == self.view_s else PANEL)
+            b.color = SEL_C if w == self.view_s else PANEL
         self.btn_pause.label.set_text('Live' if self.paused else 'Pause')
         self.btn_pause.label.set_color(BRIEF_C if self.paused else FG)
 
@@ -637,7 +640,7 @@ class View:
             ax.axvspan(max(a, t0), b, color=SCAN_C, alpha=0.16, lw=0)
             if label_y is not None and first:
                 ax.text(max(a, t0), label_y, ' router scan (ignored)', color=SCAN_C,
-                        fontsize=7.5, va='top')
+                        fontsize=8, va='top')
                 first = False
 
     def _breathing(self, t0, t1):
@@ -647,10 +650,12 @@ class View:
         ax.set_facecolor(PANEL)
         ax.axhspan(12, 20, color=STILL_C, alpha=0.05, lw=0)      # typical resting range
         pts = [(t, r) for t, r in s.br_hist if t >= t0]
-        for level, col, size in (('possible', BRIEF_C, 14), ('clear', STILL_C, 22)):
+        # filled = clear, hollow = possible: readable without the colours too
+        for level, col, size, fill in (('possible', BRIEF_C, 18, False), ('clear', STILL_C, 22, True)):
             p = [(t, r['rate']) for t, r in pts if r['level'] == level]
             if p:
-                ax.scatter(*zip(*p), s=size, color=col, lw=0, zorder=3)
+                ax.scatter(*zip(*p), s=size, zorder=3, linewidths=1.1,
+                           facecolors=col if fill else 'none', edgecolors=col)
         none = [t for t, r in pts if r['level'] == 'none']
         if none:
             ax.scatter(none, [1.5] * len(none), s=4, color=DIM, lw=0, alpha=0.6)
@@ -660,7 +665,7 @@ class View:
         ax.set_ylabel('/min')
         ax.grid(color=GRID_C, lw=0.6)
         self._clock_axis(ax)
-        ax.set_title("breathing rate (experimental): green = clear, amber = possible; "
+        ax.set_title("breathing rate (experimental): filled green = clear, hollow amber = possible; "
                      "needs someone still near the board-router line, covers the last 40 s",
                      color=DIM, fontsize=8.5, loc='left')
 
@@ -717,12 +722,12 @@ class View:
         ax.axhline(1.0, color=DIM, lw=0.8, ls=':', alpha=0.8)
         ax.axhline(on_s, color=MOTION_C, lw=0.9, ls='--', alpha=0.8)
         ax.axhline(on_l, color=LONG_C, lw=0.9, ls='--', alpha=0.8)
-        lab = t0 + win * 0.007
-        ax.text(lab, 1.0, ' quiet level', color=DIM, va='bottom', fontsize=8)
-        ax.text(lab, on_s, f' short threshold x{on_s:.1f}', color=MOTION_C,
-                va='bottom', fontsize=8)
-        ax.text(lab, on_l, f' long threshold x{on_l:.1f}', color=LONG_C,
-                va='bottom', fontsize=8)
+        lab = t1 - win * 0.006                   # right edge: clear of channel-hop labels
+        ax.text(lab, 1.0, 'quiet level ', color=DIM, va='top', ha='right', fontsize=8)
+        ax.text(lab, on_s, f'short threshold x{on_s:.1f} ', color=MOTION_C,
+                va='bottom', ha='right', fontsize=8)
+        ax.text(lab, on_l, f'long threshold x{on_l:.1f} ', color=LONG_C,
+                va='bottom', ha='right', fontsize=8)
         if det.floor <= 0:
             ax.text((t0 + t1) / 2, ymax * 0.5, 'calibrating: measuring the quiet level',
                     color=FG, ha='center', fontsize=11, alpha=0.8)
@@ -730,9 +735,9 @@ class View:
         ax.set_ylim(0, ymax)
         self._clock_axis(ax)
         ax.set_ylabel('motion score (x quiet level)')
-        ax.grid(color='#2a313a', lw=0.6)
+        ax.grid(color=GRID_C, lw=0.6)
         if ax.get_legend_handles_labels()[0]:
-            ax.legend(loc='upper right', facecolor=PANEL, edgecolor='#2a313a',
+            ax.legend(loc='upper right', facecolor=PANEL, edgecolor=GRID_C,
                       labelcolor=FG, fontsize=8, ncol=4)
 
         self._timeline()
@@ -843,11 +848,12 @@ class View:
 
 class DevicePanel:
     """Tk window listing the devices on our network. Click a row's first
-    column (or double-click a row) to poke / stop poking it."""
+    column, double-click a row, or select it and press Space / Enter to poke
+    / stop poking it."""
 
     COLS = (('poke', 'Poke', 46), ('name', 'Device (maker)', 170), ('mac', 'MAC', 130),
-            ('rssi', 'Signal', 62), ('tx', 'Sent', 62), ('rate', 'Frames/min', 92),
-            ('heard', 'Last heard', 90), ('status', 'Looks', 330), ('link', 'Poke link', 160))
+            ('rssi', 'Signal', 66), ('tx', 'Sent', 62), ('rate', 'Frames/min', 92),
+            ('heard', 'Last heard', 118), ('status', 'Looks', 330), ('link', 'Poke link', 170))
 
     def __init__(self, master, state, send, on_change=None):
         import tkinter as tk
@@ -855,7 +861,8 @@ class DevicePanel:
         self.s, self.send, self.on_change = state, send, on_change
         self.win = tk.Toplevel(master)
         self.win.title('Devices on your network')
-        self.win.geometry('1200x380')
+        self.win.geometry('1240x380')
+        self.win.minsize(900, 240)
         self.win.configure(bg=BG)
         self.win.protocol('WM_DELETE_WINDOW', self.win.withdraw)   # hide, don't kill
         st = ttk.Style(self.win)
@@ -865,8 +872,8 @@ class DevicePanel:
             pass
         st.configure('D.Treeview', background=PANEL, fieldbackground=PANEL, foreground=FG,
                      rowheight=22, borderwidth=0)
-        st.configure('D.Treeview.Heading', background='#222932', foreground=FG, relief='flat')
-        st.map('D.Treeview', background=[('selected', '#2f3a46')])
+        st.configure('D.Treeview.Heading', background=HEAD_C, foreground=FG, relief='flat')
+        st.map('D.Treeview', background=[('selected', SEL_C)])
         st.configure('D.TRadiobutton', background=BG, foreground=FG)
         st.map('D.TRadiobutton', background=[('active', BG)])
         st.configure('D.TLabel', background=BG, foreground=DIM)
@@ -888,18 +895,21 @@ class DevicePanel:
         for c, title, w in self.COLS:
             self.tree.heading(c, text=title)
             self.tree.column(c, width=w, anchor='w', stretch=c == 'status')
-        self.tree.tag_configure('poked', foreground='#5fd4d0')
+        self.tree.tag_configure('poked', foreground=POKE_C)
         self.tree.tag_configure('stationary', foreground=STILL_C)
         self.tree.tag_configure('dim', foreground=DIM)
         self.tree.pack(fill='both', expand=True, padx=10)
         self.tree.bind('<Button-1>', self._click)
         self.tree.bind('<Double-1>', lambda e: self._toggle(self.tree.identify_row(e.y)))
+        for key in ('<space>', '<Return>'):      # keyboard: select a row, then Space / Enter
+            self.tree.bind(key, lambda _e: self._toggle(self.tree.focus()) or 'break')
 
         self.foot = ttk.Label(self.win, style='D.TLabel', text=(
             'Only devices talking to your own network (your SSID) are listed. The board is '
             '2.4 GHz only: devices on 5 GHz never appear.\nOnly the router link decides '
             'motion; device links are extra, plotted dotted. Phones use private MACs and '
-            'move, so Auto skips them.'))
+            'move, so Auto skips them.\nTo poke a device: tick its box, double-click it, or '
+            'select it with the arrow keys and press Space.'))
         self.foot.pack(fill='x', padx=10, pady=(4, 8))
 
     def _mode(self):
@@ -945,8 +955,12 @@ class DevicePanel:
         for i, r in enumerate(rows):                         # keep the sort order
             self.tree.move(r['mac'], '', i)
         n_st = sum(r['status'] == 'stationary' for r in rows)
-        txt = (f"{len(rows)} heard, {n_st} stationary, poking {len(dv.poking)}/{MAX_DEVS}"
-               if dv.board_seen else 'waiting for the board...')
+        if not dv.board_seen:
+            txt = 'waiting for the board...'
+        elif not rows:
+            txt = 'no devices heard on your network yet (2.4 GHz only; give it a minute)'
+        else:
+            txt = f"{len(rows)} heard, {n_st} stationary, poking {len(dv.poking)}/{MAX_DEVS}"
         if not self.send:
             txt += '   (no board: commands not sent)'
         self.note.configure(text=txt)
@@ -1004,6 +1018,10 @@ def main():
     threading.Thread(target=reader, args=(lines, q, log), daemon=True).start()
     view = View(state, plt, os.path.basename(log.ev_path) if log else None, a.window, send)
     panel = None
+    try:
+        view.fig.canvas.get_tk_widget().winfo_toplevel().minsize(1000, 820)   # header stays readable
+    except Exception:                            # not the Tk backend
+        pass
     try:
         panel = DevicePanel(view.fig.canvas.get_tk_widget().winfo_toplevel(), state, send,
                             on_change=lambda: (os.makedirs(a.out, exist_ok=True),
