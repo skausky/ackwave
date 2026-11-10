@@ -279,8 +279,8 @@ class State:
         rows = [r for r in self.dop.rows if r[0] >= self.now - 1.0]
         if not rows:
             return None
-        fs = [f['f'] for _t, _p, f in rows if f['f'] > 0]
-        if len(fs) < 2:                          # one window alone is often noise
+        fs = [f['f'] for _t, _p, f in rows if f['moving']]
+        if len(fs) < 2:                          # noise: one window, or no low-band energy
             return {}
         f = float(np.median(fs))
         low = np.median([x['low'] for _t, _p, x in rows])

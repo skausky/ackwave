@@ -13,6 +13,8 @@ What it showed on real captures:
   walking      ~40 % under 3 Hz, the rest spread up to ~20 Hz, lasting
   hand waving  mostly 0.5-8 Hz
   router scan  high power, 83-95 % of it under 3 Hz: a step, not a movement
+  noise        now and then a window pokes above the quiet room at ~25-30 Hz
+               with only 2-8 % under 3 Hz; 'moving' needs >= 12 % (MOVING_LOW)
 It does not decide motion; the GUI shows it next to the detector.
 
     python doppler.py sessions/raw-2026-11-09_2238.log.gz 07:07:20 07:08:20
@@ -30,6 +32,8 @@ WIN = 100                         # 1 s window
 HOP_S = 0.25
 N_PC = 3
 LOW_HZ = 3.0                      # "step-like" energy is below this
+MOVING_LOW = 0.12                 # movement keeps >= this share under 3 Hz; quiet-room
+                                  # noise that pokes above the baseline sits at 2-8 %
 FREQS = np.fft.rfftfreq(WIN, 1 / FS)
 _HANN = np.hanning(WIN)
 
@@ -93,7 +97,8 @@ class Doppler:
         # a frequency only when clearly above the quiet room (half the power)
         f_ex = float((ex * FREQS[1:]).sum() / ex.sum()) if ex.sum() > 0.5 * tot else 0.0
         return dict(power=float(np.log10(tot + 1e-12)), low=float(low), f=f_ex,
-                    speed=f_ex * wavelength(self.ch) / 2)
+                    speed=f_ex * wavelength(self.ch) / 2,
+                    moving=f_ex > 0 and low >= MOVING_LOW)
 
 
 def spectrum(q, t_end):
@@ -121,11 +126,12 @@ def recording(path, a, b, warm_s=60.0):
     import gzip
     import time
 
-    def clock(hms, after):
-        """Unix time of the first hms at or after 'after'."""
+    def clock(hms, after, slack=1):
+        """Unix time of hms on after's day, or the next day if it is more than
+        slack s before 'after' (a session that runs past midnight)."""
         day = time.strftime('%Y-%m-%d ', time.localtime(after))
         x = time.mktime(time.strptime(day + hms, '%Y-%m-%d %H:%M:%S'))
-        return x + 86400 if x < after - 1 else x
+        return x + 86400 if x < after - slack else x
 
     off = t_a = t_b = None
     opener = gzip.open if path.endswith('.gz') else open
@@ -136,8 +142,8 @@ def recording(path, a, b, warm_s=60.0):
                     p = line.strip().split(',')
                     if len(p) > 2 and p[2]:
                         off = float(p[1]) - int(p[2]) / 1e6
-                        if t_a is None:
-                            t_a = clock(a, float(p[1]))
+                        if t_a is None:          # a start just before the first marker is today
+                            t_a = clock(a, float(p[1]), slack=12 * 3600)
                             t_b = clock(b, t_a)
                     continue
                 if off is None or not line.startswith('CSI,'):
@@ -170,7 +176,8 @@ def main():
     for w, d, inside in recording(*sys.argv[1:]):   # 60 s to learn the quiet spectrum
         r = dop.feed(d, d['ts'] / 1e6)
         if r and inside:
-            print(stamp(w) + f"  {r['power']:5.2f}  {r['low']:4.0%}  {r['f']:5.1f}Hz {r['speed']:4.2f} m/s")
+            print(stamp(w) + f"  {r['power']:5.2f}  {r['low']:4.0%}  {r['f']:5.1f}Hz {r['speed']:4.2f} m/s"
+                  + ('  moving' if r['moving'] else ''))
 
 
 if __name__ == '__main__':
