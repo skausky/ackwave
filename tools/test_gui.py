@@ -54,6 +54,7 @@ def main():
     assert len(s.dop.rows) > 20 and s.doppler_text().startswith('Doppler')
     assert view.bottom == 'doppler'
     view.draw()
+    assert 'breathing' in view.info.get_text()
     assert 'Doppler' in view.ax_wf.get_title(loc='left') and 'Doppler' in view.info.get_text()
     view.bottom = 'subcarriers'
     view.draw()

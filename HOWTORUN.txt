@@ -30,6 +30,8 @@ LIVE VIEW (GUI)
     Movement lights up the low band for as long as it lasts, with fainter
     streaks reaching higher the faster you move; a router scan is a single
     ~1 s blob under 3 Hz. Press w to switch to the subcarrier view.
+  - "breathing ~11/min (clear)" (experimental): someone still near the
+    line between the board and the router; it covers the last 40 s.
   - The LED on the board: red = motion, blue = calibrating,
     yellow = looking for the router, off = still (white flash at power-on).
   - Middle panel = everything since the GUI opened, with clock times:

@@ -25,7 +25,8 @@ Shows: short-window motion score per stream (node x beacon/ACK) and the
 long-window score, both as multiples of the room's quiet level, with the two
 thresholds; the PC's verdict (shaded), the board's own verdict (STATE lines),
 calibration periods, a Doppler spectrogram of the router's ACKs (experimental,
-see doppler.py; key w swaps in the subcarrier waterfall), and live
+see doppler.py; key w swaps in the subcarrier waterfall), a breathing-rate
+readout (experimental, breathing.py; needs someone still near the path), and live
 packet rates / firmware counters. The quiet level comes from the board's
 CALIB lines (so PC and board agree); without them the PC measures its own.
 """
@@ -41,6 +42,7 @@ from collections import defaultdict, deque
 import numpy as np
 
 from analyze import MAX_APS, VALID, MotionDetector, open_port, open_source, parse_line
+from breathing import Breathing, text as breathing_text
 from doppler import FREQS, LOW_HZ, Doppler
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 
@@ -82,6 +84,7 @@ class State:
         self.rssi = {}
         self.wf = defaultdict(deque)              # (src, kind) -> deque[(t, vec)]
         self.dop = Doppler(keep_s=self.window_s)  # router-ACK Doppler spectra
+        self.br = Breathing()                     # router-ACK breathing rate
         self.motion_spans = []                    # [t0, t1 or None]
         self.board_states = deque()               # (t, motion: bool)
         self.board_motion = None
@@ -149,6 +152,7 @@ class State:
         self.rssi[key] = d['rssi']
         s = self.det.on_csi(d)
         self.dop.feed(d, t)
+        self.br.feed(d, t)
         a = d['amp'][VALID]
         if a.mean() > 0:
             self.wf[key].append((t, a / a.mean()))
@@ -431,11 +435,11 @@ class View:
         src = 'board' if det.external else 'PC'
         dv = s.devices
         if det.floor > 0:
-            quiet = f"quiet level {det.floor:.4f} ({det.phase}, from {src})"
+            quiet = f"quiet {det.floor:.4f} ({det.phase}, {src})"
         else:
             quiet = f"measuring quiet level ({det.phase}, {det.why}) - keep still"
         if not self.details:
-            rows = [quiet,
+            rows = [quiet + f"   {breathing_text(s.br.last)}",
                     f"board says {board}   {s.doppler_text()}",
                     f"devices {len(dv.devs)} heard, poking {len(dv.poking)}/{MAX_DEVS} "
                     f"({dv.mode})   d = details  w = view"]

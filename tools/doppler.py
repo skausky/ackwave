@@ -115,22 +115,20 @@ def spectrum(q, t_end):
     return (np.abs(np.fft.rfft(pcs, axis=0)) ** 2).sum(1)
 
 
-def main():
+def recording(path, a, b, warm_s=60.0):
+    """Yields (wall time, parsed CSI dict) from a recorded raw log, for the
+    first a..b (HH:MM:SS, may cross midnight) plus warm_s before it."""
     import gzip
     import time
-    if len(sys.argv) != 4:
-        sys.exit(__doc__)
-    path, a, b = sys.argv[1:]
 
     def clock(hms, after):
-        """Unix time of the first hms (HH:MM:SS) at or after 'after'."""
+        """Unix time of the first hms at or after 'after'."""
         day = time.strftime('%Y-%m-%d ', time.localtime(after))
         x = time.mktime(time.strptime(day + hms, '%Y-%m-%d %H:%M:%S'))
         return x + 86400 if x < after - 1 else x
 
-    dop, off, t_a, t_b = Doppler(), None, None, None
+    off = t_a = t_b = None
     opener = gzip.open if path.endswith('.gz') else open
-    print('time         power  <3Hz   freq   speed')
     with opener(path, 'rt', errors='replace') as f:
         try:
             for line in f:
@@ -148,19 +146,31 @@ def main():
                     w = int(line.split(',', 2)[1]) / 1e6 + off
                 except ValueError:
                     continue
-                if w < t_a - 60:                 # cheap skip; 60 s to learn the quiet spectrum
+                if w < t_a - warm_s:             # cheap skip up to the window
                     continue
                 if w > t_b:
-                    break
+                    return
                 ev = parse_line(line)
-                if not ev:
-                    continue
-                r = dop.feed(ev[1], ev[1]['ts'] / 1e6)
-                if r and w >= t_a:
-                    print(time.strftime('%H:%M:%S', time.localtime(w)) + f".{int(w % 1 * 100):02d}"
-                          + f"  {r['power']:5.2f}  {r['low']:4.0%}  {r['f']:5.1f}Hz {r['speed']:4.2f} m/s")
+                if ev:
+                    yield w, ev[1], w >= t_a
         except EOFError:                         # a session still being written
-            pass
+            return
+
+
+def stamp(w):
+    import time
+    return time.strftime('%H:%M:%S', time.localtime(w)) + f".{int(w % 1 * 100):02d}"
+
+
+def main():
+    if len(sys.argv) != 4:
+        sys.exit(__doc__)
+    dop = Doppler()
+    print('time         power  <3Hz   freq   speed')
+    for w, d, inside in recording(*sys.argv[1:]):   # 60 s to learn the quiet spectrum
+        r = dop.feed(d, d['ts'] / 1e6)
+        if r and inside:
+            print(stamp(w) + f"  {r['power']:5.2f}  {r['low']:4.0%}  {r['f']:5.1f}Hz {r['speed']:4.2f} m/s")
 
 
 if __name__ == '__main__':
