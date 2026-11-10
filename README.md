@@ -164,7 +164,7 @@ It finds the board, keeps the PC from sleeping while it runs, and reconnects if 
 
 ### Running unplugged
 
-The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion, dim **blue** = calibrating, dim **yellow** = looking for the router, **off** = still. With a buzzer it also beeps when motion starts. Serial output just goes nowhere.
+The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion, dim **blue** = calibrating, dim **yellow** = looking for the router, **off** = still. It flashes **white** for half a second at power-on. With a buzzer it also beeps when motion starts. Serial output just goes nowhere.
 
 If the LED stays dark, your board has it on another pin: build with `CSI_DEFS="LED_GPIO=38"` (ESP32-S3-DevKitC-1 v1.1).
 

@@ -203,19 +203,29 @@ static void led_init(void) {
     printf("LED,gpio%d\n", LED_GPIO);
 }
 
+static bool led_rgb(uint8_t r, uint8_t g, uint8_t b) {
+    static uint8_t grb[3];                   // must outlive the transfer
+    if (!led_ok || rmt_tx_wait_all_done(led_chan, 10) != ESP_OK) return false;
+    grb[0] = g; grb[1] = r; grb[2] = b;
+    rmt_transmit_config_t t = { .loop_count = 0 };
+    return rmt_transmit(led_chan, led_enc, grb, sizeof grb, &t) == ESP_OK;
+}
+
+static void led_hello(void) {                // white for 0.5 s at power-on
+    if (!led_rgb(LED_BRIGHT, LED_BRIGHT, LED_BRIGHT)) return;
+    vTaskDelay(pdMS_TO_TICKS(500));
+    led_rgb(0, 0, 0);
+}
+
 static void led_show(int what) {
     static int shown = -1;
-    static uint8_t grb[3];                   // must outlive the transfer
     if (!led_ok || what == shown) return;
-    if (rmt_tx_wait_all_done(led_chan, 10) != ESP_OK) return;   // retry next poll
     const uint8_t b = LED_BRIGHT, d = LED_BRIGHT / 5 ? LED_BRIGHT / 5 : 1;
-    uint8_t r = 0, g = 0, bl = 0;
-    if (what == LED_MOTION) r = b;
-    else if (what == LED_CAL) bl = d;
-    else if (what == LED_SEARCH) { r = d; g = d; }
-    grb[0] = g; grb[1] = r; grb[2] = bl;
-    rmt_transmit_config_t t = { .loop_count = 0 };
-    if (rmt_transmit(led_chan, led_enc, grb, sizeof grb, &t) == ESP_OK) shown = what;
+    bool ok = what == LED_MOTION ? led_rgb(b, 0, 0)
+            : what == LED_CAL    ? led_rgb(0, 0, d)
+            : what == LED_SEARCH ? led_rgb(d, d, 0)
+            :                      led_rgb(0, 0, 0);
+    if (ok) shown = what;                    // else retry next poll
 }
 
 static void led_update(bool searching) {
@@ -621,6 +631,7 @@ void app_main(void) {
     gate_init(&gate);
     buzzer_init();                           // never fatal
     led_init();                              // never fatal
+    led_hello();
 #if CAL_BUTTON_GPIO >= 0
     gpio_config_t btn = { .pin_bit_mask = 1ULL << CAL_BUTTON_GPIO, .mode = GPIO_MODE_INPUT,
                           .pull_up_en = GPIO_PULLUP_ENABLE };
