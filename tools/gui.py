@@ -279,6 +279,8 @@ class State:
         rows = [r for r in self.dop.rows if r[0] >= self.now - 1.0]
         if not rows:
             return None
+        if any(a - 1 <= self.now <= b for a, b in self.scan_spans):   # the router, not a body
+            return dict(f=0.0, speed=0.0, step=True, scan=True)
         fs = [f['f'] for _t, _p, f in rows if f['moving']]
         if len(fs) < 2:                          # noise: one window, or no low-band energy
             return {}
@@ -293,6 +295,8 @@ class State:
             return 'Doppler: waiting'
         if not r:
             return 'Doppler: nothing moving'
+        if r.get('scan'):
+            return 'Doppler: router scan (ignored)'
         txt = f"Doppler {r['f']:4.1f} Hz (~{r['speed']:.2f} m/s)"
         return txt + ('  step-like: router?' if r['step'] else '')
 
@@ -622,6 +626,8 @@ class View:
             put('doppler', '…', DIM, 'collecting')
         elif not d:
             put('doppler', '—', DIM, 'nothing moving')
+        elif d.get('scan'):
+            put('doppler', 'scan', SCAN_C, 'router scanning (ignored)')
         elif d['step']:
             put('doppler', f"{d['f']:.1f} Hz", BRIEF_C, 'step-like: router?')
         else:

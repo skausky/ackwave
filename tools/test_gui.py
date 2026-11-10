@@ -69,6 +69,9 @@ def main():
     assert len(s.dop.rows) > 20 and s.doppler_text().startswith('Doppler')
     assert view.bottom == 'doppler'
     view.draw()
+    s.scan_spans.append([s.now - 0.5, s.now + 1.5])          # mid router scan: never "movement"
+    assert s.doppler_text() == 'Doppler: router scan (ignored)'
+    s.scan_spans.pop()
     tile = {k: [p.get_text() for p in v] for k, v in view.tiles.items()}
     assert tile['breathing'][0] == 'BREATHING' and tile['breathing'][1], tile
     assert tile['doppler'][1] and tile['quiet level'][1] not in ('', 'measuring'), tile
