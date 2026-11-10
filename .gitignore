@@ -30,3 +30,8 @@ backups/
 
 # Your network name (local only)
 main/my_network.h
+
+# editor swap/backup files (can hold the private network name)
+*.swp
+*.swo
+*~
