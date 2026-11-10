@@ -175,12 +175,17 @@ It finds the board, keeps the PC from sleeping while it runs, and reconnects if 
 
 The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion, dim **blue** = calibrating, dim **yellow** = looking for the router, **off** = still. It flashes **white** for half a second at power-on. With a buzzer, each event has its own sound:
 
+High and loud = something is happening, soft and falling = settling down, low = a problem.
+
 | Sound | Meaning |
 |---|---|
 | rising chirp | powered on |
+| one soft tick | recalibrate button / PC command received: step away |
 | two soft blips | calibrated, watching for motion |
 | one loud beep | motion that has lasted 2 s (brief blips stay silent) |
-| low falling tone | lost the router (once per loss) | Serial output just goes nowhere.
+| soft falling pair (dee-doo) | that motion ended |
+| low three-step fall | lost the router (once per loss) |
+| soft rising pair (doo-dee) | found the router again | Serial output just goes nowhere.
 
 If the LED stays dark, your board has it on another pin: build with `CSI_DEFS="LED_GPIO=38"` (ESP32-S3-DevKitC-1 v1.1).
 

@@ -128,10 +128,15 @@ static QueueHandle_t tune_q;
 typedef struct { uint16_t hz, ms; } note_t;  // hz 0 = rest
 typedef struct { note_t n[4]; } tune_t;      // ends at the first ms == 0
 
+// High and loud = something is happening, soft and falling = settling down,
+// low = a problem. Status sounds use the soft pitch, motion the loud one.
 static const tune_t TUNE_HELLO  = {{{BUZZER_SOFT_HZ, 70}, {3000, 70}, {BUZZER_HZ, 120}}};  // rising chirp
+static const tune_t TUNE_TICK   = {{{3000, 30}}};                                          // got the command
 static const tune_t TUNE_READY  = {{{BUZZER_SOFT_HZ, 50}, {0, 80}, {BUZZER_SOFT_HZ, 50}}}; // two soft blips
 static const tune_t TUNE_MOTION = {{{BUZZER_HZ, BEEP_MS}}};                                  // one loud beep
-static const tune_t TUNE_LOST   = {{{BUZZER_SOFT_HZ, 150}, {1200, 300}}};                   // falling tone
+static const tune_t TUNE_STILL  = {{{2500, 70}, {0, 30}, {1800, 120}}};                    // dee-doo
+static const tune_t TUNE_LOST   = {{{2000, 120}, {1500, 120}, {1000, 300}}};               // doo-doo-dooo
+static const tune_t TUNE_FOUND  = {{{1500, 80}, {0, 30}, {2500, 120}}};                    // doo-dee
 
 static void buzzer_set(bool on) {
 #if BUZZER_ACTIVE
@@ -473,6 +478,7 @@ static void run_cmd(const char *line) {
         printf(buzzer_ok ? "BEEP,%d,%d\n" : "BEEP,%d,%d,no-buzzer\n", beep_ms, hz ? hz : BUZZER_HZ);
     } else if (cmd == CMD_CAL) {
         cal_request = 1;
+        buzzer_play(&TUNE_TICK);
         printf("BUTTON,recalibrate,pc\n");
     } else if (cmd == CMD_UNPOKE_ALL) {
         for (int k = 0; k < MAX_DEVS; k++) dev_clear(&nodes, k);
@@ -559,7 +565,11 @@ static void control_task(void *arg) {
 #if CAL_BUTTON_GPIO >= 0
         static int held;                   // debounce: 2 polls = 100 ms
         if (btn_ok && gpio_get_level(CAL_BUTTON_GPIO) == 0) {
-            if (++held == 2) { cal_request = 1; printf("BUTTON,recalibrate\n"); }
+            if (++held == 2) {
+                cal_request = 1;
+                buzzer_play(&TUNE_TICK);
+                printf("BUTTON,recalibrate\n");
+            }
         } else {
             held = 0;
         }
@@ -607,6 +617,7 @@ static void control_task(void *arg) {
                    ch, ch ? "scan" : "lost");
             static bool lost;                  // sound once per loss, not every sweep
             if (!ch && !lost) buzzer_play(&TUNE_LOST);
+            if (ch && lost) buzzer_play(&TUNE_FOUND);
             lost = !ch;
         }
     }
@@ -637,6 +648,7 @@ static void print_task(void *arg) {
     uint32_t epoch = ch_epoch;
     int64_t next_calib = 0;
     int64_t beep_at = -1;                    // when to beep for the current motion, -1 = no
+    bool beeped = false;                     // this motion got its beep: sound its end too
     csi_pkt_t p;
     for (;;) {
         if (!xQueueReceive(q, &p, portMAX_DELAY)) continue;
@@ -667,10 +679,12 @@ static void print_task(void *arg) {
             printf("STATE,%" PRId64 ",%s,%d,%d\n", p.ts, change > 0 ? "motion" : "still",
                    (int)(ms * 1000), (int)(ml * 1000));
             beep_at = change > 0 ? p.ts + (int64_t)BEEP_AFTER_MS * 1000 : -1;
+            if (change < 0 && beeped) buzzer_play(&TUNE_STILL);
+            beeped = false;
         }
         if (beep_at >= 0 && p.ts >= beep_at) {  // lasted long enough: not a brief blip
             beep_at = -1;
-            if (det.motion) buzzer_play(&TUNE_MOTION);
+            if (det.motion) { buzzer_play(&TUNE_MOTION); beeped = true; }
         }
     }
 }
