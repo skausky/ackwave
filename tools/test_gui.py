@@ -50,6 +50,15 @@ def main():
     view.draw()
     assert 'pokes' in view.info.get_text(), "details show the raw counters"
     view.details = False
+    # Doppler: spectra kept, header line, both bottom views draw
+    assert len(s.dop.rows) > 20 and s.doppler_text().startswith('Doppler')
+    assert view.bottom == 'doppler'
+    view.draw()
+    assert 'Doppler' in view.ax_wf.get_title(loc='left') and 'Doppler' in view.info.get_text()
+    view.bottom = 'subcarriers'
+    view.draw()
+    assert 'normalised amplitude' in view.ax_wf.get_title(loc='left')
+    view.bottom = 'doppler'
     w_end = s.last_wall
     # Window buttons and pause: drawing at each window works; paused = no redraw
     for w in (120.0, 600.0, 30.0):

@@ -24,7 +24,8 @@ and dotted. Your mode and picks are remembered in sessions/devices.json.
 Shows: short-window motion score per stream (node x beacon/ACK) and the
 long-window score, both as multiples of the room's quiet level, with the two
 thresholds; the PC's verdict (shaded), the board's own verdict (STATE lines),
-calibration periods, a subcarrier waterfall for the busiest stream, and live
+calibration periods, a Doppler spectrogram of the router's ACKs (experimental,
+see doppler.py; key w swaps in the subcarrier waterfall), and live
 packet rates / firmware counters. The quiet level comes from the board's
 CALIB lines (so PC and board agree); without them the PC measures its own.
 """
@@ -40,6 +41,7 @@ from collections import defaultdict, deque
 import numpy as np
 
 from analyze import MAX_APS, VALID, MotionDetector, open_port, open_source, parse_line
+from doppler import FREQS, LOW_HZ, Doppler
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 
 BG, PANEL, FG, DIM = '#101418', '#171c22', '#e6e9ed', '#7d8794'
@@ -79,6 +81,7 @@ class State:
         self.arrivals = defaultdict(deque)        # (src, kind) -> deque[t] (rates)
         self.rssi = {}
         self.wf = defaultdict(deque)              # (src, kind) -> deque[(t, vec)]
+        self.dop = Doppler(keep_s=self.window_s)  # router-ACK Doppler spectra
         self.motion_spans = []                    # [t0, t1 or None]
         self.board_states = deque()               # (t, motion: bool)
         self.board_motion = None
@@ -145,6 +148,7 @@ class State:
         self.arrivals[key].append(t)
         self.rssi[key] = d['rssi']
         s = self.det.on_csi(d)
+        self.dop.feed(d, t)
         a = d['amp'][VALID]
         if a.mean() > 0:
             self.wf[key].append((t, a / a.mean()))
@@ -217,6 +221,23 @@ class State:
         if b is None:
             return f"motion for {fmt_age(now - a)}"
         return f"last motion {fmt_age(now - b)} ago"
+
+    def doppler_text(self):
+        """The last second's Doppler reading, for the header."""
+        rows = [r for r in self.dop.rows if r[0] >= self.now - 1.0]
+        if not rows:
+            return 'Doppler: waiting'
+        fs = [f['f'] for _t, _p, f in rows if f['f'] > 0]
+        if len(fs) < 2:                          # one window alone is often noise
+            return 'Doppler: nothing moving'
+        f = float(np.median(fs))
+        low = np.median([x['low'] for _t, _p, x in rows])
+        txt = f"Doppler {f:4.1f} Hz (~{f * self.dop_wavelength() / 2:.2f} m/s)"
+        return txt + ('  step-like: router?' if low >= 0.75 and f < LOW_HZ else '')
+
+    def dop_wavelength(self):
+        from doppler import wavelength
+        return wavelength(self.channel[0] if self.channel else 6)
 
     def link_health(self):
         """(word, colour, detail) for the link that decides motion."""
@@ -294,6 +315,7 @@ class View:
         except AttributeError:
             pass
         self.details = False                     # 'd': raw firmware counters
+        self.bottom = 'doppler'                  # 'w': 'doppler' or 'subcarriers'
         gs = self.fig.add_gridspec(4, 1, height_ratios=[0.5, 2.05, 1.0, 0.75],
                                    left=0.07, right=0.97, top=0.97, bottom=0.06, hspace=0.42)
         self.ax_head = self.fig.add_subplot(gs[0])
@@ -377,6 +399,10 @@ class View:
             self.toggle_pause()
         elif e.key == 'c':
             self.recalibrate()
+        elif e.key == 'w':
+            self.bottom = 'subcarriers' if self.bottom == 'doppler' else 'doppler'
+            self.draw()
+            self.fig.canvas.draw_idle()
         elif e.key == 'd':
             self.details = not self.details
             self.draw()
@@ -410,9 +436,9 @@ class View:
             quiet = f"measuring quiet level ({det.phase}, {det.why}) - keep still"
         if not self.details:
             rows = [quiet,
-                    f"board says {board}",
+                    f"board says {board}   {s.doppler_text()}",
                     f"devices {len(dv.devs)} heard, poking {len(dv.poking)}/{MAX_DEVS} "
-                    f"({dv.mode})   d = details"]
+                    f"({dv.mode})   d = details  w = view"]
         else:
             ch = f"ch {s.channel[0]} ({s.channel[1] or 'start'})" if s.channel else 'searching'
             rows = [f"{ch}   {quiet}, why {det.why}"]
@@ -513,11 +539,15 @@ class View:
                       labelcolor=FG, fontsize=8, ncol=4)
 
         self._timeline()
-        key = s.busiest()
         self.ax_wf.cla()
         self.ax_wf.set_facecolor(PANEL)
-        self.ax_wf.set_ylabel('subcarrier')
         self.ax_wf.set_xlabel('')
+        if self.bottom == 'doppler':
+            self._doppler(t0, t1)
+            self.fig.canvas.draw_idle()
+            return
+        key = s.busiest()
+        self.ax_wf.set_ylabel('subcarrier')
         if key:
             ts, vecs = zip(*s.wf[key])
             m = np.array(vecs).T
@@ -529,6 +559,25 @@ class View:
                                  color=DIM, fontsize=8.5, loc='left')
         self.fig.canvas.draw_idle()
 
+
+    def _doppler(self, t0, t1):
+        """Doppler spectrogram over the same window as the score plot."""
+        s, ax = self.s, self.ax_wf
+        ax.set_ylabel('Hz')
+        rows = [r for r in s.dop.rows if r[0] >= t0]
+        if len(rows) > 1 and s.dop.base is not None:
+            ts = [r[0] for r in rows]
+            m = np.array([r[1] for r in rows]).T
+            db = 10 * np.log10(np.maximum(m, 1e-12) / np.maximum(s.dop.base, 1e-12)[:, None])
+            ax.imshow(np.clip(db, 0, 20), aspect='auto', origin='lower', cmap='magma', vmin=0,
+                      vmax=20, extent=(ts[0], ts[-1], 0, FREQS[-1]), interpolation='nearest')
+            ax.set_xlim(t0, t1)
+            self._clock_axis(ax)
+        ax.set_ylim(0, FREQS[-1])
+        ax.axhline(LOW_HZ, color=DIM, lw=0.6, ls=':')
+        ax.set_title("Doppler of the router ACKs, dB over the quiet room (experimental): "
+                     "walking ~5-20 Hz, hand ~2-10 Hz, router scans < 3 Hz",
+                     color=DIM, fontsize=8.5, loc='left')
 
     def _clock_axis(self, ax):
         """Label a board-time axis with the wall clock."""
