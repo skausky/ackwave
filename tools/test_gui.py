@@ -11,6 +11,19 @@ from gui import State, View  # noqa: E402
 
 
 def main():
+    clock = [1000.0]
+    s0 = State(window_s=60, clock=lambda: clock[0])
+    assert s0.source_status()[0] == 'WAITING'
+    s0.feed('BUZZER,off')                   # any line counts as data arriving
+    assert s0.source_status() is None
+    clock[0] += 10
+    word, _c, detail = s0.source_status()
+    assert word == 'NO DATA' and '10 s' in detail, detail
+    s0.lost = 'device reports readiness to read but returned no data'
+    assert s0.source_status()[0] == 'DISCONNECTED'
+    s0.lost, s0.ended = None, True
+    assert s0.source_status()[0] == 'INPUT ENDED'
+
     s = State(window_s=60)
     lines = [line for line, *_ in generate(seed=2)]
     view = View(s, plt)

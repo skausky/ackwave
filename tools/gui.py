@@ -72,6 +72,9 @@ class State:
         self.hist_peak = []                          # peak short score per hist_motion entry
         self.hist_scans = []                         # [wall0, wall1]: router scans ignored
         self.wall_off, self.last_wall = None, None
+        self.last_rx = None                          # clock() of the last line received
+        self.lost = None                             # error text once the source failed
+        self.ended = False                           # input ran out (file / demo)
         self.reset()
 
     def wall(self, t=None):
@@ -102,6 +105,7 @@ class State:
 
     def feed(self, line):
         self.n_lines += 1
+        self.last_rx = self.clock()
         if line.startswith('ME,'):
             self.me = line.strip()[3:]
             return
@@ -275,6 +279,20 @@ class State:
     def dop_wavelength(self):
         from doppler import wavelength
         return wavelength(self.channel[0] if self.channel else 6)
+
+    def source_status(self, silent_s=3.0):
+        """None while data flows, else (badge, colour, detail) for the header."""
+        if self.lost:
+            why = self.lost if len(self.lost) <= 36 else self.lost[:35] + '…'
+            return 'DISCONNECTED', MOTION_C, f"{why}  (replug + restart)"
+        if self.ended:
+            return 'INPUT ENDED', DIM, 'no more data (file or demo finished)'
+        if self.last_rx is None:
+            return 'WAITING', DIM, 'waiting for the board...'
+        quiet = self.clock() - self.last_rx
+        if quiet > silent_s:
+            return 'NO DATA', BRIEF_C, f"board silent for {fmt_age(quiet)} - unplugged?"
+        return None
 
     def link_health(self):
         """(word, colour, detail) for the link that decides motion."""
@@ -466,7 +484,13 @@ class View:
     def _header(self):
         """Badge, link health, quiet level and the recent-motion list."""
         s, det = self.s, self.s.det
-        if det.floor <= 0:
+        status = s.source_status()
+        if status:                               # no live data: say so instead of a stale verdict
+            word, col, detail = status
+            self.badge.set_text(word)
+            self.badge.set_color(col)
+            self.badge.set_fontsize(15 if len(word) > 8 else 22)
+        elif det.floor <= 0:
             self.badge.set_text('CALIBRATING')
             self.badge.set_color(CAL_C)
             self.badge.set_fontsize(15)
@@ -474,10 +498,9 @@ class View:
             self.badge.set_text('MOTION' if det.motion else 'STILL')
             self.badge.set_color(MOTION_C if det.motion else STILL_C)
             self.badge.set_fontsize(22)
-        self.since.set_text(s.last_motion())
-
-        word, col, detail = s.link_health()
-        self.health.set_text(f"link {word}   {detail}")
+        self.since.set_text('' if status else s.last_motion())   # its clock stops with the data
+        word, col, detail = status or s.link_health()
+        self.health.set_text(detail if status else f"link {word}   {detail}")
         self.health.set_color(col)
 
         board = {None: 'n/a', True: 'MOTION', False: 'still'}[s.board_motion]
@@ -494,6 +517,9 @@ class View:
         self.info.set_visible(self.details)
         if not self.details:
             self._tiles(board, src)
+            if status:                           # stale numbers: grey them out
+                for _lab, val, _sub in self.tiles.values():
+                    val.set_color(DIM)
             rows = ['']
             self.footer.set_text(
                 f"board says {board}  ·  {len(dv.devs)} devices heard, poking {len(dv.poking)}"
@@ -950,9 +976,11 @@ def main():
             except queue.Empty:
                 break
             if line is None:
+                state.ended = state.lost is None
                 break
             if line.startswith('#ERR'):
                 print(line[1:], file=sys.stderr)
+                state.lost = line[5:].strip() or 'connection lost'
                 continue
             state.feed(line)
         for cmd in state.outbox:
