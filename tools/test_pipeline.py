@@ -260,6 +260,21 @@ def test_router_glitch():
     check_c_agrees('glitch', py, lines)
 
 
+def test_router_scan():
+    """A router's background scan (175 ms gaps, a ~0.3 shape change in every
+    other burst, 3.5 s from 25 s) must not count as motion; real movement after
+    it (from 45 s: scan steps take no scenario time) must."""
+    steps = [('still', 25), ('scan', 3.5), ('still', 20), ('motion', 4), ('still', 12)]
+    meta, lines, py = scenario('scan', steps)
+    got = motion_times(py['states'])
+    ignored = sum(s.n_glitch for s in py['det'].streams.values())
+    print(f"router scan at 25-28.5 s (motion from 45 s): motion {got}, {ignored} packets ignored")
+    assert ignored > 50, "scan packets weren't ignored"
+    assert not [m for m in got if m[0] < 44.9], f"router scan flagged as motion: {got}"
+    check_motion_found('scan', py, meta)
+    check_c_agrees('scan', py, lines)
+
+
 def test_noisier_room():
     """Board moved somewhere 2.5x noisier with no RSSI change, after tracking
     started: it may flag motion at first but must not get stuck there."""
@@ -313,6 +328,7 @@ def main():
     test_motion_while_calibrating()
     test_board_moved()
     test_router_glitch()
+    test_router_scan()
     test_noisier_room()
     test_real_captures()
     print("ALL PYTHON TESTS PASSED")

@@ -31,7 +31,7 @@ CFG = dict(
     floor_lo=0.005, floor_hi=0.2,
     rssi_tau_fast=5.0, rssi_tau_slow=60.0, rssi_step_db=4.0,
     rssi_min_age_us=10_000_000,
-    glitch_shape=0.4,                    # ignore packets whose shape jumps this far...
+    glitch_shape=0.2,                    # ignore packets whose shape jumps this far...
     glitch_hold_us=5_000_000,            # ...unless the new shape lasts this long
     tau_ref=1.0,                         # shape reference average (s)
 )

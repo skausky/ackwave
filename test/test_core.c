@@ -502,7 +502,8 @@ int main(void) {
     CHECK(md.phase == MD_CAL_COLLECT && md.floor == 0);
     // A wildly changing channel during collect: still no verdict (no floor yet)
     for (int i = 300; i < 400; i++) {
-        for (int j = 0; j < 128; j += 2) cb[j + 1] = (int8_t)(((i * 7 + j * 13) % 60) + 10);
+        for (int j = 0; j < 128; j += 2)   // 2 Hz, +-20 %: like a person, under the glitch limit
+            cb[j + 1] = (int8_t)lrintf(40 + 8 * sinf(2 * 3.14159265f * 2 * i * 0.01f + j * 0.7f));
         md_update(&md, 0, 1, i * 10000LL, -50, cb, 128);
         changes += md_eval(&md, i * 10000LL) != 0 || md.motion;
     }
@@ -586,7 +587,8 @@ int main(void) {
     md_init(&md, &mc, 0);
     md.floor = 0.04f;
     for (int i = 0; i < 1000; i++) {
-        for (int j = 0; j < 128; j += 2) cb[j + 1] = (int8_t)(((i * 7 + j * 13) % 60) + 10);
+        for (int j = 0; j < 128; j += 2)   // 2 Hz, +-20 %: like a person, under the glitch limit
+            cb[j + 1] = (int8_t)lrintf(40 + 8 * sinf(2 * 3.14159265f * 2 * i * 0.01f + j * 0.7f));
         md_update(&md, 0, 1, i * 10000LL, -50, cb, 128);
     }
     CHECK(md.s[1].score_s > mc.long_cap * 0.04f);

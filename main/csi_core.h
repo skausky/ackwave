@@ -520,7 +520,7 @@ static inline void md_cfg_default(md_cfg_t *c) {
     c->floor_lo = 0.005f;   c->floor_hi = 0.2f;
     c->rssi_tau_fast = 5.0f; c->rssi_tau_slow = 60.0f;
     c->rssi_step_db = 4.0f;  c->rssi_min_age_us = 10000000;
-    c->glitch_shape = 0.4f;  c->glitch_hold_us = 5000000;  c->tau_ref = 1.0f;
+    c->glitch_shape = 0.2f;  c->glitch_hold_us = 5000000;  c->tau_ref = 1.0f;
 }
 
 typedef struct {

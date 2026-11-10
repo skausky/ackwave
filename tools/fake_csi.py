@@ -75,7 +75,10 @@ def schedule(t_end):
 # Scenario steps: ('still', s) | ('motion', s) | ('hop',) |
 # ('relocate', rssi_change_db, noise_factor): the board is moved (new multipath) |
 # ('glitch', s): the router briefly switches to a very different channel shape
-# and snaps back (seen on a real ISP gateway every ~20 min); not motion
+# and snaps back (seen on a real ISP gateway every ~20 min); not motion |
+# ('scan', s): the router scans other channels: no packets for 175 ms of every
+# 0.5 s, and every other burst comes back with a milder (~0.3) shape change.
+# Seen every 20 min 2 s on another gateway; scored ~11x before it was filtered
 DEFAULT = [('still', 15), ('motion', 6), ('still', 8), ('hop',),
            ('still', 16), ('motion', 4), ('still', 10)]
 
@@ -141,6 +144,8 @@ def generate(seed=0, scenario=DEFAULT):
     moving_spans = [(t0, t1) for t0, t1, st in steps if st[0] == 'motion']
     glitch_spans = [(t0, t0 + st[1]) for t0, _t1, st in steps if st[0] == 'glitch']
     glitch_shape = np.where(K % 2, 1.7, 0.3)    # alternate strong/weak subcarriers
+    scan_spans = [(t0, t0 + st[1]) for t0, _t1, st in steps if st[0] == 'scan']
+    scan_shape = np.where(K % 2, 1.3, 0.7)
     next_stats, next_calib, pokes, acks, aps = 5.0, 5.0, 0, 0, 0
     for t, src, kind in schedule(t_end):
         while instant and t >= instant[0][0]:
@@ -166,6 +171,14 @@ def generate(seed=0, scenario=DEFAULT):
         h = links[src].copy()
         if any(a <= t < b for a, b in glitch_spans):
             h = h * glitch_shape
+        scan = [a for a, b in scan_spans if a <= t < b]
+        if scan:
+            cycle, phase = divmod(t - scan[0], 0.5)
+            if phase < 0.175:                    # off channel: nothing heard
+                pokes += kind
+                continue
+            if cycle % 2:
+                h = h * scan_shape
         moving = any(a <= t < b for a, b in moving_spans)
         if moving:                               # a moving reflector
             fd = 2.0 + 0.7 * src
