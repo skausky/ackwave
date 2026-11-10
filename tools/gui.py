@@ -575,8 +575,8 @@ class View:
             self._clock_axis(ax)
         ax.set_ylim(0, FREQS[-1])
         ax.axhline(LOW_HZ, color=DIM, lw=0.6, ls=':')
-        ax.set_title("Doppler of the router ACKs, dB over the quiet room (experimental): "
-                     "walking ~5-20 Hz, hand ~2-10 Hz, router scans < 3 Hz",
+        ax.set_title("Doppler of the router ACKs, dB over the quiet room (experimental): movement = "
+                     "lasting low band with streaks upward, router scan = 1 s blob under 3 Hz",
                      color=DIM, fontsize=8.5, loc='left')
 
     def _clock_axis(self, ax):

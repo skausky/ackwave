@@ -27,8 +27,9 @@ LIVE VIEW (GUI)
     last motion, and the most recent motion periods with their strength.
     Press d for the raw board counters (pokes, errors, drops).
   - Bottom panel: Doppler (experimental) = how fast things change.
-    Walking shows ~5-20 Hz, a waving hand ~2-10 Hz, a router scan is a
-    short blob under 3 Hz. Press w to switch to the subcarrier view.
+    Movement lights up the low band for as long as it lasts, with fainter
+    streaks reaching higher the faster you move; a router scan is a single
+    ~1 s blob under 3 Hz. Press w to switch to the subcarrier view.
   - The LED on the board: red = motion, blue = calibrating,
     yellow = looking for the router, off = still (white flash at power-on).
   - Middle panel = everything since the GUI opened, with clock times:

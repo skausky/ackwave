@@ -10,7 +10,7 @@ common to all subcarriers (PCA) and sums their power spectra.
 
 What it showed on real captures:
   quiet room   flat, noise-like spectrum (centre ~20 Hz), low power
-  walking      energy spread up to ~20 Hz (8-15 Hz: ~0.5-0.9 m/s)
+  walking      ~40 % under 3 Hz, the rest spread up to ~20 Hz, lasting
   hand waving  mostly 0.5-8 Hz
   router scan  high power, 83-95 % of it under 3 Hz: a step, not a movement
 It does not decide motion; the GUI shows it next to the detector.
