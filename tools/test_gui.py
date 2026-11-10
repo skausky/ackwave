@@ -78,6 +78,16 @@ def main():
     view.draw()
     assert 'normalised amplitude' in view.ax_wf.get_title(loc='left')
     view.bottom = 'doppler'
+    # Help overlay and toasts
+    class K:
+        key = 'h'
+    view._key(K)
+    assert view.help.get_visible() and 'recalibrate' in view.help.get_text()
+    K.key = 'escape'
+    view._key(K)
+    assert not view.help.get_visible()
+    view.recalibrate()                       # no board here: says so instead of nothing
+    assert 'needs a board' in view.footer.get_text()
     w_end = s.last_wall
     # Window buttons and pause: drawing at each window works; paused = no redraw
     for w in (120.0, 600.0, 30.0):

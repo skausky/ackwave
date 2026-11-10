@@ -9,7 +9,8 @@ With a board it also logs in the background, exactly like record.py (events
 and raw data in sessions/, summary when the window closes); --no-log turns
 that off. Buttons: 30 s / 2 min / 10 min of detail, and Pause (freezes the
 view so the toolbar can zoom and pan; logging continues). Keys: space = pause,
-1/2/3 = window, c = recalibrate (with a board), d = raw firmware counters.
+1/2/3 = window, c = recalibrate (with a board), d = raw firmware counters,
+w = Doppler / subcarrier view, h or ? = help overlay with keys and colours.
 The header shows link health, time since the last motion and the most recent
 motion periods with their peak score. The session timeline at the
 bottom covers everything since the GUI started, on a clock.
@@ -51,6 +52,22 @@ BG, PANEL, FG, DIM = '#101418', '#171c22', '#e6e9ed', '#7d8794'
 MOTION_C, STILL_C, LONG_C, CAL_C = '#ff5a4f', '#3ecf8e', '#f2f4f7', '#7d8794'
 BRIEF_C = '#ffb547'
 SCAN_C = '#9aa5b8'                              # router scans (ignored by the detector)
+HELP = '\n'.join([
+    'Keys',
+    '',
+    'space     pause / back to live (logging never stops)',
+    '1 2 3     show 30 s / 2 min / 10 min',
+    'c         recalibrate (step away for 5 s)',
+    'w         Doppler view / subcarrier view',
+    'd         details: raw board counters',
+    'h  ?      this help (Esc closes)',
+    '',
+    'Colours',
+    '',
+    'red       motion            green   still / clear breathing',
+    'orange    brief blip        amber   possible / router step?',
+    'grey band router scan, ignored by the board',
+])
 GRID_C = '#2a313a'
 WINDOWS = (30.0, 120.0, 600.0)                  # selectable detail windows (s)
 BRIEF_S = 2.0                                   # as record.py: shorter = brief blip
@@ -367,6 +384,10 @@ class View:
         plt.rcParams.update({'font.family': 'DejaVu Sans', 'font.size': 9,
                              'text.color': FG, 'axes.labelcolor': DIM,
                              'xtick.color': DIM, 'ytick.color': DIM})
+        for km, key in (('keymap.back', 'c'), ('keymap.home', 'h')):   # ours, not the toolbar's
+            if key in plt.rcParams[km]:
+                plt.rcParams[km] = [k for k in plt.rcParams[km] if k != key]
+        self.toast_text, self.toast_until = '', 0.0
         self.fig = plt.figure(figsize=(11.5, 9.4), facecolor=BG)
         try:
             self.fig.canvas.manager.set_window_title('CSI motion sensor')
@@ -413,6 +434,11 @@ class View:
         self.ax_wf.set_ylabel('subcarrier')
         self.ax_wf.set_xlabel('time (s)')
         self.wf_img = None
+        self.help = self.fig.text(
+            0.5, 0.55, HELP, ha='center', va='center', multialignment='left', fontsize=10, color=FG,
+            family='DejaVu Sans Mono',
+            linespacing=1.5, zorder=10, visible=False,
+            bbox=dict(boxstyle='round,pad=1.2', facecolor=BG, edgecolor=DIM, alpha=0.97))
         self._buttons()
         self.fig.canvas.mpl_connect('key_press_event', self._key)
 
@@ -460,16 +486,31 @@ class View:
         else:
             self.fig.canvas.draw_idle()
 
+    def toast(self, text, secs=5.0):
+        """A short confirmation in the footer line."""
+        self.toast_text, self.toast_until = text, time.monotonic() + secs
+        self._header()
+        self.fig.canvas.draw_idle()
+
     def recalibrate(self):
         """Same as the board's button: re-measure the quiet level in 5 s."""
         if self.send:
             self.send('CAL')
+            self.toast('Recalibrating: step away - the quiet level is measured again in 5 s')
+        else:
+            self.toast('Recalibrate needs a board (this is a demo or a file)')
 
     def _key(self, e):
         if e.key == ' ':
             self.toggle_pause()
         elif e.key == 'c':
             self.recalibrate()
+        elif e.key in ('h', '?'):
+            self.help.set_visible(not self.help.get_visible())
+            self.fig.canvas.draw_idle()
+        elif e.key == 'escape' and self.help.get_visible():
+            self.help.set_visible(False)
+            self.fig.canvas.draw_idle()
         elif e.key == 'w':
             self.bottom = 'subcarriers' if self.bottom == 'doppler' else 'doppler'
             self.draw()
@@ -523,8 +564,11 @@ class View:
             rows = ['']
             self.footer.set_text(
                 f"board says {board}  ·  {len(dv.devs)} devices heard, poking {len(dv.poking)}"
-                f"/{MAX_DEVS} ({dv.mode})  ·  d details  ·  w view"
+                f"/{MAX_DEVS} ({dv.mode})  ·  h help"
                 + ('   ·   PAUSED' if self.paused else ''))
+            if time.monotonic() < self.toast_until:
+                self.footer.set_text(self.toast_text)
+            self.footer.set_color(FG if time.monotonic() < self.toast_until else DIM)
         else:
             ch = f"ch {s.channel[0]} ({s.channel[1] or 'start'})" if s.channel else 'searching'
             rows = [f"{ch}   {quiet}, why {det.why}"]
