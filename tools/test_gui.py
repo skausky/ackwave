@@ -36,6 +36,20 @@ def main():
     assert len(s.hist_t) == len(s.hist_s) == len(s.hist_l) and len(s.hist_t) > 30
     assert all(b > a for a, b in zip(s.hist_t, s.hist_t[1:])), "one bin per second, in order"
     assert max(s.hist_s) > s.det.c['on_short'] and s.hist_cal
+    # Header: recent-motion list, time since last motion, link health
+    rec = s.recent_motion()
+    assert len(rec) == 2 and rec[0][0] > rec[1][0], "newest first"
+    assert all(dur >= 2 and peak > s.det.c['on_short'] and not going
+               for _a, dur, peak, going in rec), rec
+    assert s.last_motion().startswith('last motion') and s.last_motion().endswith('ago')
+    word, _col, detail = s.link_health()
+    assert word == 'WEAK' and 'router ACK' in detail, (word, detail)   # demo: 40 ACKs/s
+    view.draw()
+    assert 'peak x' in view.recent.get_text() and 'link WEAK' in view.health.get_text()
+    view.details = True
+    view.draw()
+    assert 'pokes' in view.info.get_text(), "details show the raw counters"
+    view.details = False
     w_end = s.last_wall
     # Window buttons and pause: drawing at each window works; paused = no redraw
     for w in (120.0, 600.0, 30.0):

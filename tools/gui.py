@@ -9,7 +9,9 @@ With a board it also logs in the background, exactly like record.py (events
 and raw data in sessions/, summary when the window closes); --no-log turns
 that off. Buttons: 30 s / 2 min / 10 min of detail, and Pause (freezes the
 view so the toolbar can zoom and pan; logging continues). Keys: space = pause,
-1/2/3 = window, c = recalibrate (with a board). The session timeline at the
+1/2/3 = window, c = recalibrate (with a board), d = raw firmware counters.
+The header shows link health, time since the last motion and the most recent
+motion periods with their peak score. The session timeline at the
 bottom covers everything since the GUI started, on a clock.
 
 A second window lists the devices the board hears on your network, with
@@ -60,6 +62,7 @@ class State:
         # one bin per second with the highest short / long score
         self.hist_t, self.hist_s, self.hist_l = [], [], []
         self.hist_motion, self.hist_cal = [], []     # [wall0, wall1 or None]
+        self.hist_peak = []                          # peak short score per hist_motion entry
         self.wall_off, self.last_wall = None, None
         self.reset()
 
@@ -156,6 +159,7 @@ class State:
             self.cal_spans[-1][1] = t
             if self.hist_cal and self.hist_cal[-1][1] is None:
                 self.hist_cal[-1][1] = w
+        ms = None
         if not calibrating:
             if s is not None:
                 self.scores[key].append((t, s / f))
@@ -174,10 +178,13 @@ class State:
         if change > 0:
             self.motion_spans.append([t, None])
             self.hist_motion.append([w, None])
+            self.hist_peak.append(0.0)
         elif change < 0 and self.motion_spans:
             self.motion_spans[-1][1] = t
             if self.hist_motion and self.hist_motion[-1][1] is None:
                 self.hist_motion[-1][1] = w
+        if ms is not None and self.hist_motion and self.hist_motion[-1][1] is None:
+            self.hist_peak[-1] = max(self.hist_peak[-1], ms / f)
 
     def _close_spans(self):
         """End open session spans (before a reboot / loop resets the board time)."""
@@ -192,6 +199,42 @@ class State:
         now = self.last_wall or 0
         d = [(b if b is not None else now) - a for a, b in self.hist_motion]
         return sum(x >= BRIEF_S for x in d), sum(x < BRIEF_S for x in d)
+
+    def recent_motion(self, n=4):
+        """Newest first: (start wall, seconds, peak x quiet level, still going)."""
+        now = self.last_wall or 0
+        out = []
+        for (a, b), peak in zip(self.hist_motion[-n:], self.hist_peak[-n:]):
+            out.append((a, (b if b is not None else now) - a, peak, b is None))
+        return out[::-1]
+
+    def last_motion(self):
+        """'MOTION for 12 s', 'last motion 3 min ago', or 'no motion yet'."""
+        if not self.hist_motion:
+            return 'no motion yet'
+        a, b = self.hist_motion[-1]
+        now = self.last_wall or a
+        if b is None:
+            return f"motion for {fmt_age(now - a)}"
+        return f"last motion {fmt_age(now - b)} ago"
+
+    def link_health(self):
+        """(word, colour, detail) for the link that decides motion."""
+        if self.channel is None or not self.channel[0]:
+            return 'SEARCHING', BRIEF_C, 'looking for the router'
+        live = [k for k in self.arrivals if k[0] < MAX_APS and self.rate(k) > 0]
+        if not live:
+            return 'NO SIGNAL', MOTION_C, f"nothing from the router on ch {self.channel[0]}"
+        acks = [k for k in live if k[1] == 1]
+        key = max(acks or live, key=self.rate)
+        rate, rssi = self.rate(key), self.rssi.get(key, 0)
+        if acks and rate >= 60 and rssi >= -80:
+            word, col = 'GOOD', STILL_C
+        elif rate >= 15:
+            word, col = 'WEAK', BRIEF_C
+        else:
+            word, col = 'POOR', MOTION_C
+        return word, col, f"{self.label(key)} {rate:.0f}/s  {rssi} dBm  ch {self.channel[0]}"
 
     def _trim(self):
         t0 = self.now - self.window_s
@@ -250,7 +293,8 @@ class View:
             self.fig.canvas.manager.set_window_title('CSI motion sensor')
         except AttributeError:
             pass
-        gs = self.fig.add_gridspec(4, 1, height_ratios=[0.45, 2.0, 1.0, 0.9],
+        self.details = False                     # 'd': raw firmware counters
+        gs = self.fig.add_gridspec(4, 1, height_ratios=[0.5, 2.05, 1.0, 0.75],
                                    left=0.07, right=0.97, top=0.97, bottom=0.06, hspace=0.42)
         self.ax_head = self.fig.add_subplot(gs[0])
         self.ax_score = self.fig.add_subplot(gs[1])
@@ -261,11 +305,17 @@ class View:
             for sp in ax.spines.values():
                 sp.set_color('#2a313a')
         self.ax_head.axis('off')
-        self.badge = self.ax_head.text(0.0, 0.5, '', fontsize=22, fontweight='bold',
-                                       va='center', ha='left', transform=self.ax_head.transAxes)
-        self.info = self.ax_head.text(0.2, 0.5, '', fontsize=9.5, va='center', ha='left',
-                                      color=FG, family='DejaVu Sans Mono',
-                                      transform=self.ax_head.transAxes)
+        head = dict(ha='left', transform=self.ax_head.transAxes)
+        mono = dict(head, family='DejaVu Sans Mono')
+        self.badge = self.ax_head.text(0.0, 0.55, '', fontsize=22, fontweight='bold',
+                                       va='center', **head)
+        self.since = self.ax_head.text(0.0, 0.0, '', fontsize=9.5, va='center', color=DIM,
+                                       **head)
+        self.health = self.ax_head.text(0.2, 1.0, '', fontsize=9.5, fontweight='bold',
+                                        va='top', **mono)
+        self.info = self.ax_head.text(0.2, 0.62, '', fontsize=9, va='top', color=FG, **mono)
+        self.recent = self.ax_head.text(0.66, 0.5, '', fontsize=8.5, va='top', color=FG,
+                                        linespacing=1.25, **mono)
         self.ax_score.set_ylabel('motion score')
         self.ax_wf.set_ylabel('subcarrier')
         self.ax_wf.set_xlabel('time (s)')
@@ -327,47 +377,78 @@ class View:
             self.toggle_pause()
         elif e.key == 'c':
             self.recalibrate()
+        elif e.key == 'd':
+            self.details = not self.details
+            self.draw()
+            self.fig.canvas.draw_idle()
         elif e.key in ('1', '2', '3'):
             self.set_window(WINDOWS[int(e.key) - 1])
 
-    def draw(self):
-        s, ax = self.s, self.ax_score
-        motion, det = s.det.motion, s.det
+    def _header(self):
+        """Badge, link health, quiet level and the recent-motion list."""
+        s, det = self.s, self.s.det
         if det.floor <= 0:
             self.badge.set_text('CALIBRATING')
             self.badge.set_color(CAL_C)
             self.badge.set_fontsize(15)
         else:
-            self.badge.set_text('MOTION' if motion else 'STILL')
-            self.badge.set_color(MOTION_C if motion else STILL_C)
+            self.badge.set_text('MOTION' if det.motion else 'STILL')
+            self.badge.set_color(MOTION_C if det.motion else STILL_C)
             self.badge.set_fontsize(22)
+        self.since.set_text(s.last_motion())
 
-        ch = f"ch {s.channel[0]} ({s.channel[1] or 'start'})" if s.channel else 'searching...'
+        word, col, detail = s.link_health()
+        self.health.set_text(f"link {word}   {detail}")
+        self.health.set_color(col)
+
         board = {None: 'n/a', True: 'MOTION', False: 'still'}[s.board_motion]
         src = 'board' if det.external else 'PC'
-        quiet = (f"quiet level {det.floor:.4f} ({det.phase}, {det.why}, from {src})"
-                 if det.floor > 0 else f"measuring quiet level ({det.phase}, {det.why}) - keep still")
         dv = s.devices
-        rows = [f"{ch:18s} board says: {board}", quiet]
-        streams = sorted(set(s.arrivals) | set(s.scores))
-        live = [k for k in streams if s.rate(k) > 0]
-        rows.append('   '.join(
-            f"{s.label(k)} {s.rate(k):3.0f}/s {s.rssi.get(k, 0):4d}dBm"
-            for k in live[:4]) or 'waiting for CSI...')
-        if s.stats:
-            st = s.stats
-            ratio = st['ack'] / st['poke'] if st['poke'] else 0
-            rows.append(f"pokes {st['poke']}  ACK CSI {st['ack']} ({ratio:.0%})  "
-                        f"tx err {st['tx_err']}  queue drops {st['qfull']}  "
-                        f"router replies {st.get('reply', 0)}   APs {len(s.nodes)}  "
-                        f"devices heard {len(dv.devs)}, poking {len(dv.poking)}/{MAX_DEVS} "
-                        f"({dv.mode})")
+        if det.floor > 0:
+            quiet = f"quiet level {det.floor:.4f} ({det.phase}, from {src})"
+        else:
+            quiet = f"measuring quiet level ({det.phase}, {det.why}) - keep still"
+        if not self.details:
+            rows = [quiet,
+                    f"board says {board}",
+                    f"devices {len(dv.devs)} heard, poking {len(dv.poking)}/{MAX_DEVS} "
+                    f"({dv.mode})   d = details"]
+        else:
+            ch = f"ch {s.channel[0]} ({s.channel[1] or 'start'})" if s.channel else 'searching'
+            rows = [f"{ch}   {quiet}, why {det.why}"]
+            streams = sorted(set(s.arrivals) | set(s.scores))
+            live = [k for k in streams if s.rate(k) > 0]
+            rows.append('  '.join(f"{s.label(k)} {s.rate(k):.0f}/s {s.rssi.get(k, 0)}dBm"
+                                  for k in live[:3]) or 'waiting for CSI...')
+            if s.stats:
+                st = s.stats
+                ratio = st['ack'] / st['poke'] if st['poke'] else 0
+                rows.append(f"pokes {st['poke']}  ACK CSI {st['ack']} ({ratio:.0%})  "
+                            f"tx err {st['tx_err']}")
+                rows.append(f"queue drops {st['qfull']}  router replies {st.get('reply', 0)}"
+                            f"  APs {len(s.nodes)}   d = less")
+        if self.paused:
+            rows[0] += '   [PAUSED]'
         self.info.set_text('\n'.join(rows))
 
+        lines = ['recent motion']
+        for a, dur, peak, going in s.recent_motion():
+            what = f"now {fmt_age(dur)}" if going else fmt_age(dur)
+            if not going and dur < BRIEF_S:
+                what = 'brief'
+            lines.append(f"{time.strftime('%H:%M:%S', time.localtime(a))}  "
+                         f"{what:9s} peak x{peak:.1f}")
+        if len(lines) == 1:
+            lines.append('none yet')
+        self.recent.set_text('\n'.join(lines))
+
+    def draw(self):
+        s, ax = self.s, self.ax_score
+        det = s.det
+        self._header()
         if self.paused:
-            rows[0] += '   [PAUSED: zoom/pan freely, logging continues]'
-            self.info.set_text('\n'.join(rows))
             return
+        streams = sorted(set(s.arrivals) | set(s.scores))
         ax.cla()
         ax.set_facecolor(PANEL)
         win = self.view_s

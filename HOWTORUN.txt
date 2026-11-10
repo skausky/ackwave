@@ -23,6 +23,11 @@ LIVE VIEW (GUI)
       Pause ................... freeze the view to zoom/pan with the toolbar
                                 (logging keeps going; press Live to go back)
                                 (key: space bar)
+  - Top: link health (green GOOD / yellow WEAK / red POOR), time since the
+    last motion, and the most recent motion periods with their strength.
+    Press d for the raw board counters (pokes, errors, drops).
+  - The LED on the board: red = motion, blue = calibrating,
+    yellow = looking for the router, off = still.
   - Middle panel = everything since the GUI opened, with clock times:
       red = motion, orange ticks = brief blips, grey = calibrating
 

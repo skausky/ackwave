@@ -11,6 +11,7 @@
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/rmt_tx.h"
 #include "hal/usb_serial_jtag_ll.h"
 #include "csi_core.h"
 
@@ -46,6 +47,12 @@
 #ifndef CAL_DELAY_S
 #define CAL_DELAY_S    5         // after a button press: time to step away
 #endif
+#ifndef LED_GPIO
+#define LED_GPIO       48        // on-board RGB LED (WS2812): 48 on most S3 boards,
+#endif                           // 38 on DevKitC-1 v1.1; -1 = no LED
+#ifndef LED_BRIGHT
+#define LED_BRIGHT     40        // motion colour brightness, 1-255
+#endif
 // Detector thresholds, multiples of the measured quiet level. Lower = more
 // sensitive. Defaults (md_cfg_default in csi_core.h): short 2.8/2.0, long 1.4/1.2
 // #define MD_ON_SHORT 2.8f
@@ -54,6 +61,9 @@
 
 #if CAL_BUTTON_GPIO >= 0 && CAL_BUTTON_GPIO == BUZZER_GPIO
 #error "CAL_BUTTON_GPIO and BUZZER_GPIO must differ"
+#endif
+#if LED_GPIO >= 0 && (LED_GPIO == BUZZER_GPIO || LED_GPIO == CAL_BUTTON_GPIO)
+#error "LED_GPIO must differ from BUZZER_GPIO and CAL_BUTTON_GPIO"
 #endif
 
 #define LOST_MS        2000      // rescan after 2 s without beacons/CSI
@@ -156,6 +166,60 @@ static void buzzer_beep(int ms) {
     buzzer_set(true);
     if (esp_timer_start_once(buzz_off_timer, (uint64_t)ms * 1000) != ESP_OK)
         buzzer_set(false);
+}
+
+// ---------------- Status LED (on-board WS2812) ----------------
+// red = motion, dim blue = calibrating, dim yellow = looking for the router,
+// off = still. Only control_task writes it (led_update), so no locking.
+// A missing LED can't be detected; on a pin with nothing on it this is harmless.
+enum { LED_STILL, LED_MOTION, LED_CAL, LED_SEARCH };
+static bool led_ok;
+static volatile bool led_motion, led_cal;    // set by print_task
+static rmt_channel_handle_t led_chan;
+static rmt_encoder_handle_t led_enc;
+
+static void led_init(void) {
+    led_ok = false;
+    if (LED_GPIO < 0) { printf("LED,off\n"); return; }
+    rmt_tx_channel_config_t tc = {
+        .gpio_num = LED_GPIO, .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10000000, .mem_block_symbols = 48, .trans_queue_depth = 2,
+    };
+    esp_err_t err = rmt_new_tx_channel(&tc, &led_chan);
+    if (err == ESP_OK) {
+        rmt_bytes_encoder_config_t bc = {           // WS2812 bit timing, 0.1 us ticks
+            .bit0 = { .level0 = 1, .duration0 = 3, .level1 = 0, .duration1 = 9 },
+            .bit1 = { .level0 = 1, .duration0 = 9, .level1 = 0, .duration1 = 3 },
+            .flags.msb_first = 1,
+        };
+        err = rmt_new_bytes_encoder(&bc, &led_enc);
+    }
+    if (err == ESP_OK) err = rmt_enable(led_chan);
+    if (err != ESP_OK) {
+        printf("LED,error,%s\n", esp_err_to_name(err));   // keep going without it
+        return;
+    }
+    led_ok = true;
+    printf("LED,gpio%d\n", LED_GPIO);
+}
+
+static void led_show(int what) {
+    static int shown = -1;
+    static uint8_t grb[3];                   // must outlive the transfer
+    if (!led_ok || what == shown) return;
+    if (rmt_tx_wait_all_done(led_chan, 10) != ESP_OK) return;   // retry next poll
+    const uint8_t b = LED_BRIGHT, d = LED_BRIGHT / 5 ? LED_BRIGHT / 5 : 1;
+    uint8_t r = 0, g = 0, bl = 0;
+    if (what == LED_MOTION) r = b;
+    else if (what == LED_CAL) bl = d;
+    else if (what == LED_SEARCH) { r = d; g = d; }
+    grb[0] = g; grb[1] = r; grb[2] = bl;
+    rmt_transmit_config_t t = { .loop_count = 0 };
+    if (rmt_transmit(led_chan, led_enc, grb, sizeof grb, &t) == ESP_OK) shown = what;
+}
+
+static void led_update(bool searching) {
+    led_show(searching ? LED_SEARCH : led_motion ? LED_MOTION : led_cal ? LED_CAL : LED_STILL);
 }
 
 // ---------------- Probe mode (hardware bring-up) ----------------
@@ -429,6 +493,7 @@ static void control_task(void *arg) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
         poll_cmds();
+        led_update(false);
 
         for (int n = node_count(&nodes); printed < n; printed++) {
             const uint8_t *m = nodes.mac[printed];
@@ -481,6 +546,7 @@ static void control_task(void *arg) {
         now = now_ms();                    // the prints above can block
         if (need_scan || older_than(now, last_seen_ms, LOST_MS)) {  // silent hop
             need_scan = false;
+            led_update(true);
             int ch = sweep();
             printf("CHANNEL,%" PRId64 ",%d,%s\n", esp_timer_get_time(),
                    ch, ch ? "scan" : "lost");
@@ -528,6 +594,8 @@ static void print_task(void *arg) {
 
         md_update(&det, p.src, p.kind, p.ts, p.rssi, p.buf, p.len);
         int change = md_eval(&det, p.ts);
+        led_cal = det.phase <= MD_CAL_COLLECT;   // no quiet level yet
+        led_motion = det.motion;
         if (md_take_cal_event(&det) || p.ts >= next_calib) {
             next_calib = p.ts + CALIB_EVERY_US;
             print_calib(&det, p.ts);
@@ -552,6 +620,7 @@ void app_main(void) {
 
     gate_init(&gate);
     buzzer_init();                           // never fatal
+    led_init();                              // never fatal
 #if CAL_BUTTON_GPIO >= 0
     gpio_config_t btn = { .pin_bit_mask = 1ULL << CAL_BUTTON_GPIO, .mode = GPIO_MODE_INPUT,
                           .pull_up_en = GPIO_PULLUP_ENABLE };

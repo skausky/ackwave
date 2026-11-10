@@ -132,6 +132,8 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    | `BUZZER_ACTIVE` | 0 | 0 = passive piezo (PWM tone), 1 = active buzzer |
    | `CAL_BUTTON_GPIO` | 0 | button that recalibrates (BOOT on most boards); -1 = none |
    | `CAL_DELAY_S` | 5 | after a press: time to step away before measuring |
+   | `LED_GPIO` | 48 | on-board RGB LED (WS2812); 38 on DevKitC-1 v1.1; -1 = none |
+   | `LED_BRIGHT` | 40 | LED brightness for motion, 1-255 |
    | `MD_ON_SHORT` / `MD_ON_LONG` | 2.8 / 1.4 | thresholds as multiples of the quiet level; lower = more sensitive |
 
    Any of these can also be set at build time without editing, for example `CSI_DEFS="CSI_PROBE=1" idf.py build`.
@@ -162,7 +164,9 @@ It finds the board, keeps the PC from sleeping while it runs, and reconnects if 
 
 ### Running unplugged
 
-The detector runs on the board, so it works from any USB charger or power bank. With a buzzer it beeps when motion starts. Without one it still runs; serial output just goes nowhere.
+The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion, dim **blue** = calibrating, dim **yellow** = looking for the router, **off** = still. With a buzzer it also beeps when motion starts. Serial output just goes nowhere.
+
+If the LED stays dark, your board has it on another pin: build with `CSI_DEFS="LED_GPIO=38"` (ESP32-S3-DevKitC-1 v1.1).
 
 ### Buzzer (optional)
 
@@ -197,6 +201,7 @@ POKING,<idx>,<mac>                               devices being poked (nodes 8..1
 DEV,<mac>,<rssi>,<frames_sent>,<frames_received>,<ms_since_heard>   devices on our network, every 5 s
 UNPOKED,<mac|all>   REFUSED,<mac>,<not-seen-on-network|is-an-ap|full>   REFUSED,bad-command
 BUZZER,<off|gpioN|error,...>
+LED,<off|gpioN|error,...>
 BUTTON,<gpioN|error,gpioN|recalibrate|recalibrate,pc>
 PROBE,...                                        only with CSI_PROBE=1
 ```
