@@ -145,13 +145,13 @@ typedef struct { uint16_t hz, ms, hz2; } note_t;  // hz 0 = rest; hz2 set = glid
 typedef struct { note_t n[4]; uint8_t vol; } tune_t;  // ends at the first ms == 0; vol % (0 = BUZZER_VOL)
 static int buzz_vol = BUZZER_VOL;            // volume of the tune playing (buzzer task only)
 
-// High and loud = something is happening, soft and falling = settling down,
-// low = a problem. Status sounds use the soft pitch, motion the loud one.
+// Rising = something started, falling = it ended, low = a problem.
+// Motion uses BUZZER_HZ and a minor third above it.
 static const tune_t TUNE_HELLO  = {{{BUZZER_SOFT_HZ, 70, 0}, {3000, 70, 0}, {BUZZER_HZ, 120, 0}}, 0};  // rising chirp
 static const tune_t TUNE_TICK   = {{{3000, 30, 0}}, 0};                                          // got the command
 static const tune_t TUNE_READY  = {{{BUZZER_SOFT_HZ, 50, 0}, {0, 80, 0}, {BUZZER_SOFT_HZ, 50, 0}}, 0}; // two soft blips
-static const tune_t TUNE_MOTION = {{{BUZZER_HZ, BEEP_MS, 0}}, 0};                                  // one loud beep
-static const tune_t TUNE_STILL  = {{{2500, 70, 0}, {0, 30, 0}, {1800, 120, 0}}, 0};                    // dee-doo
+static const tune_t TUNE_MOTION = {{{BUZZER_HZ, 70, 0}, {0, 40, 0}, {BUZZER_HZ * 6 / 5, 110, 0}}, 0}; // bi-ding: rising = started
+static const tune_t TUNE_STILL  = {{{BUZZER_HZ * 6 / 5, 70, 0}, {0, 40, 0}, {BUZZER_HZ, 110, 0}}, 0}; // ding-bi: falling = ended
 static const tune_t TUNE_LOST   = {{{2000, 120, 0}, {1500, 120, 0}, {1000, 300, 0}}, 0};               // doo-doo-dooo
 // Alarm mode: an air-raid whoop, looped while motion lasts, always at full volume
 static const tune_t TUNE_WHOOP  = {{{800, 900, 6000}, {0, 250, 0}}, 50};

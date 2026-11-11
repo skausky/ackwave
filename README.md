@@ -185,8 +185,8 @@ High and loud = something is happening, soft and falling = settling down, low = 
 | rising chirp | powered on |
 | one soft tick | recalibrate button / PC command received: step away |
 | two soft blips | calibrated, watching for motion |
-| one beep | motion that has lasted 2 s (brief blips stay silent; at most one per 30 s; none while the link is weak) |
-| soft falling pair (dee-doo) | that motion ended |
+| rising chime (bi-ding) | motion that has lasted 2 s (brief blips stay silent; at most one per 30 s; none while the link is weak) |
+| falling chime (ding-bi) | that motion ended |
 | low three-step fall | lost the router (once per loss) |
 | soft rising pair (doo-dee) | found the router again | Serial output just goes nowhere.
 
