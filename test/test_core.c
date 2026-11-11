@@ -237,6 +237,19 @@ int main(void) {
     CHECK(next_poke_target(&ct, nch, 1, &rr, &pg, 0) == -1);       // none on ch 1
     node_table_t empty = {0};
     rr = 0; CHECK(next_poke_target(&empty, nch, 6, &rr, &pg, 0) == -1);
+    // A far AP (more than POKE_FAR_DB under the strongest) doesn't split the router's pokes
+    gate_rssi(&pg, 0, -50); gate_rssi(&pg, 1, -79);
+    rr = 0;
+    { int g0 = 0; for (int j = 0; j < 20; j++) g0 += next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 0;
+      CHECK(g0 == 20); }
+    CHECK(ap_is_far(&pg, 1, ap_best_rssi_x16(&ct, nch, 6, &pg)) && !ap_is_far(&pg, 0, ap_best_rssi_x16(&ct, nch, 6, &pg)));
+    gate_init(&pg); gate_rssi(&pg, 0, -50); gate_rssi(&pg, 1, -60);   // close enough: shared
+    { int g1 = 0; for (int j = 0; j < 20; j++) g1 += next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 1;
+      CHECK(g1 == 10); }
+    pg.yield[0] = 0;                                         // strongest goes silent: the other isn't "far" any more
+    { int g1 = 0; for (int j = 0; j < 20; j++) g1 += next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 1;
+      CHECK(g1 >= 19); }
+    gate_init(&pg);
 
     // Device slots: nodes MAX_APS.., found by MAC, poked like APs
     {

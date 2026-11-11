@@ -366,6 +366,7 @@ static inline int classify_csi(const node_table_t *t, poke_state_t *pk,
 #define POKE_MIN_YIELD   20      // % of pokes answered; below = silent
 #define POKE_EVAL_N      50      // pokes per yield verdict
 #define POKE_TRIAL_EVERY 50      // 1 in N pokes goes to a silent AP
+#define POKE_FAR_DB      15      // an AP this much weaker than the strongest is skipped
 
 enum { GATE_OK = 0, GATE_WEAK = 1, GATE_SILENT = 2 };
 
@@ -432,6 +433,23 @@ static inline const char *gate_name(int s) {
     return s == GATE_WEAK ? "weak" : s == GATE_SILENT ? "silent" : "ok";
 }
 
+// Strongest beacon RSSI (x16) among the usable APs on `ch`, 0 if none known.
+// An AP far weaker than that one is "far": it splits the router's pokes but
+// its link covers little, so it is skipped (it rejoins if it gets closer).
+static inline int ap_best_rssi_x16(const node_table_t *t, const int *node_ch, int ch,
+                                   const poke_gate_t *g) {
+    int best = 0;
+    for (int i = 0; i < MAX_APS; i++)
+        if (node_active(t, i) && node_ch[i] == ch && gate_state(g, i) == GATE_OK &&
+            g->rssi_x16[i] && (!best || g->rssi_x16[i] > best))
+            best = g->rssi_x16[i];
+    return best;
+}
+static inline bool ap_is_far(const poke_gate_t *g, int i, int best_x16) {
+    return i < MAX_APS && best_x16 && g->rssi_x16[i] &&
+           g->rssi_x16[i] < best_x16 - POKE_FAR_DB * 16;
+}
+
 // Next node to poke among those heard on `ch`, or -1. devs = 0 picks among
 // APs, 1 among devices: the poke task alternates, so devices never take
 // pokes from the router. Round-robin over the OK ones, with the trial rule
@@ -451,9 +469,10 @@ static inline int next_poke_target(const node_table_t *t, const int *node_ch,
             }
         }
     }
+    int best_ap = devs ? 0 : ap_best_rssi_x16(t, node_ch, ch, g);
     for (int k = 0; k < n; k++) {
         int i = (*rr + k) % n;
-        if (NPT_MINE(i) && gate_state(g, i) == GATE_OK) {
+        if (NPT_MINE(i) && gate_state(g, i) == GATE_OK && !ap_is_far(g, i, best_ap)) {
             *rr = (i + 1) % n;
             return i;
         }

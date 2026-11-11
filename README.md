@@ -225,7 +225,7 @@ CALIB,<ts_us>,<wait|collect|fast|track>,<boot|button|rssi|channel>,<quiet×1e6>,
                                                  on every calibration change and every 5 s
 STATS,<ts_us>,<pokes>,<tx_err>,<ack_csi>,<ap_csi>,<dropped>,<queue_full>,<poke_replies>   every 5 s
                                                  (ME, LEARNED and GATE are repeated just before it)
-GATE,<idx>,<beacon_rssi>,<yield_pct|-1>,<pokes>,<ok|weak|silent>   per poked AP / device, every 5 s
+GATE,<idx>,<beacon_rssi>,<yield_pct|-1>,<pokes>,<ok|weak|silent|far>   per poked AP / device, every 5 s (far = AP over 15 dB under the strongest: skipped)
 POKING,<idx>,<mac>                               devices being poked (nodes 8..11), every 5 s
 DEV,<mac>,<rssi>,<frames_sent>,<frames_received>,<ms_since_heard>   devices on our network, every 5 s
 UNPOKED,<mac|all>   REFUSED,<mac>,<not-seen-on-network|is-an-ap|full>   REFUSED,bad-command

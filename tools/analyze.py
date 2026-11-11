@@ -75,7 +75,7 @@ def parse_line(line):
             return 'learned', dict(idx=int(p[1]), mac=p[2])
         if line.startswith('GATE,'):                     # per-link poke health
             p = line.split(',')
-            if len(p) != 6 or p[5] not in ('ok', 'weak', 'silent'):
+            if len(p) != 6 or p[5] not in ('ok', 'weak', 'silent', 'far'):
                 return None
             return 'gate', dict(idx=int(p[1]), rssi=int(p[2]), yield_pct=int(p[3]),
                                 sent=int(p[4]), state=p[5])

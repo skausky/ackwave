@@ -646,10 +646,14 @@ static void control_task(void *arg) {
                        m[0], m[1], m[2], m[3], m[4], m[5]);
             }
 #if POKE_HZ > 0
+            int best_ap = ap_best_rssi_x16(&nodes, node_ch, cur_ch, &gate);
             for (int i = 0; i < MAX_NODES; i++)
-                if (node_active(&nodes, i))
+                if (node_active(&nodes, i)) {
+                    int st = gate_state(&gate, i);
                     printf("GATE,%d,%d,%d,%d,%s\n", i, gate.rssi_x16[i] / 16, gate.yield[i],
-                           gate.sent[i], gate_name(gate_state(&gate, i)));
+                           gate.sent[i], st == GATE_OK && ap_is_far(&gate, i, best_ap)
+                           ? "far" : gate_name(st));
+                }
             print_poking();
 #endif
             print_devices();
