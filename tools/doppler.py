@@ -46,8 +46,9 @@ def wavelength(ch):
 class Doppler:
     """Feed it every CSI packet; it keeps spectra for the deciding ACK stream."""
 
-    def __init__(self, keep_s=600.0):
+    def __init__(self, keep_s=600.0, src=None):
         self.keep_s = keep_s
+        self.src = src                            # None: the APs' ACKs; else only node src
         self.buf = {}                             # (src, kind) -> deque[(t, x)]
         self.rows = deque()                       # (t, spectrum, features)
         self.base = None                          # quiet-room spectrum (slow median)
@@ -56,7 +57,7 @@ class Doppler:
 
     def feed(self, d, t):
         """d = parsed CSI dict, t = its time in seconds (board clock)."""
-        if d['kind'] != 1 or d['src'] >= MAX_APS:
+        if d['kind'] != 1 or (d['src'] >= MAX_APS if self.src is None else d['src'] != self.src):
             return None
         self.ch = d.get('ch') or self.ch
         a = d['amp'][VALID]

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One entry point for everything. Run with no arguments for a menu.
 #   ./csi gui        live view of the board (also logs, like record)
+#   ./csi web        the live view as a web dashboard (localhost:8765; also logs)
 #   ./csi record     log motion with clock times until Ctrl+C (e.g. overnight)
 #   ./csi history    look back at a logged session (newest; or: ./csi history --list)
 #   ./csi demo       GUI on fake data (no board needed)
@@ -42,6 +43,12 @@ cmd_gui() {
     local port; port=$(find_port) || exit 1
     echo "Opening the live view on $port (close the window to stop)."
     exec "$PY" tools/gui.py "$port"
+}
+
+cmd_web() {
+    need_python
+    local port; port=$(find_port) || exit 1
+    exec "$PY" tools/web.py "$port" --open "$@"
 }
 
 cmd_record() {
@@ -98,20 +105,21 @@ EOF
     echo "next to the GUI so you can see messages; close either to stop."
 }
 
-usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; }
 
 menu() {
     echo "CSI motion sensor"
     echo "  1) Live view (GUI)"
-    echo "  2) Record motion (e.g. overnight, Ctrl+C to stop)"
-    echo "  3) History: look back at the last session"
-    echo "  4) Demo GUI on fake data"
-    echo "  5) Build and flash firmware"
-    echo "  6) Run tests"
-    read -rp "Choose 1-6: " c
+    echo "  2) Live view in the browser (web dashboard)"
+    echo "  3) Record motion (e.g. overnight, Ctrl+C to stop)"
+    echo "  4) History: look back at the last session"
+    echo "  5) Demo GUI on fake data"
+    echo "  6) Build and flash firmware"
+    echo "  7) Run tests"
+    read -rp "Choose 1-7: " c
     case "$c" in
-        1) cmd_gui ;; 2) cmd_record ;; 3) cmd_history ;; 4) cmd_demo ;; 5) cmd_flash ;;
-        6) cmd_test ;;
+        1) cmd_gui ;; 2) cmd_web ;; 3) cmd_record ;; 4) cmd_history ;; 5) cmd_demo ;;
+        6) cmd_flash ;; 7) cmd_test ;;
         *) echo "Nothing chosen." ;;
     esac
 }
@@ -119,6 +127,7 @@ menu() {
 case "${1:-}" in
     "") menu ;;
     gui) cmd_gui ;;
+    web) shift; cmd_web "$@" ;;
     record) cmd_record ;;
     history) shift; cmd_history "$@" ;;
     demo) cmd_demo ;;

@@ -38,14 +38,15 @@ POSSIBLE = 30.0                   # prominence for "possible"
 class Breathing:
     """Feed it every CSI packet; it estimates breathing on the router's ACKs."""
 
-    def __init__(self):
+    def __init__(self, src=None):
+        self.src = src                           # None: the APs' ACKs; else only node src
         self.buf = {}                            # (src, 1) -> deque[(t, x)]
         self.next_t = None
         self.last = None                         # latest reading (dict) or None
 
     def feed(self, d, t):
         """d = parsed CSI dict, t = its time in seconds. Returns a new reading or None."""
-        if d['kind'] != 1 or d['src'] >= MAX_APS:
+        if d['kind'] != 1 or (d['src'] >= MAX_APS if self.src is None else d['src'] != self.src):
             return None
         a = d['amp'][VALID]
         m = a.mean()

@@ -4,7 +4,7 @@
 
 The detector runs **on the board itself**, so it works from a phone charger with an LED and optional sounds. A live GUI shows the details when it's plugged into a PC.
 
-![Live GUI on synthetic data: calibrating, motion, channel hop with recalibration, motion again](docs/gui.png)
+![The web dashboard on demo data: motion in progress, per-link scores against the thresholds, Doppler, breathing and the session timeline](docs/dashboard.png)
 
 ## What makes it different
 
@@ -30,7 +30,8 @@ cd ackwave
 
 | Command | What it does |
 |---|---|
-| `./csi gui` | **Live view.** It also logs everything in the background, just like `record`. Close the window to stop; the summary is printed and saved. |
+| `./csi web` | **Web dashboard** in your browser (and on your phone over SSH, see below). It also logs like `record`. |
+| `./csi gui` | **Live view** in a desktop window. It also logs everything in the background, just like `record`. Close the window to stop; the summary is printed and saved. |
 | `./csi record` | **Log motion with clock times, no window** (e.g. overnight or while you're out). The PC stays awake; **Ctrl+C** stops it and prints a summary. |
 | `./csi history` | **Look back** at the last session: a zoomable timeline and a list of motion periods. `./csi history --list` shows all sessions; `./csi history 11-08` opens the one from 8 Nov. |
 | `./csi demo` | The GUI on fake data, no board needed |
@@ -46,6 +47,20 @@ Sessions from both `gui` and `record` are saved to `sessions/` in the project fo
 - **Top plot:** both scores as multiples of the room's quiet level, with the thresholds as lines. The **30 s / 2 min / 10 min** buttons (or keys 1/2/3) choose how much it shows.
 - **Session timeline:** everything since the GUI opened, on a clock. It shows the peak score each second, motion periods in red, brief blips as orange ticks and calibration in grey.
 - **Pause** (or the space bar) freezes the view so the toolbar's zoom and pan tools work. Logging carries on, and **Live** goes back. Calibration takes about 10 s after power-up; keep still for it, or press the board's **BOOT** button to recalibrate (it waits 5 s so you can step away).
+
+### Web dashboard
+
+`./csi web` opens the live view in your browser at `http://localhost:8765`: status, link health, breathing, Doppler and quiet-level cards, the motion score with its thresholds, the Doppler and breathing charts and the whole session, plus **Recalibrate**, **Network** (choose the router) and **Devices** (extra links). Keys: space pauses, 1/2/3 pick 30 s / 2 min / 10 min, c recalibrates, n opens the network picker, ? shows help. It works on phone-sized screens too.
+
+The server listens on this PC only (`127.0.0.1`), so nothing else on your network can reach it. To use it from your phone, forward the port over SSH, for example with Termux or any SSH app that supports local forwarding:
+
+```bash
+ssh -L 8765:localhost:8765 you@your-pc     # then open http://localhost:8765 on the phone
+```
+
+Commands from the page need a header that other websites can't send, and the server refuses requests addressed to any other host name, so a web page you visit can't control the board through it. `--host 0.0.0.0` opens it to your whole LAN instead; only do that on a network you trust.
+
+**Settings (⚙): per-link analysis (experimental, off by default).** Analyses every link on its own (the router, and each device being poked): its activity against its own quiet level, its breathing and its Doppler, side by side. Click a link to point the breathing and Doppler charts at it. It is display only: the board's verdict still comes from the router link. Saved in `sessions/dashboard.json`.
 
 **First-time setup** (already done on this PC): `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`.
 
@@ -279,14 +294,17 @@ GLIDE,<ms>,<hz>,<hz2>[,<vol>]  test a smooth pitch glide from hz to hz2
 │   ├── score_lines.c       runs the C detector on a log (C/Python cross-check)
 │   └── data/               real captures (still room, person moving) used by the tests
 ├── tools/
-│   ├── gui.py              live GUI (+ device list window)
+│   ├── gui.py              live desktop GUI (+ device list and network windows)
+│   ├── web.py              web dashboard server (localhost; page in tools/web/)
+│   ├── doppler.py          Doppler spectrogram of a link (experimental)
+│   ├── breathing.py        breathing-rate estimate of a link (experimental)
 │   ├── devices.py          device names (OUI), stationary check, which to poke
 │   ├── analyze.py          text analyzer + Python detector
 │   ├── record.py           session recorder: readable motion log + summary
 │   ├── probe_report.py     hardware bring-up report
 │   ├── fake_csi.py         synthetic data generator
 │   └── test_*.py           Python tests
-└── docs/gui.png
+└── docs/dashboard.png
 ```
 
 ## Limitations

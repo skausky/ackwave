@@ -22,7 +22,7 @@ build-host/score_lines: test/score_lines.c main/csi_core.h
 test-py: build-host/score_lines
 	cd tools && $(PY) test_pipeline.py && $(PY) test_probe_report.py && \
 		$(PY) test_gui.py && $(PY) test_record.py && $(PY) test_history.py && \
-		$(PY) test_devices.py && $(PY) test_doppler.py && $(PY) test_breathing.py
+		$(PY) test_devices.py && $(PY) test_doppler.py && $(PY) test_breathing.py && $(PY) test_web.py
 
 demo:
 	$(PY) tools/fake_csi.py | $(PY) tools/analyze.py -

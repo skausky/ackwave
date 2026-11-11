@@ -86,6 +86,7 @@ class State:
         self.clock = clock
         self.devices = devices or Devices(clock=clock)   # survives board reboots
         self.outbox = []                                 # commands for the board
+        self.on_csi = None                               # extra per-packet hook: on_csi(d, t)
         self.network = None                              # (how, name): how = default/chosen/none
         self.nets, self.nets_state = [], 'idle'          # SCAN results: [(name, ch, rssi)]
         # Whole-session history on the wall clock (survives board reboots):
@@ -216,6 +217,8 @@ class State:
         if r is not None:
             self.br_hist.append((t, r))
         self._scan(d, t)
+        if self.on_csi:
+            self.on_csi(d, t)
         a = d['amp'][VALID]
         if a.mean() > 0:
             self.wf[key].append((t, a / a.mean()))
@@ -303,10 +306,10 @@ class State:
             return f"motion for {fmt_age(now - a)}"
         return f"last motion {fmt_age(now - b)} ago"
 
-    def doppler_reading(self):
-        """The last second's Doppler: None (no data), {} (nothing moving) or
-        dict(f=Hz, speed=m/s, step=looks like a router step)."""
-        rows = [r for r in self.dop.rows if r[0] >= self.now - 1.0]
+    def doppler_reading(self, dop=None):
+        """The last second's Doppler (of `dop`, default the router's): None (no
+        data), {} (nothing moving) or dict(f=Hz, speed=m/s, step=looks like a router step)."""
+        rows = [r for r in (dop or self.dop).rows if r[0] >= self.now - 1.0]
         if not rows:
             return None
         if any(a - 1 <= self.now <= b for a, b in self.scan_spans):   # the router, not a body

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>ackwave</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M3 20c4 0 4-8 8-8s4 8 8 8 4-12 10-12' fill='none' stroke='%235fd4d0' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 20c4 0 4-8 8-8s4 8 8 8 4-12 10-12"/></svg>
+    <span>ackwave</span>
+  </div>
+  <span id="live" class="live" title="Data stream"><i></i><span>connecting</span></span>
+  <div class="status">
+    <span id="badge" class="badge">WAITING</span>
+    <span id="badge-sub" class="muted">waiting for data…</span>
+  </div>
+  <div class="top-right">
+    <span id="link" class="pill" title="Link that decides motion"><i></i><b>link</b><span></span></span>
+    <span id="net" class="pill net" title="Network the board watches"></span>
+    <nav class="actions">
+      <button id="btn-cal" title="Measure the quiet level again (step away for 5 s)">Recalibrate</button>
+      <button id="btn-net" title="Choose which router to watch">Network</button>
+      <button id="btn-dev" title="Devices to poke as extra links">Devices</button>
+      <button id="btn-set" class="icon" title="Settings" aria-label="Settings">⚙</button>
+      <button id="btn-help" class="icon" title="Help" aria-label="Help">?</button>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="tiles">
+    <article class="card tile" id="tile-breathing">
+      <h3>Breathing <span class="which-tile"></span></h3><div class="value">…</div><div class="detail muted"></div>
+    </article>
+    <article class="card tile" id="tile-doppler">
+      <h3>Doppler <span class="which-tile"></span></h3><div class="value">…</div><div class="detail muted"></div>
+    </article>
+    <article class="card tile" id="tile-quiet">
+      <h3>Quiet level</h3><div class="value">…</div><div class="detail muted"></div>
+    </article>
+    <article class="card recent">
+      <h3>Recent motion</h3>
+      <ol id="recent"><li class="muted">none yet</li></ol>
+    </article>
+  </section>
+
+  <section class="card chart-card">
+    <div class="card-head">
+      <h2>Motion score <span class="muted small">× quiet level</span> <span id="score-state" class="chip warn" hidden></span></h2>
+      <div class="tools">
+        <div class="seg" id="win">
+          <button data-w="30" class="on">30 s</button><button data-w="120">2 min</button><button data-w="600">10 min</button>
+        </div>
+        <button id="btn-pause" class="ghost">Pause</button>
+      </div>
+    </div>
+    <div class="chart" id="score"><canvas></canvas><div class="overlay" id="score-msg"></div></div>
+    <div class="legend" id="score-legend"></div>
+  </section>
+
+  <section class="card" id="links-card" hidden>
+    <div class="card-head">
+      <h2>Links <span class="chip warn">experimental</span></h2>
+      <span class="muted small">each link against its own quiet level · click one to show its breathing and Doppler below</span>
+    </div>
+    <div class="links" id="links"></div>
+  </section>
+
+  <section class="row2">
+    <article class="card chart-card">
+      <div class="card-head"><h2>Doppler <span class="muted small"><span class="which">router</span> ACKs · dB over the quiet room</span></h2>
+        <span class="hint" title="Movement shows as a lasting low band with streaks upward. A router scan is a short blob under 3 Hz.">ⓘ</span></div>
+      <div class="chart short" id="doppler"><canvas></canvas><div class="overlay" id="doppler-msg"></div></div>
+    </article>
+    <article class="card chart-card">
+      <div class="card-head"><h2>Breathing rate <span class="muted small"><span class="which">router</span> link · per minute · last 40 s each</span></h2>
+        <span class="hint" title="Needs someone still close to a link (board to router or to a poked device). Filled = clear, ring = possible.">ⓘ</span></div>
+      <div class="chart short" id="breath"><canvas></canvas></div>
+    </article>
+  </section>
+
+  <section class="card chart-card">
+    <div class="card-head">
+      <h2>Session</h2>
+      <div class="chips" id="counts"></div>
+    </div>
+    <div class="chart short" id="timeline"><canvas></canvas></div>
+    <div class="legend static">
+      <span><i style="background:var(--motion)"></i>motion</span>
+      <span><i style="background:var(--brief)"></i>brief blip</span>
+      <span><i style="background:var(--scan)"></i>router scan (ignored)</span>
+      <span><i style="background:var(--cal)"></i>calibrating</span>
+      <span><i class="line" style="background:var(--long)"></i>long window</span>
+      <span><i class="line" style="background:var(--blue)"></i>short window</span>
+    </div>
+  </section>
+
+  <details class="card raw" id="raw">
+    <summary>Board details</summary>
+    <pre id="raw-text">waiting…</pre>
+  </details>
+</main>
+
+<footer class="foot muted">
+  <span id="foot-board"></span><span id="foot-dev"></span><span id="foot-log"></span>
+</footer>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<dialog id="dlg-net">
+  <form method="dialog" class="dlg">
+    <header><h2>Network to watch</h2><button class="icon" value="close" aria-label="Close">✕</button></header>
+    <p id="net-now" class="now"></p>
+    <div class="dlg-tools"><button type="button" id="net-scan">Scan</button><button type="button" id="net-default" class="ghost">Back to default</button><span id="net-state" class="muted"></span></div>
+    <div class="table-wrap"><table><thead><tr><th>Network</th><th>Ch</th><th>Signal</th><th></th></tr></thead><tbody id="net-list"></tbody></table></div>
+    <p class="muted small">Pick your own router. The board only listens and never joins, so no password is needed. It is 2.4 GHz only. The choice is saved on the board, which restarts and recalibrates (about 15 s).</p>
+  </form>
+</dialog>
+
+<dialog id="dlg-dev">
+  <form method="dialog" class="dlg wide">
+    <header><h2>Devices on your network</h2><button class="icon" value="close" aria-label="Close">✕</button></header>
+    <div class="dlg-tools"><div class="seg" id="dev-mode"></div><span id="dev-state" class="muted"></span></div>
+    <div class="table-wrap"><table><thead><tr><th>Poke</th><th>Device</th><th>Signal</th><th>Frames/min</th><th>Heard</th><th>Looks</th><th>Link</th></tr></thead><tbody id="dev-list"></tbody></table></div>
+    <p class="muted small">Only devices talking to your own network are listed (2.4 GHz only). Each poked device adds a sensing link. Auto pokes up to 4 stationary ones; tick a device to choose yourself.</p>
+  </form>
+</dialog>
+
+<dialog id="dlg-set">
+  <form method="dialog" class="dlg">
+    <header><h2>Settings</h2><button class="icon" value="close" aria-label="Close">✕</button></header>
+    <label class="switch">
+      <input type="checkbox" id="set-per-link">
+      <span class="track"><span class="knob"></span></span>
+      <span><b>Per-link analysis</b> <span class="chip warn">experimental</span><br>
+      <span class="muted small">Analyse every link separately (router, and each device being poked): its own activity level, breathing and Doppler, side by side. Display only: the board's motion verdict still comes from the router link. Saved for next time.</span></span>
+    </label>
+  </form>
+</dialog>
+
+<dialog id="dlg-help">
+  <form method="dialog" class="dlg">
+    <header><h2>Help</h2><button class="icon" value="close" aria-label="Close">✕</button></header>
+    <dl class="keys">
+      <dt>space</dt><dd>pause / live (logging never stops)</dd>
+      <dt>1 2 3</dt><dd>show 30 s / 2 min / 10 min</dd>
+      <dt>c</dt><dd>recalibrate (step away for 5 s)</dd>
+      <dt>n</dt><dd>choose the network</dd>
+      <dt>v</dt><dd>devices</dd>
+      <dt>?</dt><dd>this help</dd>
+    </dl>
+    <p class="muted small">The motion score is each link's movement energy as a multiple of the room's quiet level. Motion starts when the short (0.5 s) score crosses its threshold while the long (4 s) one is up too, or when the long one crosses its own. Shaded red: motion. Grey bands: router background scans, which the board ignores. Ticks along the bottom: the board's own verdict changing.</p>
+  </form>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>

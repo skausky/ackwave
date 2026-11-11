@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Web dashboard: JSON payloads from demo data, commands, per-link mode, and
+the HTTP server's safety checks (host, cross-site POSTs)."""
+import http.client
+import json
+import os
+import tempfile
+
+from fake_csi import generate
+from gui import State
+from web import Dashboard, serve
+
+
+def request(port, method, path, body=None, headers=None):
+    c = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+    c.request(method, path, body=body, headers=headers or {})
+    r = c.getresponse()
+    data = r.read()
+    c.close()
+    return r.status, data
+
+
+def main():
+    tmp = tempfile.mkdtemp()
+    sent = []
+    s = State(600)
+    dash = Dashboard(s, send=sent.append, prefs=os.path.join(tmp, 'devices.json'),
+                     settings=os.path.join(tmp, 'dashboard.json'))
+    lines = [line for line, *_ in generate(seed=2)]
+    half = len(lines) // 2
+    for line in lines[:half]:
+        dash.feed(line)
+
+    # Payloads: JSON, bounded in size, with the parts the page draws
+    f, sl = dash.fast(30), dash.slow(30)
+    blob = json.dumps(f) + json.dumps(sl)
+    assert len(blob) < 400_000, len(blob)
+    assert f['header']['badge']['word'] in ('STILL', 'MOTION', 'CALIBRATING')
+    assert f['score']['series'] and f['window'][1] > f['window'][0]
+    assert 'links' not in sl and sl['settings'] == {'per_link': False}
+    assert sl['timeline']['end'] >= sl['timeline']['start']
+    f600 = dash.fast(600)
+    assert all(len(se['t']) <= 702 for se in f600['score']['series']), "series thinned"
+
+    # Commands: validated, mapped to board commands
+    assert dash.command({'cmd': 'cal'})[0] and sent[-1] == 'CAL'
+    assert dash.command({'cmd': 'scan'})[0] and sent[-1] == 'SCAN'
+    assert dash.command({'cmd': 'use', 'name': 'MyNetwork'})[0] and sent[-1] == 'USE,MyNetwork'
+    assert not dash.command({'cmd': 'use', 'name': 'x' * 33})[0], "name too long"
+    assert not dash.command({'cmd': 'use', 'name': 'a\nCAL'})[0], "no command injection"
+    assert dash.command({'cmd': 'use_default'})[0] and sent[-1] == 'USE_DEFAULT'
+    assert not dash.command({'cmd': 'mode', 'mode': 'bogus'})[0]
+    assert not dash.command({'cmd': 'toggle', 'mac': 'nope'})[0]
+    assert not dash.command({'cmd': 'rm -rf'})[0]
+
+    # Per-link mode: off by default; once on, each ACK link gets its own analysis
+    assert dash.command({'cmd': 'settings', 'per_link': True})[0]
+    assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {'per_link': True}
+    for line in lines[half:]:
+        dash.feed(line)
+    sl = dash.slow(30)
+    links = sl['links']
+    assert len(links) >= 2 and all(r['activity'] >= 0 and r['spark']['t'] for r in links), links
+    other = [r['src'] for r in links if r['src'] != 0][0]
+    assert dash.fast(30, other)['breathing'] is not None and dash.slow(30, other)['doppler'] is not None
+    assert dash.command({'cmd': 'settings', 'per_link': False})[0] and not dash.links
+    assert Dashboard(State(60), settings=os.path.join(tmp, 'dashboard.json')).cfg['per_link'] is False
+
+    # HTTP: pages, one-off snapshot, and the safety checks
+    srv = serve(dash, '127.0.0.1', 0)
+    port = srv.server_address[1]
+    try:
+        st, body = request(port, 'GET', '/')
+        assert st == 200 and b'ackwave' in body
+        st, body = request(port, 'GET', '/snapshot?win=120')
+        assert st == 200 and set(json.loads(body)) == {'fast', 'slow'}
+        st, _ = request(port, 'GET', '/', headers={'Host': 'evil.example:80'})
+        assert st == 403, "DNS-rebinding host refused"
+        ok = {'X-Ackwave': '1', 'Content-Type': 'application/json'}
+        st, _ = request(port, 'POST', '/cmd', '{"cmd":"cal"}', {'Content-Type': 'application/json'})
+        assert st == 403, "POST without the dashboard header refused"
+        st, _ = request(port, 'POST', '/cmd', '{"cmd":"cal"}', dict(ok, Origin='http://evil.example'))
+        assert st == 403, "cross-site POST refused"
+        n = len(sent)
+        st, body = request(port, 'POST', '/cmd', '{"cmd":"cal"}', ok)
+        assert st == 200 and json.loads(body)['ok'] and len(sent) == n + 1
+        st, _ = request(port, 'POST', '/cmd', '[1,2]', ok)
+        assert st == 400
+        st, _ = request(port, 'GET', '/../web.py')
+        assert st == 404, "only the three static files are served"
+    finally:
+        srv.shutdown()
+    print("WEB TESTS PASSED")
+
+
+if __name__ == '__main__':
+    main()
