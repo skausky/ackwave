@@ -1,6 +1,5 @@
 # ackwave: ESP32 Wi-Fi CSI Motion Sensing
 
-![tests](https://github.com/YOUR_USERNAME/ackwave/actions/workflows/ci.yml/badge.svg)
 
 Detects human motion in a room using **Wi-Fi Channel State Information (CSI)**, with no camera and no wearable. An ESP32-S3 measures how the radio channel between itself and your existing router changes over time. A person moving changes the multipath reflections, so the per-subcarrier amplitudes start to fluctuate. The detector runs **on the board itself**, so the sensor works unplugged from a PC (with an optional piezo buzzer), and a live GUI shows what is happening when it is plugged in.
 
