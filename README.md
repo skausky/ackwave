@@ -4,6 +4,19 @@ Detects human motion in a room using **Wi-Fi Channel State Information (CSI)**, 
 
 ![Live GUI on synthetic data: calibrating, motion, channel hop with recalibration, motion again](docs/gui.png)
 
+## What makes it different
+
+Most ESP32 CSI motion sensors, such as [ESPectre](https://github.com/francescopace/espectre) and Espressif's [esp-csi](https://github.com/espressif/esp-csi) examples, **join your Wi-Fi** with its password and then create traffic (pings) so that frames carrying CSI keep arriving. ackwave takes another route:
+
+- **It never joins your network.** No password, no IP address, nothing stored on the router, no new client in its device list. You only tell it the network's *name*. It gets its CSI by "politely" poking the router: Wi-Fi devices acknowledge a frame before checking who sent it, and every acknowledgement carries a fresh channel measurement ([how](#how-it-gets-a-steady-csi-stream-polite-wi-fi)).
+- **A steady 100 measurements a second**, whatever the network is doing, measured on the router's own transmissions.
+- **More sensing paths for free.** It can poke your other always-on devices too (a smart plug, a speaker). Each one adds a link across the room, with nothing to install on them.
+- **Decides on the board.** The detector runs on the ESP32 itself and works from a phone charger: LED colours and optional sounds. It ignores the router's periodic background scans, which otherwise look like movement, and stays quiet when its link is too weak to trust.
+- **Switch routers without reflashing.** The board scans for networks and you pick one in the GUI. The choice is saved on the board.
+- **A lab GUI.** Live scores against the thresholds, a Doppler view, a breathing-rate estimate, link health, and logs of every session for later analysis. The C detector and a Python twin are tested to give the same answers.
+
+Trade-offs: no Home Assistant integration yet (ESPectre has one), and on 2.4 GHz it can only use devices that are on 2.4 GHz.
+
 ## Quick start
 
 Everything runs from one script in the project folder. Plug the board in, then:
@@ -42,7 +55,7 @@ The board sends the router a 24-byte Null data frame (default 100/s) at **6 Mbps
 
 The Null frame's sender address is **made up**, not the board's own MAC. The ESP32's radio consumes ACKs addressed to itself and never reports CSI for them, but an ACK to an address it doesn't own is reported like any passing frame. Each AP gets its own made-up address (the board's MAC with the locally-administered bit flipped, plus the AP's index in the last byte), so the ACK's receiver address (`dmac`) says exactly that it answers our poke and which AP sent it. Frames from other devices can't be mistaken for ACKs. On a real ESP32-S3 this gives about 97 ACK CSI per second from 100 pokes. A **probe mode** logs every callback so this can be verified on your hardware (see [Bring-up](#bring-up-probe-mode)).
 
-Pokes are split evenly over the APs being poked, so a far AP that rarely answers costs the router ACKs: learning a second AP at -82 dBm once dropped the router from 97 to 43 ACK/s. So an AP leaves the rotation when its beacons average below -80 dBm (it rejoins above -77) or when it answers under 20 % of a 50-poke window. A silent AP still gets 1 poke in 50 so it can come back, and if every AP on the channel is out, the strongest is poked anyway, so a single far router works as before. Each AP's state is printed in the `GATE` line every 5 s.
+Half the pokes go to access points and half to the devices you chose, so devices never cost the router any ACKs. The access-point half is split over the APs of your network, so a far AP that rarely answers costs the router ACKs: learning a second AP at -82 dBm once dropped the router from 97 to 43 ACK/s. So an AP leaves the rotation when its beacons average below -80 dBm (it rejoins above -77), when it is more than 15 dB weaker than the strongest AP (`far`), or when it answers under 20 % of a 50-poke window. A silent AP still gets 1 poke in 50 so it can come back, and if every AP on the channel is out, the strongest is poked anyway, so a single far router works as before. Each AP's state is printed in the `GATE` line every 5 s.
 
 > Only point this at your own router. The firmware pokes only access points whose network name (SSID) matches the one you chose.
 
@@ -280,7 +293,7 @@ GLIDE,<ms>,<hz>,<hz2>[,<vol>]  test a smooth pitch glide from hz to hz2
 - The quiet level is measured automatically, but the threshold multipliers come from one room and position. If you get false alarms or miss movement, adjust `MD_ON_SHORT`/`MD_ON_LONG`.
 - Right after a (re)calibration during constant movement, sensitivity is reduced for up to about 30 s. Moved somewhere noisier without a change in signal strength, the board may report motion for up to about 1.5 minutes while the quiet level catches up (BOOT skips that).
 - Anything that moves continuously for minutes without pauses (a fan, curtains) slowly becomes part of the background. You are still detected on top of it.
-- Breathing-scale movement is at the edge of what this can see; heartbeat is out of reach with ESP32 CSI.
+- Breathing is visible only close to a link (in testing: standing about 1 m from the board on the board-router line, or with board, router and a poked device in the same room), not across the house. Heartbeat is untested and probably out of reach.
 - The ACK path is confirmed on one ESP32-S3 and router (100 % of sniffed ACKs produced CSI, 100 % classifier precision). Other chips or routers may differ, so run probe mode once on new hardware.
 - Some routers answer unassociated stations with deauthentication frames. These are harmless here, but they add a little traffic.
 
