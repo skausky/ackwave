@@ -89,6 +89,19 @@ def main():
     K.key = 'escape'
     view._key(K)
     assert not view.help.get_visible()
+    # Network lines: current network, scan results (names may contain commas)
+    s.feed('NETWORK,default,MyNetwork\n')
+    assert s.network == ('default', 'MyNetwork')
+    s.start_scan()
+    assert s.outbox[-1] == 'SCAN' and s.nets_state == 'scanning'
+    s.outbox.clear()
+    for ln in ('NET,6,-70,MyNetwork', 'NET,11,-48,Cafe, upstairs', 'NET,x,-1,bad', 'NETS,done,2'):
+        s.feed(ln + '\n')
+    assert s.nets == [('Cafe, upstairs', 11, -48), ('MyNetwork', 6, -70)] and s.nets_state == 'done'
+    s.feed('NETWORK,saved,Cafe, upstairs\n')
+    assert s.network == ('switching', 'Cafe, upstairs')
+    view.open_network()                      # no picker without a board: says so
+    assert 'needs a board' in view.footer.get_text()
     view.recalibrate()                       # no board here: says so instead of nothing
     assert 'needs a board' in view.footer.get_text()
     w_end = s.last_wall

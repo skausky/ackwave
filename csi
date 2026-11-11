@@ -62,14 +62,9 @@ cmd_demo() {
 }
 
 cmd_flash() {
-    if [ ! -f main/my_network.h ]; then          # git-ignored: the name is never committed
-        local name
-        read -rp "Your Wi-Fi network name (no password needed): " name
-        [ -n "$name" ] || { echo "No name given."; exit 1; }
-        name=${name//\\/\\\\}; name=${name//\"/\\\"}
-        printf '// Local only (git-ignored). See my_network.h.example.\n#define MY_SSID "%s"\n' \
-            "$name" > main/my_network.h
-        echo "Saved to main/my_network.h (stays on this PC, not in git)."
+    if [ ! -f main/my_network.h ]; then
+        echo "No default network set (main/my_network.h): after flashing, open the GUI and"
+        echo "press n (or the Network button) to pick your router. It's saved on the board."
     fi
     local port; port=$(find_port) || exit 1
     if [ ! -f "$IDF/export.sh" ]; then

@@ -1,4 +1,6 @@
-// Copy this file to my_network.h and put your network name in it.
-// my_network.h is git-ignored, so your network name is never committed.
-// The board never joins the network: only the name is needed, no password.
+// Optional. Copy this file to my_network.h to give a freshly flashed board a
+// default network; otherwise pick one in the GUI (press n), which is saved on
+// the board. my_network.h is git-ignored, so your network name is never
+// committed. The board never joins the network: only the name, no password.
+// Local hardware settings (BUZZER_GPIO, LED_GPIO, ...) can go here too.
 #define MY_SSID "MyNetwork"

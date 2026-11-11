@@ -58,6 +58,7 @@ HELP = '\n'.join([
     'space     pause / back to live (logging never stops)',
     '1 2 3     show 30 s / 2 min / 10 min',
     'c         recalibrate (step away for 5 s)',
+    'n         network: choose which router to watch',
     'w         Doppler view / subcarrier view',
     'd         details: raw board counters',
     'h  ?      this help (Esc closes)',
@@ -85,6 +86,8 @@ class State:
         self.clock = clock
         self.devices = devices or Devices(clock=clock)   # survives board reboots
         self.outbox = []                                 # commands for the board
+        self.network = None                              # (how, name): how = default/chosen/none
+        self.nets, self.nets_state = [], 'idle'          # SCAN results: [(name, ch, rssi)]
         # Whole-session history on the wall clock (survives board reboots):
         # one bin per second with the highest short / long score
         self.hist_t, self.hist_s, self.hist_l = [], [], []
@@ -96,6 +99,30 @@ class State:
         self.lost = None                             # error text once the source failed
         self.ended = False                           # input ran out (file / demo)
         self.reset()
+
+    def _network_line(self, line):
+        tag, _, rest = line.partition(',')
+        if tag == 'NETWORK':
+            how, _, name = rest.partition(',')
+            if how in ('default', 'chosen', 'none'):
+                self.network = (how, name)
+            elif how == 'saved':
+                self.network = ('switching', name)
+        elif tag == 'NET':
+            p = rest.split(',', 2)
+            if len(p) == 3:
+                try:
+                    self.nets.append((p[2], int(p[0]), int(p[1])))
+                except ValueError:
+                    pass
+        elif rest.startswith('done'):
+            self.nets.sort(key=lambda n: -n[2])
+            self.nets_state = 'done'
+
+    def start_scan(self):
+        """Ask the board for nearby networks (about 4 s; pokes pause meanwhile)."""
+        self.nets, self.nets_state = [], 'scanning'
+        self.outbox.append('SCAN')
 
     def wall(self, t=None):
         """Wall-clock time (unix s) of board time t (default: now)."""
@@ -128,6 +155,9 @@ class State:
         self.last_rx = self.clock()
         if line.startswith('ME,'):
             self.me = line.strip()[3:]
+            return
+        if line.startswith(('NETWORK,', 'NET,', 'NETS,')):
+            self._network_line(line.rstrip('\r\n'))
             return
         ev = parse_line(line)
         if ev is None:
@@ -385,6 +415,7 @@ class View:
     def __init__(self, state, plt, log_name=None, window=WINDOWS[0], send=None):
         self.s, self.plt = state, plt
         self.send = send                         # send(cmd) to the board, or None
+        self.on_network = None                   # 'n' / Network button: open the picker
         self.view_s = window
         self.paused = False
         self.log_name = log_name
@@ -469,6 +500,10 @@ class View:
             self.btn_cal = Button(ax, 'Recalibrate', color=PANEL, hovercolor=GRID_C)
             self.btn_cal.label.set_color(FG)
             self.btn_cal.on_clicked(lambda _e: self.recalibrate())
+            ax = self.fig.add_axes([0.70 - 0.095 - 0.078, 0.935, 0.072, 0.035])
+            self.btn_net = Button(ax, 'Network', color=PANEL, hovercolor=GRID_C)
+            self.btn_net.label.set_color(FG)
+            self.btn_net.on_clicked(lambda _e: self.open_network())
         self._mark_buttons()
 
     def _mark_buttons(self):
@@ -507,8 +542,16 @@ class View:
         else:
             self.toast('Recalibrate needs a board (this is a demo or a file)')
 
+    def open_network(self):
+        if self.on_network:
+            self.on_network()
+        else:
+            self.toast('Choosing a network needs a board (this is a demo or a file)')
+
     def _key(self, e):
-        if e.key == ' ':
+        if e.key == 'n':
+            self.open_network()
+        elif e.key == ' ':
             self.toggle_pause()
         elif e.key == 'c':
             self.recalibrate()
@@ -972,6 +1015,112 @@ class DevicePanel:
         self.note.configure(text=txt)
 
 
+class NetworkPanel:
+    """Tk window: which network the board watches, and a list of nearby ones
+    to switch to. The choice is saved on the board (it restarts), so it stays
+    after unplugging; 'Back to default' returns to the name built in from
+    main/my_network.h."""
+
+    def __init__(self, master, state, send):
+        import tkinter as tk
+        from tkinter import ttk
+        self.s, self.send, self.tk = state, send, tk
+        self.win = tk.Toplevel(master)
+        self.win.title('Network to watch')
+        self.win.geometry('560x420')
+        self.win.minsize(460, 300)
+        self.win.configure(bg=BG)
+        self.win.protocol('WM_DELETE_WINDOW', self.win.withdraw)
+        self.win.withdraw()                      # opened with 'n' / the Network button
+        st = ttk.Style(self.win)
+        st.configure('N.Treeview', background=PANEL, fieldbackground=PANEL, foreground=FG,
+                     rowheight=24, borderwidth=0)
+        st.configure('N.Treeview.Heading', background=HEAD_C, foreground=FG, relief='flat')
+        st.map('N.Treeview', background=[('selected', SEL_C)])
+        st.configure('N.TLabel', background=BG, foreground=FG)
+        st.configure('N.Dim.TLabel', background=BG, foreground=DIM)
+        self.now = ttk.Label(self.win, style='N.TLabel', font=('DejaVu Sans', 11, 'bold'))
+        self.now.pack(fill='x', padx=12, pady=(10, 2))
+        bar = tk.Frame(self.win, bg=BG)
+        bar.pack(fill='x', padx=12, pady=4)
+        ttk.Button(bar, text='Scan', command=self.scan).pack(side='left')
+        ttk.Button(bar, text='Watch selected', command=self.use).pack(side='left', padx=6)
+        ttk.Button(bar, text='Back to default', command=self.default).pack(side='left')
+        self.note = ttk.Label(bar, style='N.Dim.TLabel')
+        self.note.pack(side='right')
+        cols = (('name', 'Network', 300), ('ch', 'Channel', 70), ('sig', 'Signal', 110))
+        self.tree = ttk.Treeview(self.win, columns=[c for c, _, _ in cols], show='headings',
+                                 style='N.Treeview', selectmode='browse')
+        for c, title, w in cols:
+            self.tree.heading(c, text=title)
+            self.tree.column(c, width=w, anchor='w', stretch=c == 'name')
+        self.tree.tag_configure('cur', foreground=STILL_C)
+        self.tree.pack(fill='both', expand=True, padx=12)
+        self.tree.bind('<Double-1>', lambda e: self.use())
+        self.tree.bind('<Return>', lambda e: self.use())
+        ttk.Label(self.win, style='N.Dim.TLabel', wraplength=520, text=(
+            'Pick your own router. The board only listens and never joins, so no password '
+            'is needed. It is 2.4 GHz only: 5 GHz-only networks are not listed. The choice '
+            'is saved on the board, which restarts and recalibrates (about 15 s).')).pack(
+            fill='x', padx=12, pady=(6, 10))
+        self.shown = None
+
+    def open(self):
+        self.win.deiconify()
+        self.win.lift()
+        if self.s.nets_state == 'idle':
+            self.scan()
+        self.refresh()
+
+    def scan(self):
+        self.s.start_scan()
+        self.refresh()
+
+    def _ask(self, title, text):
+        from tkinter import messagebox
+        return messagebox.askyesno(title, text, parent=self.win)
+
+    def use(self):
+        sel = self.tree.focus()
+        if not sel:
+            self.note.configure(text='select a network first')
+            return
+        name = self.s.nets[int(sel)][0]
+        if self._ask('Switch network', f'Watch "{name}" from now on?\n\nThe board restarts '
+                     'and recalibrates (about 15 s). Only pick your own network.'):
+            self.s.outbox.append(f'USE,{name}')
+            self.note.configure(text='switching...')
+
+    def default(self):
+        if self._ask('Back to default', 'Go back to the network built into the firmware '
+                     '(main/my_network.h)?\n\nThe board restarts (about 15 s).'):
+            self.s.outbox.append('USE_DEFAULT')
+            self.note.configure(text='switching...')
+
+    def refresh(self):
+        if not self.win.winfo_viewable():
+            return
+        how, name = self.s.network or ('?', '')
+        self.now.configure(text={'none': 'Not watching any network yet: pick one below',
+                                 'switching': f'Switching to "{name}"...',
+                                 '?': 'Waiting for the board...'}.get(
+            how, f'Watching "{name}"' + ('  (default)' if how == 'default' else '  (chosen here)')))
+        st = self.s.nets_state
+        if st == 'scanning':
+            self.note.configure(text='scanning all channels (about 4 s)...')
+        elif st == 'done' and self.note.cget('text').startswith('scanning'):
+            self.note.configure(text=f'{len(self.s.nets)} networks nearby')
+        key = (st, len(self.s.nets), name)
+        if key == self.shown:
+            return
+        self.shown = key
+        self.tree.delete(*self.tree.get_children())
+        for i, (n, ch, rssi) in enumerate(self.s.nets):
+            bars = '\u2588' * max(1, min(4, (rssi + 95) // 10)) if rssi > -95 else '\u2581'
+            self.tree.insert('', 'end', iid=str(i), values=(n, ch, f'{bars}  {rssi} dBm'),
+                             tags=('cur',) if n == name else ())
+
+
 def reader(lines, q, log=None):
     try:
         for line in lines:
@@ -1034,6 +1183,13 @@ def main():
                                                state.devices.save(prefs)))
     except Exception as e:                       # not the Tk backend: plots only
         print(f"(device list unavailable: {e})", file=sys.stderr)
+    netpanel = None
+    if send:
+        try:
+            netpanel = NetworkPanel(view.fig.canvas.get_tk_widget().winfo_toplevel(), state, send)
+            view.on_network = netpanel.open
+        except Exception as e:
+            print(f"(network picker unavailable: {e})", file=sys.stderr)
     last_panel = [0.0]
 
     def tick(_):
@@ -1058,6 +1214,8 @@ def main():
         if panel and time.monotonic() - last_panel[0] > 1.0:
             last_panel[0] = time.monotonic()
             panel.refresh()
+        if netpanel and time.monotonic() - last_panel[0] < 0.2:
+            netpanel.refresh()
         view.draw()
         return []
 

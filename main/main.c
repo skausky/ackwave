@@ -16,14 +16,15 @@
 #include "hal/usb_serial_jtag_ll.h"
 #include "csi_core.h"
 
-// Your network name lives in main/my_network.h (git-ignored, so it is never
-// committed). Create it from main/my_network.h.example, or let `./csi flash`
-// ask for it. The board never joins the network: no password is needed.
+// The network to watch is chosen at run time (`./csi network`: SCAN, then
+// USE,<name>) and saved on the board. main/my_network.h (git-ignored) may set
+// MY_SSID as the default for a board that has none saved yet, plus local
+// hardware settings. The board never joins the network: no password is needed.
 #if __has_include("my_network.h")
 #include "my_network.h"
 #endif
 #ifndef MY_SSID
-#error "Network name not set: copy main/my_network.h.example to main/my_network.h (or run ./csi flash)"
+#define MY_SSID ""                // none: wait for USE,<name> from the PC
 #endif
 
 // ---------------- EDIT THESE ----------------
@@ -121,6 +122,46 @@ static volatile int      csa_ch = 0;
 static volatile uint32_t csa_at_ms = 0;
 static volatile bool     scanning = false;
 static poke_state_t      pk = {-1, 0};
+
+// The network we watch. Written only at boot (before Wi-Fi starts), read by the
+// beacon callback; a new choice is saved and the board restarts.
+static char my_ssid[33];
+static volatile bool     net_collect = false;  // SCAN running: note every beacon
+static net_list_t        nets;                 // written by the Wi-Fi task while collecting
+static volatile uint32_t scan_request;         // set by run_cmd, done by control_task
+
+// A choice made from the PC is saved together with the build default it
+// replaced, so flashing a build with a different default (a new
+// my_network.h) makes that default win again.
+static void ssid_load(void) {
+    nvs_handle_t h;
+    char saved[33] = "", base[33] = "";
+    size_t n1 = sizeof saved, n2 = sizeof base;
+    if (nvs_open("ackwave", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_str(h, "ssid", saved, &n1) != ESP_OK) saved[0] = '\0';
+        if (nvs_get_str(h, "dflt", base, &n2) != ESP_OK) base[0] = '\0';
+        nvs_close(h);
+    }
+    const char *use = saved[0] && strcmp(base, MY_SSID) == 0 ? saved : MY_SSID;
+    strncpy(my_ssid, use, sizeof my_ssid - 1);
+    my_ssid[sizeof my_ssid - 1] = '\0';
+}
+
+// name = NULL: forget the choice (back to the build default)
+static bool ssid_save(const char *name) {
+    nvs_handle_t h;
+    if (nvs_open("ackwave", NVS_READWRITE, &h) != ESP_OK) return false;
+    bool ok = name ? nvs_set_str(h, "ssid", name) == ESP_OK && nvs_set_str(h, "dflt", MY_SSID) == ESP_OK
+                   : nvs_erase_all(h) == ESP_OK;
+    ok = ok && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    return ok;
+}
+
+static void print_network(void) {
+    const char *how = !my_ssid[0] ? "none" : strcmp(my_ssid, MY_SSID) == 0 ? "default" : "chosen";
+    printf("NETWORK,%s,%s\n", how, my_ssid);
+}
 
 static volatile uint32_t n_poke, n_tx_err, n_ack, n_ap, n_drop, n_qfull, n_reply;
 
@@ -393,7 +434,10 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     }
     if (type != WIFI_PKT_MGMT) return;
     beacon_info_t b;
-    parse_beacon(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, MY_SSID, &b);
+    parse_beacon(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, my_ssid, &b);
+    if (b.ok && net_collect)
+        net_note(&nets, b.ssid, b.ssid_len, b.ds_ch ? b.ds_ch : pkt->rx_ctrl.channel,
+                 pkt->rx_ctrl.rssi);
     if (!b.ok || !b.ssid_match) return;
 
     int idx = node_add(&nodes, b.bssid);
@@ -523,6 +567,7 @@ static __attribute__((unused)) void print_poking(void) {   // unused when POKE_H
 static void run_cmd(const char *line) {
     uint8_t mac[6];
     int cmd = parse_cmd(line, mac);
+    char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
     if (glide_ms > 0) {
@@ -535,6 +580,18 @@ static void run_cmd(const char *line) {
         buzzer_play(&t);
         printf(buzzer_ok ? "BEEP,%d,%d,%d\n" : "BEEP,%d,%d,%d,no-buzzer\n",
                beep_ms, hz ? hz : BUZZER_HZ, vol ? vol : BUZZER_VOL);
+    } else if (cmd == CMD_SCAN) {
+        scan_request = 1;
+    } else if (parse_use(line, name) > 0 || strncmp(line, "USE_DEFAULT", 11) == 0) {
+        bool dflt = line[3] == '_';
+        if (ssid_save(dflt ? NULL : name)) {
+            printf("NETWORK,saved,%s\n", dflt ? MY_SSID : name);
+            fflush(stdout);
+            buzzer_play(&TUNE_TICK);
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();                 // start clean on the new network
+        }
+        printf("NETWORK,error,not-saved\n");
     } else if (cmd == CMD_CAL) {
         cal_request = 1;
         buzzer_play(&TUNE_TICK);
@@ -603,6 +660,34 @@ static void print_devices(void) {
     }
 }
 
+// SCAN: visit every channel, note every network's beacons, list them.
+// Pokes pause meanwhile; the channel change makes the detector start over.
+static void net_scan(void) {
+    int prev = cur_ch;
+    scanning = true;
+    csa_ch = 0;
+    memset(&nets, 0, sizeof nets);
+    net_collect = true;
+    for (int ch = 1; ch <= MAX_CH; ch++) {
+        set_ch(ch);
+        vTaskDelay(pdMS_TO_TICKS(2 * DWELL_MS));   // two beacon intervals
+    }
+    net_collect = false;
+    vTaskDelay(pdMS_TO_TICKS(5));                // a callback in flight finishes
+    set_ch(prev);
+    scanning = false;
+    last_seen_ms = now_ms();
+    for (int i = 0; i < nets.count; i++) {
+        char name[33];
+        for (int j = 0; j < 33; j++) {           // one line per network, always
+            char c = nets.n[i].ssid[j];
+            name[j] = c && (unsigned char)c < 0x20 ? '?' : c;
+        }
+        printf("NET,%d,%d,%s\n", nets.n[i].ch, nets.n[i].rssi, name);
+    }
+    printf("NETS,done,%d\n", nets.count);
+}
+
 // The only task that changes channels
 static void control_task(void *arg) {
     int printed = 0;
@@ -610,10 +695,11 @@ static void control_task(void *arg) {
     uint32_t next_stats = now_ms() + STATS_MS;
     printf("ME,%02x:%02x:%02x:%02x:%02x:%02x\n", my_mac[0], my_mac[1], my_mac[2],
            my_mac[3], my_mac[4], my_mac[5]);
+    print_network();
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
         poll_cmds();
-        led_update(false);
+        led_update(!my_ssid[0]);           // no network chosen yet: yellow
 
         for (int n = node_count(&nodes); printed < n; printed++) {
             const uint8_t *m = nodes.mac[printed];
@@ -657,6 +743,7 @@ static void control_task(void *arg) {
             print_poking();
 #endif
             print_devices();
+            print_network();
             printf("STATS,%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
                    ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 "\n", esp_timer_get_time(), n_poke,
                    n_tx_err, n_ack, n_ap, n_drop, n_qfull, n_reply);
@@ -670,6 +757,13 @@ static void control_task(void *arg) {
             printf("CHANNEL,%" PRId64 ",%d,csa\n", esp_timer_get_time(), pending);
             continue;
         }
+
+        if (scan_request) {
+            scan_request = 0;
+            net_scan();
+            continue;
+        }
+        if (!my_ssid[0]) continue;         // nothing to look for until USE,<name>
 
         now = now_ms();                    // the prints above can block
         if (need_scan || older_than(now, last_seen_ms, LOST_MS)) {  // silent hop
@@ -803,6 +897,7 @@ void app_main(void) {
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    ssid_load();
 
     gate_init(&gate);
     buzzer_init();                           // never fatal

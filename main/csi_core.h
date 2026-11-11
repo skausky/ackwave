@@ -22,6 +22,8 @@ typedef struct {
     int     ds_ch;       // channel from DS Parameter Set IE, 0 if absent
     int     csa_ch;      // new channel from CSA IE, 0 if absent
     int     csa_cnt;     // beacons until switch
+    uint8_t ssid[32];    // network name as sent (not NUL-terminated)
+    int     ssid_len;    // 0 = hidden network
 } beacon_info_t;
 
 // f = 802.11 frame WITHOUT FCS, len = its length in bytes
@@ -37,8 +39,11 @@ static inline void parse_beacon(const uint8_t *f, int len, const char *ssid,
     while (end - ie >= 2 && (end - ie) - 2 >= ie[1]) {
         uint8_t id = ie[0], l = ie[1];
         const uint8_t *v = ie + 2;
-        if (id == 0)
+        if (id == 0) {
             out->ssid_match = want > 0 && l == want && memcmp(v, ssid, l) == 0;
+            out->ssid_len = l <= 32 ? l : 0;
+            if (out->ssid_len) memcpy(out->ssid, v, (size_t)out->ssid_len);
+        }
         else if (id == 3 && l >= 1)
             out->ds_ch = v[0];
         else if (id == 37 && l >= 3) {             // mode, new_ch, count
@@ -47,6 +52,39 @@ static inline void parse_beacon(const uint8_t *f, int len, const char *ssid,
         }
         ie += 2 + l;
     }
+}
+
+// ---------- Nearby networks (the SCAN command) ----------
+#define MAX_NETS 32
+typedef struct {
+    char    ssid[33];            // NUL-terminated
+    uint8_t ch;
+    int8_t  rssi;                // strongest beacon heard
+    uint16_t n;                  // beacons heard
+} net_t;
+typedef struct { net_t n[MAX_NETS]; int count; } net_list_t;
+
+// Note a beacon. Hidden networks (empty or all-zero names) are skipped; a
+// name seen on several APs keeps its strongest. Returns the entry or -1.
+static inline int net_note(net_list_t *l, const uint8_t *ssid, int len, int ch, int rssi) {
+    if (len <= 0 || len > 32 || !ssid) return -1;
+    bool blank = true;
+    for (int i = 0; i < len; i++) if (ssid[i]) blank = false;
+    if (blank) return -1;
+    int k = -1;
+    for (int i = 0; i < l->count && k < 0; i++)
+        if ((int)strlen(l->n[i].ssid) == len && memcmp(l->n[i].ssid, ssid, (size_t)len) == 0) k = i;
+    if (k < 0) {
+        if (l->count >= MAX_NETS) return -1;
+        k = l->count++;
+        memset(&l->n[k], 0, sizeof l->n[k]);
+        memcpy(l->n[k].ssid, ssid, (size_t)len);
+        l->n[k].rssi = -127;
+    }
+    net_t *e = &l->n[k];
+    if (rssi > e->rssi) { e->rssi = (int8_t)rssi; e->ch = (uint8_t)ch; }
+    if (e->n < 0xFFFF) e->n++;
+    return k;
 }
 
 static inline bool csa_should_switch(int new_ch, int cur_ch, int max_ch) {
@@ -189,7 +227,10 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //   CAL            recalibrate, like the button
 //   BEEP[,<ms>[,<hz>[,<vol>]]]  test the buzzer (parse_beep)
 //   GLIDE,<ms>,<hz>,<hz2>[,<vol>]  a pitch glide (parse_glide)
-enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL };
+//   SCAN           list nearby networks (NET lines, then NETS,done)
+//   USE,<name>     watch this network from now on (saved; parse_use)
+//   USE_DEFAULT    forget that choice: back to the build's MY_SSID
+enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL, CMD_SCAN };
 
 static inline bool parse_mac(const char *s, uint8_t out[6]) {
     for (int i = 0; i < 6; i++) {
@@ -211,6 +252,8 @@ static inline int parse_cmd(const char *line, uint8_t mac[6]) {
     if (!line) return CMD_NONE;
     if (strncmp(line, "CAL", 3) == 0 && (line[3] == '\0' || line[3] == '\r' || line[3] == '\n'))
         return CMD_CAL;
+    if (strncmp(line, "SCAN", 4) == 0 && (line[4] == '\0' || line[4] == '\r' || line[4] == '\n'))
+        return CMD_SCAN;
     if (strncmp(line, "UNPOKE,all", 10) == 0 &&
         (line[10] == '\0' || line[10] == '\r' || line[10] == '\n')) return CMD_UNPOKE_ALL;
     if (strncmp(line, "UNPOKE,", 7) == 0) return parse_mac(line + 7, mac) ? CMD_UNPOKE : CMD_NONE;
@@ -219,6 +262,18 @@ static inline int parse_cmd(const char *line, uint8_t mac[6]) {
         return CMD_POKE;
     }
     return CMD_NONE;
+}
+
+// USE,<name>: copies the network name (1-32 bytes, the rest of the line
+// without a trailing CR/LF) to out (33 bytes), returns its length or -1
+static inline int parse_use(const char *line, char out[33]) {
+    if (!line || strncmp(line, "USE,", 4) != 0) return -1;
+    const char *s = line + 4;
+    int n = (int)strcspn(s, "\r\n");
+    if (n < 1 || n > 32) return -1;
+    memcpy(out, s, (size_t)n);
+    out[n] = '\0';
+    return n;
 }
 
 // BEEP, BEEP,<ms>, BEEP,<ms>,<hz> or BEEP,<ms>,<hz>,<vol>: returns the beep

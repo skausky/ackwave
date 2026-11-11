@@ -50,13 +50,14 @@ int main(void) {
     b = parse(&f);
     CHECK(b.ok && b.ssid_match); CHECK(b.ds_ch == 6);
     CHECK(b.csa_ch == 0); CHECK(memcmp(b.bssid, AP1, 6) == 0);
+    CHECK(b.ssid_len == 9 && memcmp(b.ssid, "MyNetwork", 9) == 0);   // name kept for SCAN
 
     // SSID mismatches: different, longer, shorter, hidden
     frame_start(&f, 0x80, AP1); IE(&f, 0, "Neighbor");   b = parse(&f); CHECK(b.ok && !b.ssid_match);
     frame_start(&f, 0x80, AP1); IE(&f, 0, "MyNetwork2"); b = parse(&f); CHECK(!b.ssid_match);
     frame_start(&f, 0x80, AP1); IE(&f, 0, "MyNetwor");   b = parse(&f); CHECK(!b.ssid_match);
     frame_start(&f, 0x80, AP1); IE(&f, 0, ""); IE(&f, 3, "\x06");
-    b = parse(&f); CHECK(!b.ssid_match && b.ds_ch == 6);
+    b = parse(&f); CHECK(!b.ssid_match && b.ds_ch == 6 && b.ssid_len == 0);
 
     // CSA: switch to ch 11 in 5 beacons
     frame_start(&f, 0x80, AP2);
@@ -376,6 +377,22 @@ int main(void) {
         CHECK(parse_beep("BEEP,500,50", &hz, &vol) == -1 && parse_beep("BEEP,500,", &hz, &vol) == -1);
         CHECK(parse_beep("BEEP,1,200,3,4", &hz, &vol) == -1 && parse_beep("BEEPX", &hz, &vol) == -1);
         CHECK(parse_beep("CAL", &hz, &vol) == -1);
+        char nm[33];
+        CHECK(parse_cmd("SCAN", cm) == CMD_SCAN && parse_cmd("SCAN\r\n", cm) == CMD_SCAN && parse_cmd("SCANX", cm) == CMD_NONE);
+        CHECK(parse_use("USE,My Net, 2.4G\r\n", nm) == 12 && strcmp(nm, "My Net, 2.4G") == 0);
+        CHECK(parse_use("USE,", nm) == -1 && parse_use("USE,123456789012345678901234567890123", nm) == -1);
+        CHECK(parse_use("USE,12345678901234567890123456789012", nm) == 32 && parse_cmd("USE,x", cm) == CMD_NONE);
+        {   // nearby networks: strongest kept, hidden skipped, list bounded
+            net_list_t nl; memset(&nl, 0, sizeof nl);
+            const uint8_t a1[] = "Alpha", b1[] = "Beta", z[4] = {0};
+            CHECK(net_note(&nl, a1, 5, 6, -70) == 0 && net_note(&nl, a1, 5, 11, -50) == 0);
+            CHECK(nl.n[0].rssi == -50 && nl.n[0].ch == 11 && nl.n[0].n == 2);
+            CHECK(net_note(&nl, a1, 5, 1, -90) == 0 && nl.n[0].ch == 11);
+            CHECK(net_note(&nl, b1, 4, 1, -80) == 1 && strcmp(nl.n[1].ssid, "Beta") == 0);
+            CHECK(net_note(&nl, z, 4, 1, -40) == -1 && net_note(&nl, a1, 0, 1, -40) == -1 && nl.count == 2);
+            for (int j = 0; j < 40; j++) { uint8_t x[3] = {'n', (uint8_t)('a' + j / 26), (uint8_t)('a' + j % 26)}; net_note(&nl, x, 3, 1, -60); }
+            CHECK(nl.count == MAX_NETS);
+        }
         int hz2;
         CHECK(parse_glide("GLIDE,600,1500,4500", &hz, &hz2, &vol) == 600 && hz == 1500 && hz2 == 4500 && vol == 0);
         CHECK(parse_glide("GLIDE,600,1500,4500,50\r\n", &hz, &hz2, &vol) == 600 && vol == 50);
