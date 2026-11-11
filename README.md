@@ -1,6 +1,5 @@
 # ackwave: ESP32 Wi-Fi CSI Motion Sensing
 
-
 Detects human motion in a room using **Wi-Fi Channel State Information (CSI)**, with no camera and no wearable. An ESP32-S3 measures how the radio channel between itself and your existing router changes over time. A person moving changes the multipath reflections, so the per-subcarrier amplitudes start to fluctuate. The detector runs **on the board itself**, so the sensor works unplugged from a PC (with an optional piezo buzzer), and a live GUI shows what is happening when it is plugged in.
 
 ![Live GUI on synthetic data: calibrating, motion, channel hop with recalibration, motion again](docs/gui.png)
@@ -45,7 +44,7 @@ The Null frame's sender address is **made up**, not the board's own MAC. The ESP
 
 Pokes are split evenly over the APs being poked, so a far AP that rarely answers costs the router ACKs: learning a second AP at -82 dBm once dropped the router from 97 to 43 ACK/s. So an AP leaves the rotation when its beacons average below -80 dBm (it rejoins above -77) or when it answers under 20 % of a 50-poke window. A silent AP still gets 1 poke in 50 so it can come back, and if every AP on the channel is out, the strongest is poked anyway, so a single far router works as before. Each AP's state is printed in the `GATE` line every 5 s.
 
-> Only point this at your own router. The firmware pokes only access points whose SSID matches `MY_SSID` (set in `main/my_network.h`).
+> Only point this at your own router. The firmware pokes only access points whose network name (SSID) matches the one you chose.
 
 ## Architecture
 
@@ -124,7 +123,7 @@ The firmware builds with **ESP-IDF v5.3.2 for ESP32-S3 with zero warnings**. CI 
 
 Requires ESP-IDF v5.x and an ESP32-S3.
 
-1. Set your network name: `cp main/my_network.h.example main/my_network.h` and edit it (or just run `./csi flash`, which asks). That file is git-ignored, so your network name is never committed. No password is needed: the board never joins the network.
+1. Optional: set a default network name with `cp main/my_network.h.example main/my_network.h` and edit it. That file is git-ignored, so your network name is never committed. Without it the board starts with no network and you pick one in the GUI (see [Choosing the network](#choosing-the-network)). No password is needed either way: the board never joins the network.
 
    Other settings are at the top of `main/main.c`:
 
@@ -135,13 +134,13 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    | `CSI_PROBE` | 0 | 1 = log every callback (bring-up) |
    | `BUZZER_GPIO` | -1 | piezo pin; -1 = no buzzer |
    | `BUZZER_ACTIVE` | 0 | 0 = passive piezo (PWM tone), 1 = active buzzer |
-| `BUZZER_HZ` | 2700 | motion-beep pitch; find your buzzer's loudest with `BEEP,700,<hz>` |
-| `BUZZER_SOFT_HZ` | 2000 | pitch of the quieter status sounds |
-| `BUZZER_VOL` | 50 | loudness in % (50 = full; 5-10 is much quieter) |
-| `MOTION_ALARM` | 0 | 1 = loop an air-raid whoop at full volume while motion lasts, instead of one beep |
-| `BEEP_GAP_MS` | 30000 | at most one motion beep per this long |
-| `LINK_MIN_ACKS` / `LINK_MIN_RSSI` | 50 / -85 | below either, the link counts as weak and motion beeps stop (a noisy link looks like motion) |
-| `BEEP_AFTER_MS` | 2000 | beep once motion has lasted this long (skips brief blips); 0 = at once |
+   | `BUZZER_HZ` | 2700 | motion-beep pitch; find your buzzer's loudest with `BEEP,700,<hz>` |
+   | `BUZZER_SOFT_HZ` | 2000 | pitch of the quieter status sounds |
+   | `BUZZER_VOL` | 50 | loudness in % (50 = full; 5-10 is much quieter) |
+   | `MOTION_ALARM` | 0 | 1 = loop an air-raid whoop at full volume while motion lasts, instead of one beep |
+   | `BEEP_GAP_MS` | 30000 | at most one motion beep per this long |
+   | `LINK_MIN_ACKS` / `LINK_MIN_RSSI` | 50 / -85 | below either, the link counts as weak and motion beeps stop (a noisy link looks like motion) |
+   | `BEEP_AFTER_MS` | 2000 | beep once motion has lasted this long (skips brief blips); 0 = at once |
    | `CAL_BUTTON_GPIO` | 0 | button that recalibrates (BOOT on most boards); -1 = none |
    | `CAL_DELAY_S` | 5 | after a press: time to step away before measuring |
    | `LED_GPIO` | 48 | on-board RGB LED (WS2812); 38 on DevKitC-1 v1.1; -1 = none |
@@ -156,9 +155,13 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    ```
 4. After boot, keep the room still for about 15 s while it shows `CALIBRATING`. It's fine if someone moves now and then; it settles within a minute or two either way. Press **BOOT** to recalibrate at any time, for example after rearranging the room. If you get false alarms, raise `MD_ON_SHORT`/`MD_ON_LONG`; to catch smaller movements, lower them. The GUI shows the scores as multiples of the quiet level, so you can see the margins directly.
 
+### Choosing the network
+
+The board remembers which network to watch, so switching routers needs no reflash. In the GUI press **n** (or the **Network** button): the board scans all channels for a few seconds and lists the networks nearby, strongest first. Pick yours and choose **Watch selected**. The board saves the choice, restarts and recalibrates (about 15 s), and keeps it after unplugging, so it works away from the PC too. **Back to default** returns to `MY_SSID` from `main/my_network.h`. Flashing a build whose `MY_SSID` changed also makes that new default win. The board is 2.4 GHz only, so 5 GHz-only networks are not listed. Without any network chosen the LED stays dim yellow.
+
 ### Devices on your network (experimental)
 
-The GUI opens a second window listing the devices the board hears talking to your network (only your `MY_SSID`), with their maker from the [`oui`](https://github.com/Ringmast4r/OUI-Master-Database) tool's database if installed (`~/.oui-database/`), else the system IEEE list (`ieee-data` / `arp-scan`). Each device is judged after 3 minutes of watching: a **stationary** one has a real (not private) MAC, actually transmits, is stronger than -80 dBm and keeps a steady signal.
+The GUI opens a second window listing the devices the board hears talking to your network, with their maker from the [`oui`](https://github.com/Ringmast4r/OUI-Master-Database) tool's database if installed (`~/.oui-database/`), else the system IEEE list (`ieee-data` / `arp-scan`). Each device is judged after 3 minutes of watching: a **stationary** one has a real (not private) MAC, actually transmits, is stronger than -80 dBm and keeps a steady signal.
 
 Poke modes: **Auto** (default) pokes up to 4 stationary devices as extra sensing links, **All active** pokes the 4 busiest ones (phones included), **Manual** pokes exactly what you tick, **Off** pokes only the router. A poked device that stops answering is dropped for 30 minutes. Picks are sent to the board over USB while it runs (no reflash), the board refuses any MAC it hasn't seen on your network, and the GUI re-sends them after a board reboot. Your mode and picks are kept in `sessions/devices.json`.
 
@@ -230,6 +233,7 @@ POKING,<idx>,<mac>                               devices being poked (nodes 8..1
 DEV,<mac>,<rssi>,<frames_sent>,<frames_received>,<ms_since_heard>   devices on our network, every 5 s
 UNPOKED,<mac|all>   REFUSED,<mac>,<not-seen-on-network|is-an-ap|full>   REFUSED,bad-command
 BUZZER,<off|gpioN|error,...>
+NETWORK,<default|chosen|none|saved>,<name>   the network being watched, at boot and every 5 s
 LINK,<ts>,<weak|ok>,<acks/s>,<rssi>   router link quality changed (weak = no motion beeps)
 LED,<off|gpioN|error,...>
 BUTTON,<gpioN|error,gpioN|recalibrate|recalibrate,pc>
@@ -242,6 +246,9 @@ Commands to the board (one per line on the USB port; the GUI sends them):
 POKE,<mac>      poke a device heard on our network (up to 4)
 UNPOKE,<mac>    stop;  UNPOKE,all  stops all
 CAL             recalibrate, like the BOOT button
+SCAN            list nearby networks: NET,<ch>,<rssi>,<name> lines, then NETS,done,<n>
+USE,<name>      watch this network from now on (saved on the board, which restarts)
+USE_DEFAULT     forget that choice: back to MY_SSID from main/my_network.h
 BEEP[,<ms>[,<hz>[,<vol>]]]  test beep (1-3000 ms, default 300; pitch 100-10000 Hz; volume 1-100 %)
 GLIDE,<ms>,<hz>,<hz2>[,<vol>]  test a smooth pitch glide from hz to hz2
 ```
