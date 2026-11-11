@@ -95,11 +95,27 @@ def main():
     s.start_scan()
     assert s.outbox[-1] == 'SCAN' and s.nets_state == 'scanning'
     s.outbox.clear()
-    for ln in ('NET,6,-70,MyNetwork', 'NET,11,-48,Cafe, upstairs', 'NET,x,-1,bad', 'NETS,done,2'):
+    s.start_scan()
+    assert s.outbox == [], "no second SCAN while one runs"
+    fake = lambda n: ':'.join(['02'] + ['00'] * 4 + [f'{n:02x}'])     # noqa: E731 (no MACs in git)
+    for ln in ('NET,6,-70,MyNetwork', f'NETAP,{fake(1)},6,-70,MyNetwork',
+               f'NETAP,{fake(2)},11,-80,MyNetwork', 'NET,11,-48,Cafe, upstairs',
+               'NET,6,-75,MyNetwork', 'NET,x,-1,bad', 'NETS,done,2'):
         s.feed(ln + '\n')
     assert s.nets == [('Cafe, upstairs', 11, -48), ('MyNetwork', 6, -70)] and s.nets_state == 'done'
+    aps = s.net_aps['MyNetwork']
+    assert len(aps) == 2 and aps[0][0].endswith(':01') and aps[0][2] == -70, aps
+    s.feed('NET,1,-30,Late\n')                       # leftovers after done: ignored
+    assert len(s.nets) == 2
     s.feed('NETWORK,saved,Cafe, upstairs\n')
     assert s.network == ('switching', 'Cafe, upstairs')
+    s.devices.devs[fake(9)] = object()     # heard on the old network
+    s.feed('NETWORK,chosen,Cafe, upstairs\n')         # the board restarted on the new one
+    assert s.network == ('chosen', 'Cafe, upstairs') and not s.devices.devs, "old devices forgotten"
+    s.devices.devs[fake(9)] = object()
+    s.feed('NETWORK,chosen,Cafe, upstairs\n')         # same network repeated: kept
+    assert s.devices.devs
+    s.devices.devs.clear()
     view.open_network()                      # no picker without a board: says so
     assert 'needs a board' in view.footer.get_text()
     view.recalibrate()                       # no board here: says so instead of nothing

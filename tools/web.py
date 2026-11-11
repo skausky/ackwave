@@ -111,6 +111,8 @@ class Dashboard:
             elif what == 'scan':
                 if not self.send:
                     return False, 'scanning needs a board'
+                if self.s.scanning():
+                    return True, 'Already scanning'
                 self.s.start_scan()
                 msg = 'Scanning all channels (about 4 s)'
             elif what == 'use':
@@ -387,7 +389,9 @@ class Dashboard:
     def _network(self):
         how, name = self.s.network or ('?', '')
         return dict(how=how, name=name, state=self.s.nets_state,
-                    nets=[dict(name=n, ch=ch, rssi=rssi) for n, ch, rssi in self.s.nets])
+                    nets=[dict(name=n, ch=ch, rssi=rssi,
+                               aps=[dict(bssid=b, ch=c, rssi=r) for b, c, r in self.s.net_aps.get(n, [])])
+                          for n, ch, rssi in self.s.nets])
 
     def _details(self):
         s, det = self.s, self.s.det

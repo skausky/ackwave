@@ -276,7 +276,8 @@ Commands to the board (one per line on the USB port; the GUI sends them):
 POKE,<mac>      poke a device heard on our network (up to 4)
 UNPOKE,<mac>    stop;  UNPOKE,all  stops all
 CAL             recalibrate, like the BOOT button
-SCAN            list nearby networks: NET,<ch>,<rssi>,<name> lines, then NETS,done,<n>
+SCAN            list nearby networks: NET,<ch>,<rssi>,<name> per name, NETAP,<bssid>,<ch>,<rssi>,<name>
+                per access point with that name, then NETS,done,<n>; a SCAN during a scan is ignored
 USE,<name>      watch this network from now on (saved on the board, which restarts)
 USE_DEFAULT     forget that choice: back to MY_SSID from main/my_network.h
 BEEP[,<ms>[,<hz>[,<vol>]]]  test beep (1-3000 ms, default 300; pitch 100-10000 Hz; volume 1-100 %)

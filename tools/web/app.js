@@ -481,6 +481,24 @@ function renderNet() {
     if (net.name === n.name) tr.className = 'cur';
     const cells = [net.name, net.ch, `${net.rssi} dBm`];
     cells.forEach((c, i) => { const td = document.createElement('td'); td.textContent = c; tr.append(td); });
+    const aps = net.aps || [];
+    if (aps.length) {                                // its access points (mesh nodes, extenders)
+      const boardCh = slow.details && slow.details.channel ? slow.details.channel[0] : null;
+      const box = document.createElement('div');
+      box.className = 'aps';
+      const head = document.createElement('div');
+      head.textContent = aps.length === 1 ? '1 access point' : `${aps.length} access points`;
+      box.append(head);
+      for (const a of aps) {
+        const row = document.createElement('div');
+        const used = net.name === n.name && a.ch === boardCh;
+        row.textContent = `${a.bssid} · ch ${a.ch} · ${a.rssi} dBm` +
+          (net.name === n.name ? (used ? ' · in use' : ' · other channel') : '');
+        if (used) row.className = 'used';
+        box.append(row);
+      }
+      tr.children[0].append(box);
+    }
     tr.children[2].prepend(Object.assign(document.createElement('span'), { className: 'bars', textContent: bars(net.rssi) + ' ' }));
     const td = document.createElement('td');
     if (net.name !== n.name) {

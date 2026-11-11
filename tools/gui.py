@@ -89,6 +89,8 @@ class State:
         self.on_csi = None                               # extra per-packet hook: on_csi(d, t)
         self.network = None                              # (how, name): how = default/chosen/none
         self.nets, self.nets_state = [], 'idle'          # SCAN results: [(name, ch, rssi)]
+        self.net_aps = {}                                # name -> [(bssid, ch, rssi)]
+        self.net_confirmed = None                        # last network the board reported watching
         # Whole-session history on the wall clock (survives board reboots):
         # one bin per second with the highest short / long score
         self.hist_t, self.hist_s, self.hist_l = [], [], []
@@ -106,24 +108,51 @@ class State:
         if tag == 'NETWORK':
             how, _, name = rest.partition(',')
             if how in ('default', 'chosen', 'none'):
+                if self.net_confirmed is not None and self.net_confirmed != name:
+                    self.devices.forget_network()        # switched: old devices don't apply
+                self.net_confirmed = name
                 self.network = (how, name)
             elif how == 'saved':
                 self.network = ('switching', name)
+        elif tag in ('NET', 'NETAP') and not self.scanning():
+            return                                       # leftovers of an earlier scan
         elif tag == 'NET':
             p = rest.split(',', 2)
             if len(p) == 3:
                 try:
-                    self.nets.append((p[2], int(p[0]), int(p[1])))
+                    ch, rssi, name = int(p[0]), int(p[1]), p[2]
                 except ValueError:
-                    pass
+                    return
+                old = [n for n in self.nets if n[0] == name]   # one row per name
+                if not old or rssi > old[0][2]:
+                    self.nets = [n for n in self.nets if n[0] != name] + [(name, ch, rssi)]
+        elif tag == 'NETAP':
+            p = rest.split(',', 3)
+            if len(p) == 4:
+                try:
+                    ap = (p[0], int(p[1]), int(p[2]))
+                except ValueError:
+                    return
+                aps = self.net_aps.setdefault(p[3], [])
+                if ap[0] not in [a[0] for a in aps]:
+                    aps.append(ap)
+                    aps.sort(key=lambda a: -a[2])
         elif rest.startswith('done'):
             self.nets.sort(key=lambda n: -n[2])
             self.nets_state = 'done'
 
     def start_scan(self):
         """Ask the board for nearby networks (about 4 s; pokes pause meanwhile)."""
-        self.nets, self.nets_state = [], 'scanning'
+        if self.scanning():
+            return                                       # one at a time
+        self.nets, self.net_aps, self.nets_state = [], {}, 'scanning'
+        self.scan_t = self.clock()
         self.outbox.append('SCAN')
+
+    def scanning(self):
+        """A scan is running (its NETS,done not in yet; given up after 15 s,
+        e.g. when the board restarted meanwhile)."""
+        return self.nets_state == 'scanning' and self.clock() - getattr(self, 'scan_t', 0) < 15
 
     def wall(self, t=None):
         """Wall-clock time (unix s) of board time t (default: now)."""
@@ -157,7 +186,7 @@ class State:
         if line.startswith('ME,'):
             self.me = line.strip()[3:]
             return
-        if line.startswith(('NETWORK,', 'NET,', 'NETS,')):
+        if line.startswith(('NETWORK,', 'NET,', 'NETAP,', 'NETS,')):
             self._network_line(line.rstrip('\r\n'))
             return
         ev = parse_line(line)

@@ -56,17 +56,24 @@ static inline void parse_beacon(const uint8_t *f, int len, const char *ssid,
 
 // ---------- Nearby networks (the SCAN command) ----------
 #define MAX_NETS 32
+#define MAX_NET_APS 6            // access points kept per name (mesh nodes, extenders)
 typedef struct {
     char    ssid[33];            // NUL-terminated
     uint8_t ch;
     int8_t  rssi;                // strongest beacon heard
     uint16_t n;                  // beacons heard
+    uint8_t n_ap;                // access points with this name
+    uint8_t ap[MAX_NET_APS][6];  // their BSSIDs,
+    uint8_t ap_ch[MAX_NET_APS];  // channels
+    int8_t  ap_rssi[MAX_NET_APS]; // and strongest beacons
 } net_t;
 typedef struct { net_t n[MAX_NETS]; int count; } net_list_t;
 
-// Note a beacon. Hidden networks (empty or all-zero names) are skipped; a
-// name seen on several APs keeps its strongest. Returns the entry or -1.
-static inline int net_note(net_list_t *l, const uint8_t *ssid, int len, int ch, int rssi) {
+// Note a beacon from `bssid`. Hidden networks (empty or all-zero names) are
+// skipped; one entry per name, keeping its strongest AP and a list of its APs.
+// Returns the entry or -1.
+static inline int net_note(net_list_t *l, const uint8_t *ssid, int len, const uint8_t *bssid,
+                           int ch, int rssi) {
     if (len <= 0 || len > 32 || !ssid) return -1;
     bool blank = true;
     for (int i = 0; i < len; i++) if (ssid[i]) blank = false;
@@ -84,6 +91,17 @@ static inline int net_note(net_list_t *l, const uint8_t *ssid, int len, int ch, 
     net_t *e = &l->n[k];
     if (rssi > e->rssi) { e->rssi = (int8_t)rssi; e->ch = (uint8_t)ch; }
     if (e->n < 0xFFFF) e->n++;
+    if (bssid) {
+        int a = -1;
+        for (int i = 0; i < e->n_ap && a < 0; i++)
+            if (memcmp(e->ap[i], bssid, 6) == 0) a = i;
+        if (a < 0 && e->n_ap < MAX_NET_APS) {
+            a = e->n_ap++;
+            memcpy(e->ap[a], bssid, 6);
+            e->ap_rssi[a] = -127;
+        }
+        if (a >= 0 && rssi > e->ap_rssi[a]) { e->ap_rssi[a] = (int8_t)rssi; e->ap_ch[a] = (uint8_t)ch; }
+    }
     return k;
 }
 

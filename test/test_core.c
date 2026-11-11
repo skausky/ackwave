@@ -382,15 +382,19 @@ int main(void) {
         CHECK(parse_use("USE,My Net, 2.4G\r\n", nm) == 12 && strcmp(nm, "My Net, 2.4G") == 0);
         CHECK(parse_use("USE,", nm) == -1 && parse_use("USE,123456789012345678901234567890123", nm) == -1);
         CHECK(parse_use("USE,12345678901234567890123456789012", nm) == 32 && parse_cmd("USE,x", cm) == CMD_NONE);
-        {   // nearby networks: strongest kept, hidden skipped, list bounded
+        {   // nearby networks: one entry per name, strongest kept, its APs listed, hidden skipped
             net_list_t nl; memset(&nl, 0, sizeof nl);
             const uint8_t a1[] = "Alpha", b1[] = "Beta", z[4] = {0};
-            CHECK(net_note(&nl, a1, 5, 6, -70) == 0 && net_note(&nl, a1, 5, 11, -50) == 0);
-            CHECK(nl.n[0].rssi == -50 && nl.n[0].ch == 11 && nl.n[0].n == 2);
-            CHECK(net_note(&nl, a1, 5, 1, -90) == 0 && nl.n[0].ch == 11);
-            CHECK(net_note(&nl, b1, 4, 1, -80) == 1 && strcmp(nl.n[1].ssid, "Beta") == 0);
-            CHECK(net_note(&nl, z, 4, 1, -40) == -1 && net_note(&nl, a1, 0, 1, -40) == -1 && nl.count == 2);
-            for (int j = 0; j < 40; j++) { uint8_t x[3] = {'n', (uint8_t)('a' + j / 26), (uint8_t)('a' + j % 26)}; net_note(&nl, x, 3, 1, -60); }
+            uint8_t ap1[6] = {2, 0, 0, 0, 0, 1}, ap2[6] = {2, 0, 0, 0, 0, 2};
+            CHECK(net_note(&nl, a1, 5, ap1, 6, -70) == 0 && net_note(&nl, a1, 5, ap1, 11, -50) == 0);
+            CHECK(nl.n[0].rssi == -50 && nl.n[0].ch == 11 && nl.n[0].n == 2 && nl.n[0].n_ap == 1);
+            CHECK(net_note(&nl, a1, 5, ap2, 1, -90) == 0 && nl.n[0].ch == 11 && nl.n[0].n_ap == 2);
+            CHECK(nl.n[0].ap_rssi[1] == -90 && nl.n[0].ap_ch[1] == 1 && memcmp(nl.n[0].ap[1], ap2, 6) == 0);
+            for (int j = 0; j < 10; j++) { uint8_t x[6] = {2, 1, 0, 0, 0, (uint8_t)j}; net_note(&nl, a1, 5, x, 6, -60); }
+            CHECK(nl.n[0].n_ap == MAX_NET_APS && nl.count == 1);        // AP list bounded
+            CHECK(net_note(&nl, b1, 4, NULL, 1, -80) == 1 && strcmp(nl.n[1].ssid, "Beta") == 0 && nl.n[1].n_ap == 0);
+            CHECK(net_note(&nl, z, 4, ap1, 1, -40) == -1 && net_note(&nl, a1, 0, ap1, 1, -40) == -1 && nl.count == 2);
+            for (int j = 0; j < 40; j++) { uint8_t x[3] = {'n', (uint8_t)('a' + j / 26), (uint8_t)('a' + j % 26)}; net_note(&nl, x, 3, ap1, 1, -60); }
             CHECK(nl.count == MAX_NETS);
         }
         int hz2;

@@ -165,6 +165,12 @@ class Devices:
         self.bad_since = {}
         self.board_seen = False          # any DEV / POKING / STATS seen yet
 
+    def forget_network(self):
+        """The board now watches another network: what it heard on the old one
+        no longer applies (the user's mode and picks stay)."""
+        self.devs, self.poking, self._cycle, self.gate = {}, {}, {}, {}
+        self.dropped, self.refused, self.bad_since = {}, {}, {}
+
     # ---- events from the board ----
     def feed(self, kind, d):
         """Feed one parsed event. Returns commands to send (maybe empty)."""

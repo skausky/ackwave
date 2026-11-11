@@ -436,7 +436,7 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     beacon_info_t b;
     parse_beacon(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, my_ssid, &b);
     if (b.ok && net_collect)
-        net_note(&nets, b.ssid, b.ssid_len, b.ds_ch ? b.ds_ch : pkt->rx_ctrl.channel,
+        net_note(&nets, b.ssid, b.ssid_len, b.bssid, b.ds_ch ? b.ds_ch : pkt->rx_ctrl.channel,
                  pkt->rx_ctrl.rssi);
     if (!b.ok || !b.ssid_match) return;
 
@@ -684,8 +684,12 @@ static void net_scan(void) {
             name[j] = c && (unsigned char)c < 0x20 ? '?' : c;
         }
         printf("NET,%d,%d,%s\n", nets.n[i].ch, nets.n[i].rssi, name);
+        for (int a = 0; a < nets.n[i].n_ap; a++)   // its access points (mesh nodes etc.)
+            printf("NETAP," MACF ",%d,%d,%s\n", MACA(nets.n[i].ap[a]), nets.n[i].ap_ch[a],
+                   nets.n[i].ap_rssi[a], name);
     }
     printf("NETS,done,%d\n", nets.count);
+    scan_request = 0;                            // a SCAN sent meanwhile: this scan answers it
 }
 
 // The only task that changes channels
