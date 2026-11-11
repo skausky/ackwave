@@ -363,6 +363,12 @@ int main(void) {
         CHECK(parse_beep("BEEP,500,50", &hz, &vol) == -1 && parse_beep("BEEP,500,", &hz, &vol) == -1);
         CHECK(parse_beep("BEEP,1,200,3,4", &hz, &vol) == -1 && parse_beep("BEEPX", &hz, &vol) == -1);
         CHECK(parse_beep("CAL", &hz, &vol) == -1);
+        int hz2;
+        CHECK(parse_glide("GLIDE,600,1500,4500", &hz, &hz2, &vol) == 600 && hz == 1500 && hz2 == 4500 && vol == 0);
+        CHECK(parse_glide("GLIDE,600,1500,4500,50\r\n", &hz, &hz2, &vol) == 600 && vol == 50);
+        CHECK(parse_glide("GLIDE,600,1500", &hz, &hz2, &vol) == -1 && parse_glide("GLIDE,600,1500,99", &hz, &hz2, &vol) == -1);
+        CHECK(parse_glide("GLIDE,0,1500,4500", &hz, &hz2, &vol) == -1 && parse_glide("GLIDE,600,1500,4500,0", &hz, &hz2, &vol) == -1);
+        CHECK(parse_glide("BEEP,600,1500,4500", &hz, &hz2, &vol) == -1 && parse_beep("GLIDE,600,1500,4500", &hz, &vol) == -1);
         CHECK(parse_cmd("BEEP,150", cm) == CMD_NONE);
         CHECK(parse_cmd(CMD("", "POKE,", BC), cm) == CMD_NONE);   // broadcast refused
         CHECK(parse_cmd(CMD("z", "POKE,", PLUG), cm) == CMD_NONE); // trailing junk

@@ -188,6 +188,7 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //   UNPOKE,all
 //   CAL            recalibrate, like the button
 //   BEEP[,<ms>[,<hz>[,<vol>]]]  test the buzzer (parse_beep)
+//   GLIDE,<ms>,<hz>,<hz2>[,<vol>]  a pitch glide (parse_glide)
 enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL };
 
 static inline bool parse_mac(const char *s, uint8_t out[6]) {
@@ -242,6 +243,28 @@ static inline int parse_beep(const char *line, int *hz, int *vol) {
     if (k == 3 && (v[2] < 1 || v[2] > 100)) return -1;
     *hz = k >= 2 ? v[1] : 0;
     *vol = k == 3 ? v[2] : 0;
+    return v[0];
+}
+
+// GLIDE,<ms>,<hz>,<hz2>[,<vol>]: returns ms (1-3000) and sets the start and
+// end pitch (100-10000 Hz) and *vol (1-100 %, 0 = default), or returns -1
+static inline int parse_glide(const char *line, int *hz, int *hz2, int *vol) {
+    *hz = *hz2 = *vol = 0;
+    if (!line || strncmp(line, "GLIDE,", 6) != 0) return -1;
+    const char *s = line + 5;
+    int v[4] = {0, 0, 0, 0}, k = 0;
+    while (*s == ',' && k < 4) {
+        s++;
+        int digits = 0;
+        while (*s >= '0' && *s <= '9' && digits < 6) { v[k] = v[k] * 10 + (*s++ - '0'); digits++; }
+        if (!digits) return -1;
+        k++;
+    }
+    if (k < 3 || !(*s == '\0' || *s == '\r' || *s == '\n')) return -1;
+    if (v[0] < 1 || v[0] > 3000) return -1;
+    if (v[1] < 100 || v[1] > 10000 || v[2] < 100 || v[2] > 10000) return -1;
+    if (k == 4 && (v[3] < 1 || v[3] > 100)) return -1;
+    *hz = v[1]; *hz2 = v[2]; *vol = k == 4 ? v[3] : 0;
     return v[0];
 }
 

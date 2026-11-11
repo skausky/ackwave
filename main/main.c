@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -80,6 +81,9 @@
 #ifndef BUZZER_VOL
 #define BUZZER_VOL     50        // loudness, % (50 = full; a piezo is much quieter at 5-10)
 #endif
+#ifndef MOTION_ALARM
+#define MOTION_ALARM   0         // 1 = loop an air-raid whoop while motion lasts (instead of one beep)
+#endif
 #ifndef BEEP_GAP_MS
 #define BEEP_GAP_MS    30000     // at most one motion beep per this long
 #endif
@@ -137,19 +141,22 @@ static void set_ch(int ch) {
 static bool buzzer_ok;
 static QueueHandle_t tune_q;
 
-typedef struct { uint16_t hz, ms; } note_t;  // hz 0 = rest
-static volatile int buzz_vol = BUZZER_VOL;    // % for the next notes
-typedef struct { note_t n[4]; } tune_t;      // ends at the first ms == 0
+typedef struct { uint16_t hz, ms, hz2; } note_t;  // hz 0 = rest; hz2 set = glide hz -> hz2
+typedef struct { note_t n[4]; uint8_t vol; } tune_t;  // ends at the first ms == 0; vol % (0 = BUZZER_VOL)
+static int buzz_vol = BUZZER_VOL;            // volume of the tune playing (buzzer task only)
 
 // High and loud = something is happening, soft and falling = settling down,
 // low = a problem. Status sounds use the soft pitch, motion the loud one.
-static const tune_t TUNE_HELLO  = {{{BUZZER_SOFT_HZ, 70}, {3000, 70}, {BUZZER_HZ, 120}}};  // rising chirp
-static const tune_t TUNE_TICK   = {{{3000, 30}}};                                          // got the command
-static const tune_t TUNE_READY  = {{{BUZZER_SOFT_HZ, 50}, {0, 80}, {BUZZER_SOFT_HZ, 50}}}; // two soft blips
-static const tune_t TUNE_MOTION = {{{BUZZER_HZ, BEEP_MS}}};                                  // one loud beep
-static const tune_t TUNE_STILL  = {{{2500, 70}, {0, 30}, {1800, 120}}};                    // dee-doo
-static const tune_t TUNE_LOST   = {{{2000, 120}, {1500, 120}, {1000, 300}}};               // doo-doo-dooo
-static const tune_t TUNE_FOUND  = {{{1500, 80}, {0, 30}, {2500, 120}}};                    // doo-dee
+static const tune_t TUNE_HELLO  = {{{BUZZER_SOFT_HZ, 70, 0}, {3000, 70, 0}, {BUZZER_HZ, 120, 0}}, 0};  // rising chirp
+static const tune_t TUNE_TICK   = {{{3000, 30, 0}}, 0};                                          // got the command
+static const tune_t TUNE_READY  = {{{BUZZER_SOFT_HZ, 50, 0}, {0, 80, 0}, {BUZZER_SOFT_HZ, 50, 0}}, 0}; // two soft blips
+static const tune_t TUNE_MOTION = {{{BUZZER_HZ, BEEP_MS, 0}}, 0};                                  // one loud beep
+static const tune_t TUNE_STILL  = {{{2500, 70, 0}, {0, 30, 0}, {1800, 120, 0}}, 0};                    // dee-doo
+static const tune_t TUNE_LOST   = {{{2000, 120, 0}, {1500, 120, 0}, {1000, 300, 0}}, 0};               // doo-doo-dooo
+// Alarm mode: an air-raid whoop, looped while motion lasts, always at full volume
+static const tune_t TUNE_WHOOP  = {{{800, 900, 6000}, {0, 250, 0}}, 50};
+#define WHOOP_EVERY_US 1150000
+static const tune_t TUNE_FOUND  = {{{1500, 80, 0}, {0, 30, 0}, {2500, 120, 0}}, 0};                    // doo-dee
 
 static void buzzer_set(bool on) {
 #if BUZZER_ACTIVE
@@ -175,10 +182,22 @@ static void buzzer_task(void *arg) {
     xQueueReceive(tune_q, &t, portMAX_DELAY);
     for (;;) {
         bool cut = false;
+        buzz_vol = t.vol ? t.vol : BUZZER_VOL;
         for (int i = 0; i < 4 && t.n[i].ms && !cut; i++) {
-            if (t.n[i].hz) buzzer_pitch(t.n[i].hz);
-            buzzer_set(t.n[i].hz != 0);
-            cut = xQueueReceive(tune_q, &t, pdMS_TO_TICKS(t.n[i].ms)) == pdTRUE;
+            note_t n = t.n[i];
+            if (n.hz) buzzer_pitch(n.hz);
+            buzzer_set(n.hz != 0);
+            if (n.hz && n.hz2 && n.hz2 != n.hz) {    // glide: even steps in pitch, every 2 ms
+                int64_t t0 = esp_timer_get_time(), len = (int64_t)n.ms * 1000;
+                for (;;) {
+                    int64_t el = esp_timer_get_time() - t0;
+                    if (el >= len) break;
+                    buzzer_pitch((int)(n.hz * powf((float)n.hz2 / n.hz, (float)el / len)));
+                    if (xQueueReceive(tune_q, &t, pdMS_TO_TICKS(2)) == pdTRUE) { cut = true; break; }
+                }
+            } else {
+                cut = xQueueReceive(tune_q, &t, pdMS_TO_TICKS(n.ms)) == pdTRUE;
+            }
         }
         buzzer_set(false);
         if (!cut) xQueueReceive(tune_q, &t, portMAX_DELAY);
@@ -504,13 +523,18 @@ static __attribute__((unused)) void print_poking(void) {   // unused when POKE_H
 static void run_cmd(const char *line) {
     uint8_t mac[6];
     int cmd = parse_cmd(line, mac);
-    int hz, vol, beep_ms = parse_beep(line, &hz, &vol);
-    if (beep_ms > 0) {
-        tune_t t = {{{(uint16_t)(hz ? hz : BUZZER_HZ), (uint16_t)beep_ms}}};
-        buzz_vol = vol ? vol : BUZZER_VOL;   // a test volume lasts until the next BEEP
+    int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
+    int glide_ms = parse_glide(line, &hz, &hz2, &vol);
+    if (glide_ms > 0) {
+        tune_t t = {{{(uint16_t)hz, (uint16_t)glide_ms, (uint16_t)hz2}}, (uint8_t)vol};
+        buzzer_play(&t);
+        printf("GLIDE,%d,%d,%d,%d\n", glide_ms, hz, hz2, vol ? vol : BUZZER_VOL);
+    } else if (beep_ms > 0) {
+        parse_beep(line, &hz, &vol);
+        tune_t t = {{{(uint16_t)(hz ? hz : BUZZER_HZ), (uint16_t)beep_ms, 0}}, (uint8_t)vol};
         buzzer_play(&t);
         printf(buzzer_ok ? "BEEP,%d,%d,%d\n" : "BEEP,%d,%d,%d,no-buzzer\n",
-               beep_ms, hz ? hz : BUZZER_HZ, buzz_vol);
+               beep_ms, hz ? hz : BUZZER_HZ, vol ? vol : BUZZER_VOL);
     } else if (cmd == CMD_CAL) {
         cal_request = 1;
         buzzer_play(&TUNE_TICK);
@@ -685,6 +709,7 @@ static void print_task(void *arg) {
     int64_t beep_at = -1;                    // when to beep for the current motion, -1 = no
     bool beeped = false;                     // this motion got its beep: sound its end too
     int64_t last_beep = INT64_MIN / 2;       // when the last motion beep played
+    int64_t next_whoop = -1;                 // alarm mode: next whoop, -1 = alarm off
     // Link watch: a weak link is noisy and looks like motion, so no beeps then
     int64_t link_from = 0;
     int link_acks = 0, link_rssi_sum = 0;
@@ -746,10 +771,22 @@ static void print_task(void *arg) {
         }
         if (beep_at >= 0 && p.ts >= beep_at) {  // lasted long enough: not a brief blip
             beep_at = -1;
-            if (det.motion && !link_weak && p.ts - last_beep >= (int64_t)BEEP_GAP_MS * 1000) {
+            if (MOTION_ALARM && det.motion && !link_weak) {
+                next_whoop = p.ts;           // sounds until motion ends
+                beeped = true;
+            } else if (det.motion && !link_weak && p.ts - last_beep >= (int64_t)BEEP_GAP_MS * 1000) {
                 buzzer_play(&TUNE_MOTION);
                 beeped = true;
                 last_beep = p.ts;
+            }
+        }
+        if (next_whoop >= 0) {
+            if (!det.motion || link_weak) {
+                next_whoop = -1;             // motion over (or link went bad): stop
+                if (link_weak) { tune_t quiet = {{{0, 1, 0}}, 0}; buzzer_play(&quiet); }
+            } else if (p.ts >= next_whoop) {
+                buzzer_play(&TUNE_WHOOP);
+                next_whoop = p.ts + WHOOP_EVERY_US;
             }
         }
     }
