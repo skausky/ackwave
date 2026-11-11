@@ -129,6 +129,7 @@ static char my_ssid[33];
 static volatile bool     net_collect = false;  // SCAN running: note every beacon
 static net_list_t        nets;                 // written by the Wi-Fi task while collecting
 static volatile uint32_t scan_request;         // set by run_cmd, done by control_task
+static uint32_t          scan_done_ms;         // when the last scan finished (control_task)
 
 // A choice made from the PC is saved together with the build default it
 // replaced, so flashing a build with a different default (a new
@@ -581,7 +582,12 @@ static void run_cmd(const char *line) {
         printf(buzzer_ok ? "BEEP,%d,%d,%d\n" : "BEEP,%d,%d,%d,no-buzzer\n",
                beep_ms, hz ? hz : BUZZER_HZ, vol ? vol : BUZZER_VOL);
     } else if (cmd == CMD_SCAN) {
-        scan_request = 1;
+        // Commands wait in the USB buffer while a scan runs, so a SCAN sent
+        // during one arrives just after it: that scan already answered it.
+        if (scan_done_ms && !older_than(now_ms(), scan_done_ms, 2000))
+            printf("NETS,ignored,just-scanned\n");
+        else
+            scan_request = 1;
     } else if (parse_use(line, name) > 0 || strncmp(line, "USE_DEFAULT", 11) == 0) {
         bool dflt = line[3] == '_';
         if (ssid_save(dflt ? NULL : name)) {
@@ -689,7 +695,7 @@ static void net_scan(void) {
                    nets.n[i].ap_rssi[a], name);
     }
     printf("NETS,done,%d\n", nets.count);
-    scan_request = 0;                            // a SCAN sent meanwhile: this scan answers it
+    scan_done_ms = now_ms() | 1;
 }
 
 // The only task that changes channels

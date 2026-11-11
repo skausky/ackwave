@@ -140,6 +140,8 @@ class State:
         elif rest.startswith('done'):
             self.nets.sort(key=lambda n: -n[2])
             self.nets_state = 'done'
+        elif rest.startswith('ignored'):                 # it had just scanned: try again shortly
+            self.nets_state = 'idle'
 
     def start_scan(self):
         """Ask the board for nearby networks (about 4 s; pokes pause meanwhile)."""
