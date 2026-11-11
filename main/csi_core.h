@@ -187,7 +187,7 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //   UNPOKE,<mac>   stop
 //   UNPOKE,all
 //   CAL            recalibrate, like the button
-//   BEEP[,<ms>[,<hz>]]  test the buzzer (parse_beep)
+//   BEEP[,<ms>[,<hz>[,<vol>]]]  test the buzzer (parse_beep)
 enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL };
 
 static inline bool parse_mac(const char *s, uint8_t out[6]) {
@@ -220,16 +220,16 @@ static inline int parse_cmd(const char *line, uint8_t mac[6]) {
     return CMD_NONE;
 }
 
-// BEEP, BEEP,<ms> or BEEP,<ms>,<hz>: returns the beep length in ms (1-3000,
-// default 300) and sets *hz (100-10000, 0 = the default pitch), or -1 if the
-// line isn't a valid beep command
-static inline int parse_beep(const char *line, int *hz) {
-    *hz = 0;
+// BEEP, BEEP,<ms>, BEEP,<ms>,<hz> or BEEP,<ms>,<hz>,<vol>: returns the beep
+// length in ms (1-3000, default 300) and sets *hz (100-10000) and *vol
+// (1-100 %), 0 = the default, or returns -1 if the line isn't a valid beep command
+static inline int parse_beep(const char *line, int *hz, int *vol) {
+    *hz = *vol = 0;
     if (!line || strncmp(line, "BEEP", 4) != 0) return -1;
     const char *s = line + 4;
     if (*s == '\0' || *s == '\r' || *s == '\n') return 300;
-    int v[2] = {0, 0}, k = 0;
-    while (*s == ',' && k < 2) {
+    int v[3] = {0, 0, 0}, k = 0;
+    while (*s == ',' && k < 3) {
         s++;
         int digits = 0;
         while (*s >= '0' && *s <= '9' && digits < 6) { v[k] = v[k] * 10 + (*s++ - '0'); digits++; }
@@ -238,8 +238,10 @@ static inline int parse_beep(const char *line, int *hz) {
     }
     if (!k || !(*s == '\0' || *s == '\r' || *s == '\n')) return -1;
     if (v[0] < 1 || v[0] > 3000) return -1;
-    if (k == 2 && (v[1] < 100 || v[1] > 10000)) return -1;
-    *hz = k == 2 ? v[1] : 0;
+    if (k >= 2 && (v[1] < 100 || v[1] > 10000)) return -1;
+    if (k == 3 && (v[2] < 1 || v[2] > 100)) return -1;
+    *hz = k >= 2 ? v[1] : 0;
+    *vol = k == 3 ? v[2] : 0;
     return v[0];
 }
 

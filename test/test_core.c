@@ -352,15 +352,17 @@ int main(void) {
         CHECK(parse_cmd("UNPOKE,allx", cm) == CMD_NONE);
         CHECK(parse_cmd("CAL", cm) == CMD_CAL && parse_cmd("CAL\r\n", cm) == CMD_CAL);
         CHECK(parse_cmd("CALX", cm) == CMD_NONE);
-        int hz;
-        CHECK(parse_beep("BEEP", &hz) == 300 && hz == 0);
-        CHECK(parse_beep("BEEP,150\r\n", &hz) == 150 && hz == 0);
-        CHECK(parse_beep("BEEP,500,3200", &hz) == 500 && hz == 3200);
-        CHECK(parse_beep("BEEP,0", &hz) == -1 && parse_beep("BEEP,3001", &hz) == -1);
-        CHECK(parse_beep("BEEP,", &hz) == -1 && parse_beep("BEEP,12x", &hz) == -1);
-        CHECK(parse_beep("BEEP,500,50", &hz) == -1 && parse_beep("BEEP,500,", &hz) == -1);
-        CHECK(parse_beep("BEEP,1,2,3", &hz) == -1 && parse_beep("BEEPX", &hz) == -1);
-        CHECK(parse_beep("CAL", &hz) == -1);
+        int hz, vol;
+        CHECK(parse_beep("BEEP", &hz, &vol) == 300 && hz == 0 && vol == 0);
+        CHECK(parse_beep("BEEP,150\r\n", &hz, &vol) == 150 && hz == 0);
+        CHECK(parse_beep("BEEP,500,3200", &hz, &vol) == 500 && hz == 3200 && vol == 0);
+        CHECK(parse_beep("BEEP,500,3200,20", &hz, &vol) == 500 && hz == 3200 && vol == 20);
+        CHECK(parse_beep("BEEP,500,3200,0", &hz, &vol) == -1 && parse_beep("BEEP,500,3200,101", &hz, &vol) == -1);
+        CHECK(parse_beep("BEEP,0", &hz, &vol) == -1 && parse_beep("BEEP,3001", &hz, &vol) == -1);
+        CHECK(parse_beep("BEEP,", &hz, &vol) == -1 && parse_beep("BEEP,12x", &hz, &vol) == -1);
+        CHECK(parse_beep("BEEP,500,50", &hz, &vol) == -1 && parse_beep("BEEP,500,", &hz, &vol) == -1);
+        CHECK(parse_beep("BEEP,1,200,3,4", &hz, &vol) == -1 && parse_beep("BEEPX", &hz, &vol) == -1);
+        CHECK(parse_beep("CAL", &hz, &vol) == -1);
         CHECK(parse_cmd("BEEP,150", cm) == CMD_NONE);
         CHECK(parse_cmd(CMD("", "POKE,", BC), cm) == CMD_NONE);   // broadcast refused
         CHECK(parse_cmd(CMD("z", "POKE,", PLUG), cm) == CMD_NONE); // trailing junk

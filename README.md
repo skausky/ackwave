@@ -137,6 +137,9 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    | `BUZZER_ACTIVE` | 0 | 0 = passive piezo (PWM tone), 1 = active buzzer |
 | `BUZZER_HZ` | 2700 | motion-beep pitch; find your buzzer's loudest with `BEEP,700,<hz>` |
 | `BUZZER_SOFT_HZ` | 2000 | pitch of the quieter status sounds |
+| `BUZZER_VOL` | 50 | loudness in % (50 = full; 5-10 is much quieter) |
+| `BEEP_GAP_MS` | 30000 | at most one motion beep per this long |
+| `LINK_MIN_ACKS` / `LINK_MIN_RSSI` | 50 / -85 | below either, the link counts as weak and motion beeps stop (a noisy link looks like motion) |
 | `BEEP_AFTER_MS` | 2000 | beep once motion has lasted this long (skips brief blips); 0 = at once |
    | `CAL_BUTTON_GPIO` | 0 | button that recalibrates (BOOT on most boards); -1 = none |
    | `CAL_DELAY_S` | 5 | after a press: time to step away before measuring |
@@ -181,7 +184,7 @@ High and loud = something is happening, soft and falling = settling down, low = 
 | rising chirp | powered on |
 | one soft tick | recalibrate button / PC command received: step away |
 | two soft blips | calibrated, watching for motion |
-| one loud beep | motion that has lasted 2 s (brief blips stay silent) |
+| one beep | motion that has lasted 2 s (brief blips stay silent; at most one per 30 s; none while the link is weak) |
 | soft falling pair (dee-doo) | that motion ended |
 | low three-step fall | lost the router (once per loss) |
 | soft rising pair (doo-dee) | found the router again | Serial output just goes nowhere.
@@ -226,6 +229,7 @@ POKING,<idx>,<mac>                               devices being poked (nodes 8..1
 DEV,<mac>,<rssi>,<frames_sent>,<frames_received>,<ms_since_heard>   devices on our network, every 5 s
 UNPOKED,<mac|all>   REFUSED,<mac>,<not-seen-on-network|is-an-ap|full>   REFUSED,bad-command
 BUZZER,<off|gpioN|error,...>
+LINK,<ts>,<weak|ok>,<acks/s>,<rssi>   router link quality changed (weak = no motion beeps)
 LED,<off|gpioN|error,...>
 BUTTON,<gpioN|error,gpioN|recalibrate|recalibrate,pc>
 PROBE,...                                        only with CSI_PROBE=1
@@ -237,7 +241,7 @@ Commands to the board (one per line on the USB port; the GUI sends them):
 POKE,<mac>      poke a device heard on our network (up to 4)
 UNPOKE,<mac>    stop;  UNPOKE,all  stops all
 CAL             recalibrate, like the BOOT button
-BEEP[,<ms>[,<hz>]]  test beep (1-3000 ms, default 300; pitch 100-10000 Hz)
+BEEP[,<ms>[,<hz>[,<vol>]]]  test beep (1-3000 ms, default 300; pitch 100-10000 Hz; volume 1-100 %)
 ```
 
 ## Project layout

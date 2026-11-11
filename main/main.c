@@ -77,6 +77,18 @@
 #define BUZZER_HZ      2700      // tone for a passive piezo (try a sweep: BEEP,700,<hz>)
 #endif
 #define BEEP_MS        150
+#ifndef BUZZER_VOL
+#define BUZZER_VOL     50        // loudness, % (50 = full; a piezo is much quieter at 5-10)
+#endif
+#ifndef BEEP_GAP_MS
+#define BEEP_GAP_MS    30000     // at most one motion beep per this long
+#endif
+#ifndef LINK_MIN_ACKS
+#define LINK_MIN_ACKS  50        // router ACKs/s below this = weak link: no motion beeps
+#endif
+#ifndef LINK_MIN_RSSI
+#define LINK_MIN_RSSI  (-85)     // ...or a signal below this (dBm)
+#endif
 #ifndef BUZZER_SOFT_HZ
 #define BUZZER_SOFT_HZ 2000      // pitch of the quieter status sounds
 #endif
@@ -126,6 +138,7 @@ static bool buzzer_ok;
 static QueueHandle_t tune_q;
 
 typedef struct { uint16_t hz, ms; } note_t;  // hz 0 = rest
+static volatile int buzz_vol = BUZZER_VOL;    // % for the next notes
 typedef struct { note_t n[4]; } tune_t;      // ends at the first ms == 0
 
 // High and loud = something is happening, soft and falling = settling down,
@@ -142,7 +155,8 @@ static void buzzer_set(bool on) {
 #if BUZZER_ACTIVE
     gpio_set_level(BUZZER_GPIO, on);
 #else
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, on ? 512 : 0);   // 50 % of 10 bit
+    int v = buzz_vol < 1 ? 1 : buzz_vol > 50 ? 50 : buzz_vol;      // past 50 % gets quieter again
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, on ? (uint32_t)v * 1024 / 100 : 0);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 #endif
 }
@@ -490,11 +504,13 @@ static __attribute__((unused)) void print_poking(void) {   // unused when POKE_H
 static void run_cmd(const char *line) {
     uint8_t mac[6];
     int cmd = parse_cmd(line, mac);
-    int hz, beep_ms = parse_beep(line, &hz);
+    int hz, vol, beep_ms = parse_beep(line, &hz, &vol);
     if (beep_ms > 0) {
         tune_t t = {{{(uint16_t)(hz ? hz : BUZZER_HZ), (uint16_t)beep_ms}}};
+        buzz_vol = vol ? vol : BUZZER_VOL;   // a test volume lasts until the next BEEP
         buzzer_play(&t);
-        printf(buzzer_ok ? "BEEP,%d,%d\n" : "BEEP,%d,%d,no-buzzer\n", beep_ms, hz ? hz : BUZZER_HZ);
+        printf(buzzer_ok ? "BEEP,%d,%d,%d\n" : "BEEP,%d,%d,%d,no-buzzer\n",
+               beep_ms, hz ? hz : BUZZER_HZ, buzz_vol);
     } else if (cmd == CMD_CAL) {
         cal_request = 1;
         buzzer_play(&TUNE_TICK);
@@ -668,6 +684,11 @@ static void print_task(void *arg) {
     int64_t next_calib = 0;
     int64_t beep_at = -1;                    // when to beep for the current motion, -1 = no
     bool beeped = false;                     // this motion got its beep: sound its end too
+    int64_t last_beep = INT64_MIN / 2;       // when the last motion beep played
+    // Link watch: a weak link is noisy and looks like motion, so no beeps then
+    int64_t link_from = 0;
+    int link_acks = 0, link_rssi_sum = 0;
+    bool link_weak = false;
     csi_pkt_t p;
     for (;;) {
         if (!xQueueReceive(q, &p, portMAX_DELAY)) continue;
@@ -682,6 +703,17 @@ static void print_task(void *arg) {
         int n = format_csi_line(line, sizeof line, &p);
         if (n > 0) fwrite(line, 1, n, stdout);
 
+        if (p.kind == 1 && p.src < MAX_APS) { link_acks++; link_rssi_sum += p.rssi; }
+        if (p.ts - link_from >= 5000000) {   // every 5 s
+            int rate = (int)((int64_t)link_acks * 1000000 / (p.ts - link_from));
+            int rssi = link_acks ? link_rssi_sum / link_acks : -127;
+            bool weak = link_from > 0 && (rate < LINK_MIN_ACKS || rssi < LINK_MIN_RSSI);
+            if (weak != link_weak)
+                printf("LINK,%" PRId64 ",%s,%d,%d\n", p.ts, weak ? "weak" : "ok", rate, rssi);
+            link_weak = weak;
+            link_from = p.ts;
+            link_acks = link_rssi_sum = 0;
+        }
         md_update(&det, p.src, p.kind, p.ts, p.rssi, p.buf, p.len);
         int change = md_eval(&det, p.ts);
         {                                    // LED inputs: strength, faint blips
@@ -714,7 +746,11 @@ static void print_task(void *arg) {
         }
         if (beep_at >= 0 && p.ts >= beep_at) {  // lasted long enough: not a brief blip
             beep_at = -1;
-            if (det.motion) { buzzer_play(&TUNE_MOTION); beeped = true; }
+            if (det.motion && !link_weak && p.ts - last_beep >= (int64_t)BEEP_GAP_MS * 1000) {
+                buzzer_play(&TUNE_MOTION);
+                beeped = true;
+                last_beep = p.ts;
+            }
         }
     }
 }
