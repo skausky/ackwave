@@ -83,7 +83,7 @@
 #define BUZZER_VOL     50        // loudness, % (50 = full; a piezo is much quieter at 5-10)
 #endif
 #ifndef MOTION_ALARM
-#define MOTION_ALARM   0         // 1 = loop an air-raid whoop while motion lasts (instead of one beep)
+#define MOTION_ALARM   0         // 1 = loop a two-tone siren while motion lasts (instead of one chime)
 #endif
 #ifndef BEEP_GAP_MS
 #define BEEP_GAP_MS    30000     // at most one motion beep per this long
@@ -196,16 +196,24 @@ static volatile int snd_hz = BUZZER_HZ;      // motion chime pitch
 static const tune_t TUNE_HELLO  = {{{BUZZER_SOFT_HZ, 70, 0}, {3000, 70, 0}, {BUZZER_HZ, 120, 0}}, 0};  // rising chirp
 static const tune_t TUNE_TICK   = {{{3000, 30, 0}}, 0};                                          // got the command
 static const tune_t TUNE_READY  = {{{BUZZER_SOFT_HZ, 50, 0}, {0, 80, 0}, {BUZZER_SOFT_HZ, 50, 0}}, 0}; // two soft blips
-// Motion: bi-ding, rising = started; ding-bi, falling = ended (at snd_hz)
+// Every sound stays near snd_hz: a piezo is only loud close to its resonance
+// (one OSEPP buzzer: 3800-4500 Hz), so a wide sweep or a big interval is quiet.
+#define SND_HI(hz) ((hz) * 9 / 8)               // a whole tone up
+// Motion: bi-ding, rising = started; ding-bi, falling = ended
 static tune_t tune_motion(bool start) {
-    uint16_t lo = (uint16_t)snd_hz, hi = (uint16_t)(snd_hz * 6 / 5);
-    tune_t t = {{{start ? lo : hi, 70, 0}, {0, 40, 0}, {start ? hi : lo, 110, 0}}, 0};
+    uint16_t lo = (uint16_t)snd_hz, hi = (uint16_t)SND_HI(snd_hz);
+    tune_t t = {{{start ? lo : hi, 180, 0}, {0, 50, 0}, {start ? hi : lo, 300, 0}}, 0};
     return t;
 }
+
+// Alarm: a two-tone (hi-lo) siren, looped while motion lasts, always at full volume
+static tune_t tune_siren(void) {
+    uint16_t lo = (uint16_t)snd_hz, hi = (uint16_t)SND_HI(snd_hz);
+    tune_t t = {{{lo, 350, 0}, {hi, 350, 0}, {lo, 350, 0}, {hi, 350, 0}}, SOUND_VOL_MAX};
+    return t;
+}
+#define SIREN_EVERY_US 1400000
 static const tune_t TUNE_LOST   = {{{2000, 120, 0}, {1500, 120, 0}, {1000, 300, 0}}, 0};               // doo-doo-dooo
-// Alarm mode: an air-raid whoop, looped while motion lasts, always at full volume
-static const tune_t TUNE_WHOOP  = {{{800, 900, 6000}, {0, 250, 0}}, 50};
-#define WHOOP_EVERY_US 1150000
 static const tune_t TUNE_FOUND  = {{{1500, 80, 0}, {0, 30, 0}, {2500, 120, 0}}, 0};                    // doo-dee
 
 static void buzzer_set(bool on) {
@@ -615,8 +623,8 @@ static void run_cmd(const char *line) {
             if (svol > 0) snd_vol = svol;
             if (shz > 0) snd_hz = shz;
         }
-        if (snd == SOUND_TEST) {
-            tune_t t = tune_motion(true);
+        if (snd == SOUND_TEST) {         // the current mode's sound
+            tune_t t = snd_mode == SND_ALARM ? tune_siren() : tune_motion(true);
             buzzer_play(&t);             // even when off: asked for
         } else if (snd != SOUND_QUERY && snd_mode == SND_OFF) {
             buzzer_stop();               // cut whatever is playing
@@ -939,8 +947,9 @@ static void print_task(void *arg) {
                 next_whoop = -1;             // motion over, link went bad or mode changed: stop
                 if (det.motion) buzzer_stop();
             } else if (p.ts >= next_whoop) {
-                buzzer_play(&TUNE_WHOOP);
-                next_whoop = p.ts + WHOOP_EVERY_US;
+                tune_t t = tune_siren();
+                buzzer_play(&t);
+                next_whoop = p.ts + SIREN_EVERY_US;
             }
         }
     }

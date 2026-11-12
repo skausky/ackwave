@@ -251,7 +251,7 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //   SOUND          report the buzzer settings (parse_sound)
 //   SOUND,<off|beep|alarm>[,<vol>[,<hz>]]  change them until the next restart
 //   SOUND,default  back to the build's buzzer settings
-//   SOUND,test     play the motion sound as it is set now
+//   SOUND,test     play the current mode's sound (siren in alarm mode)
 enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL, CMD_SCAN };
 
 static inline bool parse_mac(const char *s, uint8_t out[6]) {
