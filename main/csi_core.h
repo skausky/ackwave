@@ -248,6 +248,10 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //   SCAN           list nearby networks (NET lines, then NETS,done)
 //   USE,<name>     watch this network from now on (saved; parse_use)
 //   USE_DEFAULT    forget that choice: back to the build's MY_SSID
+//   SOUND          report the buzzer settings (parse_sound)
+//   SOUND,<off|beep|alarm>[,<vol>[,<hz>]]  change them until the next restart
+//   SOUND,default  back to the build's buzzer settings
+//   SOUND,test     play the motion sound as it is set now
 enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL, CMD_SCAN };
 
 static inline bool parse_mac(const char *s, uint8_t out[6]) {
@@ -339,6 +343,49 @@ static inline int parse_glide(const char *line, int *hz, int *hz2, int *vol) {
     if (k == 4 && (v[3] < 1 || v[3] > 100)) return -1;
     *hz = v[1]; *hz2 = v[2]; *vol = k == 4 ? v[3] : 0;
     return v[0];
+}
+
+// Buzzer modes: no automatic sounds / a chime when motion starts and ends /
+// an air-raid whoop for as long as motion lasts
+enum { SND_OFF = 0, SND_BEEP, SND_ALARM };
+enum { SOUND_BAD = -1, SOUND_QUERY = 0, SOUND_SET, SOUND_DEFAULT, SOUND_TEST };
+#define SOUND_VOL_MAX 50                 // % PWM duty: past 50 a piezo gets quieter again
+#define SOUND_HZ_MIN  500
+#define SOUND_HZ_MAX  6000
+static const char *const SND_NAMES[] = {"off", "beep", "alarm"};
+
+// SOUND, SOUND,default, SOUND,test or SOUND,<mode>[,<vol>[,<hz>]]: returns
+// one of SOUND_*; for SOUND_SET sets *mode (SND_*), *vol (1-50 %) and *hz
+// (500-6000), each -1 when not given
+static inline int parse_sound(const char *line, int *mode, int *vol, int *hz) {
+    *mode = *vol = *hz = -1;
+    if (!line || strncmp(line, "SOUND", 5) != 0) return SOUND_BAD;
+    const char *s = line + 5;
+#define SND_END(c) ((c) == '\0' || (c) == '\r' || (c) == '\n')
+    if (SND_END(*s)) return SOUND_QUERY;
+    if (*s++ != ',') return SOUND_BAD;
+    if (strncmp(s, "default", 7) == 0 && SND_END(s[7])) return SOUND_DEFAULT;
+    if (strncmp(s, "test", 4) == 0 && SND_END(s[4])) return SOUND_TEST;
+    int m = -1;
+    for (int i = 0; i < 3 && m < 0; i++) {
+        size_t n = strlen(SND_NAMES[i]);
+        if (strncmp(s, SND_NAMES[i], n) == 0 && (s[n] == ',' || SND_END(s[n]))) { m = i; s += n; }
+    }
+    if (m < 0) return SOUND_BAD;
+    int v[2] = {-1, -1};
+    for (int k = 0; k < 2 && *s == ','; k++) {
+        s++;
+        int x = 0, digits = 0;
+        while (*s >= '0' && *s <= '9' && digits < 6) { x = x * 10 + (*s++ - '0'); digits++; }
+        if (!digits) return SOUND_BAD;
+        v[k] = x;
+    }
+    if (!SND_END(*s)) return SOUND_BAD;
+#undef SND_END
+    if (v[0] >= 0 && (v[0] < 1 || v[0] > SOUND_VOL_MAX)) return SOUND_BAD;
+    if (v[1] >= 0 && (v[1] < SOUND_HZ_MIN || v[1] > SOUND_HZ_MAX)) return SOUND_BAD;
+    *mode = m; *vol = v[0]; *hz = v[1];
+    return SOUND_SET;
 }
 
 // True if the MAC is locally administered: phones' private / random addresses

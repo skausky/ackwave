@@ -91,10 +91,10 @@ def estimate(q, t_end):
     f = np.fft.rfftfreq(n, 1 / FS)
     band = (f >= BAND[0]) & (f <= BAND[1])
     ref = (f > REF[0]) & (f < REF[1])
-    _, _, vt = np.linalg.svd(U, full_matrices=False)
+    _, v = np.linalg.eigh(U.T @ U)                       # PCs, strongest last (see doppler.py)
     best = (0.0, 0.0)
     for k in range(3):
-        P = np.abs(np.fft.rfft((U @ vt[k]) * win)) ** 2
+        P = np.abs(np.fft.rfft((U @ v[:, -1 - k]) * win)) ** 2
         i = int(np.argmax(np.where(band, P, 0)))
         if not (P[i] > P[i - 1] and P[i] > P[i + 1]):    # a real peak, not a slope's edge
             continue

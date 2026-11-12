@@ -63,6 +63,8 @@ def test_parse():
     check(parse_line("REFUSED,bad-command") == ('refused', dict(mac='', why='bad-command')),
           'REFUSED without MAC')
     check(parse_line("DEV,short,-55,1,1,1") is None, 'bad DEV')
+    garbled = "CSI,1,0,0,6,-40,0,0,128," + " ".join(["12"] * 126 + ["128200", "5"])
+    check(parse_line(garbled) is None, 'garbled CSI line (numbers run together) is skipped')
 
 
 def test_verdict_ignores_device_links():

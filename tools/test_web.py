@@ -37,7 +37,8 @@ def main():
     assert len(blob) < 400_000, len(blob)
     assert f['header']['badge']['word'] in ('STILL', 'MOTION', 'CALIBRATING')
     assert f['score']['series'] and f['window'][1] > f['window'][0]
-    assert 'links' not in sl and sl['settings'] == {'per_link': False}
+    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None}
+    assert sent[0] == 'SOUND', "asks the board for its buzzer settings"
     assert sl['timeline']['end'] >= sl['timeline']['start']
     f600 = dash.fast(600)
     assert all(len(se['t']) <= 702 for se in f600['score']['series']), "series thinned"
@@ -55,7 +56,7 @@ def main():
 
     # Per-link mode: off by default; once on, each ACK link gets its own analysis
     assert dash.command({'cmd': 'settings', 'per_link': True})[0]
-    assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {'per_link': True}
+    assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {'per_link': True, 'sound': None}
     for line in lines[half:]:
         dash.feed(line)
     sl = dash.slow(30)
@@ -65,6 +66,33 @@ def main():
     assert dash.fast(30, other)['breathing'] is not None and dash.slow(30, other)['doppler'] is not None
     assert dash.command({'cmd': 'settings', 'per_link': False})[0] and not dash.links
     assert Dashboard(State(60), settings=os.path.join(tmp, 'dashboard.json')).cfg['per_link'] is False
+
+    # Buzzer: validated, saved, and kept applied after a board restart
+    path = os.path.join(tmp, 'dashboard.json')
+    assert dash.command({'cmd': 'sound', 'mode': 'off', 'vol': 15, 'hz': 3500})[0] and sent[-1] == 'SOUND,off,15,3500'
+    assert json.load(open(path))['sound'] == ['off', 15, 3500]
+    for bad in ({'mode': 'loud', 'vol': 15, 'hz': 3500}, {'mode': 'beep', 'vol': 51, 'hz': 3500},
+                {'mode': 'beep', 'vol': 15, 'hz': 9000}, {'mode': 'beep', 'vol': 'x', 'hz': 3500},
+                {'mode': 'beep\nCAL', 'vol': 15, 'hz': 3500}, {'mode': 'beep'}):
+        assert not dash.command(dict(cmd='sound', **bad))[0], bad
+    assert sent[-1] == 'SOUND,off,15,3500' and json.load(open(path))['sound'] == ['off', 15, 3500]
+    dash.feed('SOUND,off,15,3500\n')                # the board confirms: nothing more to send
+    assert sent[-1] == 'SOUND,off,15,3500' and dash.slow(30)['sound']['mode'] == 'off'
+    n = len(sent)
+    s.clock = lambda: 1e9                            # later: the board restarted with its own settings
+    dash.feed('SOUND,beep,15,3500\n')
+    assert sent[n:] == ['SOUND,off,15,3500'], sent[n:]
+    dash.feed('SOUND,beep,15,3500\n')               # no flood while it catches up
+    assert len(sent) == n + 1
+    assert dash.command({'cmd': 'sound', 'test': True})[0] and sent[-1] == 'SOUND,test'
+    sent2 = []
+    d2 = Dashboard(State(60), send=sent2.append, settings=path)
+    assert d2.cfg['sound'] == ['off', 15, 3500] and d2.s.outbox == ['SOUND,off,15,3500'], d2.s.outbox
+    assert dash.command({'cmd': 'sound', 'mode': 'default'})[0] and sent[-1] == 'SOUND,default'
+    assert json.load(open(path))['sound'] is None
+    dash.feed('SOUND,beep,15,3500,no-buzzer\n')
+    assert sent[-1] == 'SOUND,default' and dash.slow(30)['sound']['buzzer'] is False
+    assert not Dashboard(State(60), settings=path).command({'cmd': 'sound', 'test': True})[0], "needs a board"
 
     # HTTP: pages, one-off snapshot, and the safety checks
     srv = serve(dash, '127.0.0.1', 0)

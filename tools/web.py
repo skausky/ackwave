@@ -35,7 +35,7 @@ from breathing import Breathing
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from doppler import FREQS, LOW_HZ, Doppler
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LONG_C, MOTION_C, SCAN_C, STILL_C,
-                 WINDOWS, State, reader, thin)
+                 SOUND_MODES, WINDOWS, State, reader, thin)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
@@ -58,14 +58,20 @@ class Dashboard:
         self.lock = threading.Lock()
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
-        self.cfg = dict(SETTINGS)
+        self.cfg = dict(SETTINGS, sound=None)    # sound: [mode, vol, hz] kept on the board, None = its own
         if settings:
             try:
                 with open(settings) as f:
                     got = json.load(f)
                 self.cfg.update({k: got[k] for k in SETTINGS if k in got})
-            except (OSError, ValueError):
+                snd = got.get('sound')
+                if snd is not None:
+                    state.want_sound(*snd)       # re-applied whenever the board differs
+                    self.cfg['sound'] = list(state.sound_want)
+            except (OSError, ValueError, TypeError):
                 pass
+        if send and state.sound_want is None:
+            state.outbox.append('SOUND')         # ask the board for its buzzer settings
         # Per-link analysis (experimental, off unless switched on): node -> analysers
         self.links = {}                          # src -> dict(br=Breathing, dop=Doppler, hist=deque)
         state.on_csi = self._on_csi
@@ -139,6 +145,25 @@ class Dashboard:
                 self._save_settings()
                 msg = 'Per-link analysis on (experimental)' if self.cfg['per_link'] \
                     else 'Per-link analysis off'
+            elif what == 'sound':
+                if not self.send:
+                    return False, 'the buzzer needs a board'
+                if c.get('test'):
+                    self.s.outbox.append('SOUND,test')
+                    msg = 'Playing the motion sound'
+                elif c.get('mode') == 'default':
+                    self.s.want_sound(None, 0, 0)
+                    self.cfg['sound'] = None
+                    self._save_settings()
+                    msg = "Buzzer back to the firmware's settings"
+                else:
+                    try:
+                        self.s.want_sound(c.get('mode'), int(c.get('vol')), int(c.get('hz')))
+                    except (TypeError, ValueError):
+                        return False, 'bad buzzer setting'
+                    self.cfg['sound'] = list(self.s.sound_want)
+                    self._save_settings()
+                    msg = 'Buzzer off' if c['mode'] == 'off' else f"Buzzer: {c['mode']}"
             elif what == 'mode':
                 if c.get('mode') not in MODES:
                     return False, 'bad mode'
@@ -204,7 +229,7 @@ class Dashboard:
         with self.lock:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
-                       settings=self.cfg)
+                       settings=self.cfg, sound=s.sound)
             if s.wall_off is None:
                 return out
             t1 = max(s.now, win)
@@ -534,7 +559,10 @@ def pump(dash, q):
             with dash.lock:
                 s.lost = line[5:].strip() or 'connection lost'
             continue
-        dash.feed(line)
+        try:
+            dash.feed(line)
+        except Exception as e:                   # one odd line must not stop the dashboard
+            print(f"skipped a line ({e})", file=sys.stderr)
 
 
 def main():

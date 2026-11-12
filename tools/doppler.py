@@ -116,8 +116,11 @@ def spectrum(q, t_end):
     s = np.arange(WIN) - (WIN - 1) / 2
     U -= U.mean(0)
     U -= np.outer(s, (s @ U) / (s @ s))
-    _, _, vt = np.linalg.svd(U, full_matrices=False)
-    pcs = U @ vt[:N_PC].T * _HANN[:, None]
+    # top principal directions from U'U (same as the SVD's, up to sign, which the
+    # power spectrum ignores); eigh is faster and doesn't hit LAPACK's rare SVD
+    # "did not converge" failure
+    _, v = np.linalg.eigh(U.T @ U)
+    pcs = U @ v[:, ::-1][:, :N_PC] * _HANN[:, None]
     return (np.abs(np.fft.rfft(pcs, axis=0)) ** 2).sum(1)
 
 

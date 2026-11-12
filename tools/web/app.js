@@ -385,6 +385,7 @@ function renderSlow() {
   renderRaw();
   if ($('#dlg-net').open) renderNet();
   if ($('#dlg-dev').open) renderDev();
+  if ($('#dlg-set').open) renderSound();
   const n = slow.network;
   $('#net').textContent = n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
 }
@@ -398,6 +399,32 @@ function renderRaw() {
     lines.push(`pokes ${st.poke}   ACK CSI ${st.ack} (${ratio}%)   tx errors ${st.tx_err}   queue drops ${st.qfull}   router replies ${st.reply ?? 0}`);
   }
   $('#raw-text').textContent = lines.join('\n') || 'waiting…';
+}
+
+// ---------------------------------------------------------------- buzzer
+// Shows what this dashboard keeps the board at (or, if nothing, what the
+// board reported); sliders aren't touched while being dragged.
+function renderSound() {
+  const board = slow && slow.sound, want = slow && slow.settings && slow.settings.sound;
+  const cur = want ? { mode: want[0], vol: want[1], hz: want[2] } : board;
+  const st = $('#snd-state');
+  if (!board) st.textContent = 'waiting for the board (firmware too old?)';
+  else if (!board.buzzer) st.textContent = 'no buzzer on this board (BUZZER_GPIO)';
+  else st.textContent = want ? 'kept by this dashboard' : "the firmware's settings";
+  for (const b of $('#snd-mode').children) b.classList.toggle('on', !!cur && b.dataset.m === cur.mode);
+  $('.snd').classList.toggle('off', !!cur && cur.mode === 'off');
+  if (!cur) return;
+  for (const [id, v] of [['#snd-vol', cur.vol], ['#snd-hz', cur.hz]])
+    if (document.activeElement !== $(id) || !$(id).dataset.drag) $(id).value = v;
+  showSoundValues();
+}
+function showSoundValues() {
+  $('#snd-vol-out').textContent = `${$('#snd-vol').value * 2}%`;
+  $('#snd-hz-out').textContent = `${$('#snd-hz').value} Hz`;
+}
+function setSound(mode) {
+  const on = $('#snd-mode .on');
+  cmd({ cmd: 'sound', mode: mode || (on ? on.dataset.m : 'beep'), vol: +$('#snd-vol').value, hz: +$('#snd-hz').value });
 }
 
 // ---------------------------------------------------------------- links (experimental)
@@ -573,7 +600,15 @@ $('#btn-cal').onclick = () => cmd({ cmd: 'cal' });
 $('#btn-net').onclick = openNet;
 $('#btn-dev').onclick = openDev;
 $('#btn-help').onclick = () => $('#dlg-help').showModal();
-$('#btn-set').onclick = () => $('#dlg-set').showModal();
+$('#btn-set').onclick = () => { $('#dlg-set').showModal(); renderSound(); };
+for (const b of $('#snd-mode').children) b.onclick = () => setSound(b.dataset.m);
+for (const id of ['#snd-vol', '#snd-hz']) {
+  const el = $(id);
+  el.oninput = () => { el.dataset.drag = '1'; showSoundValues(); };
+  el.onchange = () => { delete el.dataset.drag; setSound(); };
+}
+$('#snd-test').onclick = () => cmd({ cmd: 'sound', test: true });
+$('#snd-default').onclick = () => cmd({ cmd: 'sound', mode: 'default' });
 $('#set-per-link').onchange = (e) => cmd({ cmd: 'settings', per_link: e.target.checked });
 $('#net-scan').onclick = () => cmd({ cmd: 'scan' });
 $('#net-default').onclick = () => {
@@ -609,7 +644,7 @@ if (params.has('shot')) {
   if (params.get('link')) link = +params.get('link');
   renderFast(); renderSlow();
   const dlg = { net: '#dlg-net', dev: '#dlg-dev', help: '#dlg-help', set: '#dlg-set' }[params.get('dlg')];
-  if (dlg) { $(dlg).showModal(); renderNet(); renderDev(); }
+  if (dlg) { $(dlg).showModal(); renderNet(); renderDev(); renderSound(); }
 } else {
   window.addEventListener('load', connect);
 }

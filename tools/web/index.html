@@ -140,6 +140,17 @@
       <span><b>Per-link analysis</b> <span class="chip warn">experimental</span><br>
       <span class="muted small">Analyse every link separately (router, and each device being poked): its own activity level, breathing and Doppler, side by side. Display only: the board's motion verdict still comes from the router link. Saved for next time.</span></span>
     </label>
+    <hr>
+    <section class="snd">
+      <div class="snd-head"><b>Buzzer</b><span id="snd-state" class="muted small"></span></div>
+      <div class="seg" id="snd-mode">
+        <button type="button" data-m="off">Off</button><button type="button" data-m="beep">Beeps</button><button type="button" data-m="alarm">Alarm</button>
+      </div>
+      <label class="slider"><span>Volume</span><input type="range" id="snd-vol" min="1" max="50" step="1"><output id="snd-vol-out"></output></label>
+      <label class="slider"><span>Pitch</span><input type="range" id="snd-hz" min="500" max="6000" step="100"><output id="snd-hz-out"></output></label>
+      <div class="dlg-tools"><button type="button" id="snd-test">Test sound</button><button type="button" id="snd-default">Use the firmware's settings</button></div>
+      <p class="muted small">Beeps: a rising chime once motion has lasted 2 s (at most every 30 s), a falling one when it ends. Alarm: a siren for as long as motion lasts (always loud). Off: no automatic sounds. While this dashboard runs it keeps the board at these settings, even after a restart. The board itself doesn't save them: on its own (a power bank) it uses the firmware's settings.</p>
+    </section>
   </form>
 </dialog>
 

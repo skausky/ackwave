@@ -236,6 +236,8 @@ Wire a **passive piezo** between a free GPIO (GPIO 4 is a good choice; avoid str
 
 A piezo can't be detected electrically, so the buzzer is opt-in. If the pin can't be set up, the board prints `BUZZER,error,...` and carries on sensing.
 
+**Changing it without reflashing:** the web dashboard's settings (⚙) have a Buzzer section: off, beeps or alarm, volume, pitch and a test button. The choice is saved on the PC (`sessions/dashboard.json`) and re-applied whenever the dashboard or GUI is connected, also after the board restarts. The board doesn't store it, so on its own (a charger or power bank) it uses the settings it was built with. Typical use: buzzer off at the desk, beeping when it's out on its own.
+
 ### Bring-up: probe mode
 
 The ACK path depends on chip and driver behaviour that can only be confirmed on real hardware. Build with `CSI_PROBE=1`, capture a minute of output, and run the report:
@@ -263,6 +265,7 @@ POKING,<idx>,<mac>                               devices being poked (nodes 8..1
 DEV,<mac>,<rssi>,<frames_sent>,<frames_received>,<ms_since_heard>   devices on our network, every 5 s
 UNPOKED,<mac|all>   REFUSED,<mac>,<not-seen-on-network|is-an-ap|full>   REFUSED,bad-command
 BUZZER,<off|gpioN|error,...>
+SOUND,<off|beep|alarm>,<vol>,<hz>[,no-buzzer]   buzzer settings: at boot and after each SOUND command
 NETWORK,<default|chosen|none|saved>,<name>   the network being watched, at boot and every 5 s
 LINK,<ts>,<weak|ok>,<acks/s>,<rssi>   router link quality changed (weak = no motion beeps)
 LED,<off|gpioN|error,...>
@@ -282,6 +285,11 @@ USE,<name>      watch this network from now on (saved on the board, which restar
 USE_DEFAULT     forget that choice: back to MY_SSID from main/my_network.h
 BEEP[,<ms>[,<hz>[,<vol>]]]  test beep (1-3000 ms, default 300; pitch 100-10000 Hz; volume 1-100 %)
 GLIDE,<ms>,<hz>,<hz2>[,<vol>]  test a smooth pitch glide from hz to hz2
+SOUND           report the buzzer settings: SOUND,<off|beep|alarm>,<vol>,<hz>[,no-buzzer]
+SOUND,<off|beep|alarm>[,<vol>[,<hz>]]  change them until the next restart (vol 1-50 %, hz 500-6000);
+                off silences every automatic sound (BEEP and SOUND,test still play)
+SOUND,default   back to the build's BUZZER_VOL, BUZZER_HZ and MOTION_ALARM
+SOUND,test      play the motion chime as it is set now
 ```
 
 ## Project layout

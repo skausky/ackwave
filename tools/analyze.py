@@ -57,7 +57,7 @@ def parse_line(line):
             if len(p) != 10:
                 return None
             ts, src, kind, ch, rssi, sig, cwb, n = map(int, p[1:9])
-            raw = np.fromiter(map(int, p[9].split()), dtype=np.int16)
+            raw = np.fromiter(map(int, p[9].split()), dtype=np.int64)  # a garbled line can hold any number
             if n < 128 or raw.size != n or kind not in KIND_NAMES:
                 return None
             if raw.min() < -128 or raw.max() > 127:
@@ -116,7 +116,7 @@ def parse_line(line):
             return 'calib', dict(ts=int(p[1]), phase=p[2], why=p[3],
                                  floor=int(p[4]) / 1e6, on_short=int(p[5]) / 1e6,
                                  on_long=int(p[6]) / 1e6)
-    except (ValueError, IndexError):
+    except (ValueError, IndexError, OverflowError):
         return None
     return None
 

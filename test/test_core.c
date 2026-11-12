@@ -404,6 +404,23 @@ int main(void) {
         CHECK(parse_glide("GLIDE,0,1500,4500", &hz, &hz2, &vol) == -1 && parse_glide("GLIDE,600,1500,4500,0", &hz, &hz2, &vol) == -1);
         CHECK(parse_glide("BEEP,600,1500,4500", &hz, &hz2, &vol) == -1 && parse_beep("GLIDE,600,1500,4500", &hz, &vol) == -1);
         CHECK(parse_cmd("BEEP,150", cm) == CMD_NONE);
+        {   // SOUND: buzzer settings at run time
+            int sm, sv, sh;
+            CHECK(parse_sound("SOUND", &sm, &sv, &sh) == SOUND_QUERY && sm == -1);
+            CHECK(parse_sound("SOUND\r\n", &sm, &sv, &sh) == SOUND_QUERY);
+            CHECK(parse_sound("SOUND,off", &sm, &sv, &sh) == SOUND_SET && sm == SND_OFF && sv == -1 && sh == -1);
+            CHECK(parse_sound("SOUND,beep,15", &sm, &sv, &sh) == SOUND_SET && sm == SND_BEEP && sv == 15 && sh == -1);
+            CHECK(parse_sound("SOUND,alarm,50,3500\n", &sm, &sv, &sh) == SOUND_SET && sm == SND_ALARM && sv == 50 && sh == 3500);
+            CHECK(parse_sound("SOUND,default", &sm, &sv, &sh) == SOUND_DEFAULT);
+            CHECK(parse_sound("SOUND,test\r", &sm, &sv, &sh) == SOUND_TEST);
+            CHECK(parse_sound("SOUND,beep,0", &sm, &sv, &sh) == SOUND_BAD && parse_sound("SOUND,beep,51", &sm, &sv, &sh) == SOUND_BAD);
+            CHECK(parse_sound("SOUND,beep,15,499", &sm, &sv, &sh) == SOUND_BAD && parse_sound("SOUND,beep,15,6001", &sm, &sv, &sh) == SOUND_BAD);
+            CHECK(parse_sound("SOUND,beeps", &sm, &sv, &sh) == SOUND_BAD && parse_sound("SOUND,loud", &sm, &sv, &sh) == SOUND_BAD);
+            CHECK(parse_sound("SOUND,beep,", &sm, &sv, &sh) == SOUND_BAD && parse_sound("SOUND,beep,15,3500,1", &sm, &sv, &sh) == SOUND_BAD);
+            CHECK(parse_sound("SOUNDS", &sm, &sv, &sh) == SOUND_BAD && parse_sound("BEEP", &sm, &sv, &sh) == SOUND_BAD);
+            CHECK(parse_sound("SOUND,offx", &sm, &sv, &sh) == SOUND_BAD && parse_sound("SOUND,testy", &sm, &sv, &sh) == SOUND_BAD);
+            CHECK(parse_cmd("SOUND,off", cm) == CMD_NONE && parse_beep("SOUND,off", &hz, &vol) == -1);
+        }
         CHECK(parse_cmd(CMD("", "POKE,", BC), cm) == CMD_NONE);   // broadcast refused
         CHECK(parse_cmd(CMD("z", "POKE,", PLUG), cm) == CMD_NONE); // trailing junk
         cb_[strlen(cb_) - 4] = '\0';                              // 5 bytes only

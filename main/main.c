@@ -186,14 +186,22 @@ static QueueHandle_t tune_q;
 typedef struct { uint16_t hz, ms, hz2; } note_t;  // hz 0 = rest; hz2 set = glide hz -> hz2
 typedef struct { note_t n[4]; uint8_t vol; } tune_t;  // ends at the first ms == 0; vol % (0 = BUZZER_VOL)
 static int buzz_vol = BUZZER_VOL;            // volume of the tune playing (buzzer task only)
+// Settings the PC can change with SOUND (until the next restart)
+static volatile int snd_mode = MOTION_ALARM ? SND_ALARM : SND_BEEP;
+static volatile int snd_vol = BUZZER_VOL;    // default volume, % (1-50)
+static volatile int snd_hz = BUZZER_HZ;      // motion chime pitch
 
 // Rising = something started, falling = it ended, low = a problem.
 // Motion uses BUZZER_HZ and a minor third above it.
 static const tune_t TUNE_HELLO  = {{{BUZZER_SOFT_HZ, 70, 0}, {3000, 70, 0}, {BUZZER_HZ, 120, 0}}, 0};  // rising chirp
 static const tune_t TUNE_TICK   = {{{3000, 30, 0}}, 0};                                          // got the command
 static const tune_t TUNE_READY  = {{{BUZZER_SOFT_HZ, 50, 0}, {0, 80, 0}, {BUZZER_SOFT_HZ, 50, 0}}, 0}; // two soft blips
-static const tune_t TUNE_MOTION = {{{BUZZER_HZ, 70, 0}, {0, 40, 0}, {BUZZER_HZ * 6 / 5, 110, 0}}, 0}; // bi-ding: rising = started
-static const tune_t TUNE_STILL  = {{{BUZZER_HZ * 6 / 5, 70, 0}, {0, 40, 0}, {BUZZER_HZ, 110, 0}}, 0}; // ding-bi: falling = ended
+// Motion: bi-ding, rising = started; ding-bi, falling = ended (at snd_hz)
+static tune_t tune_motion(bool start) {
+    uint16_t lo = (uint16_t)snd_hz, hi = (uint16_t)(snd_hz * 6 / 5);
+    tune_t t = {{{start ? lo : hi, 70, 0}, {0, 40, 0}, {start ? hi : lo, 110, 0}}, 0};
+    return t;
+}
 static const tune_t TUNE_LOST   = {{{2000, 120, 0}, {1500, 120, 0}, {1000, 300, 0}}, 0};               // doo-doo-dooo
 // Alarm mode: an air-raid whoop, looped while motion lasts, always at full volume
 static const tune_t TUNE_WHOOP  = {{{800, 900, 6000}, {0, 250, 0}}, 50};
@@ -224,7 +232,7 @@ static void buzzer_task(void *arg) {
     xQueueReceive(tune_q, &t, portMAX_DELAY);
     for (;;) {
         bool cut = false;
-        buzz_vol = t.vol ? t.vol : BUZZER_VOL;
+        buzz_vol = t.vol ? t.vol : snd_vol;
         for (int i = 0; i < 4 && t.n[i].ms && !cut; i++) {
             note_t n = t.n[i];
             if (n.hz) buzzer_pitch(n.hz);
@@ -248,6 +256,21 @@ static void buzzer_task(void *arg) {
 
 static void buzzer_play(const tune_t *t) {
     if (buzzer_ok) xQueueOverwrite(tune_q, t);
+}
+
+// Automatic sounds (status, motion): silent while SOUND,off
+static void buzzer_auto(const tune_t *t) {
+    if (snd_mode != SND_OFF) buzzer_play(t);
+}
+
+static void buzzer_stop(void) {
+    tune_t quiet = {{{0, 1, 0}}, 0};
+    buzzer_play(&quiet);
+}
+
+static void print_sound(void) {
+    printf(buzzer_ok ? "SOUND,%s,%d,%d\n" : "SOUND,%s,%d,%d,no-buzzer\n",
+           SND_NAMES[snd_mode], snd_vol, snd_hz);
 }
 
 static void buzzer_init(void) {
@@ -571,16 +594,34 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
+    int snd, smode, svol, shz;
     if (glide_ms > 0) {
         tune_t t = {{{(uint16_t)hz, (uint16_t)glide_ms, (uint16_t)hz2}}, (uint8_t)vol};
         buzzer_play(&t);
-        printf("GLIDE,%d,%d,%d,%d\n", glide_ms, hz, hz2, vol ? vol : BUZZER_VOL);
+        printf("GLIDE,%d,%d,%d,%d\n", glide_ms, hz, hz2, vol ? vol : snd_vol);
     } else if (beep_ms > 0) {
         parse_beep(line, &hz, &vol);
-        tune_t t = {{{(uint16_t)(hz ? hz : BUZZER_HZ), (uint16_t)beep_ms, 0}}, (uint8_t)vol};
+        tune_t t = {{{(uint16_t)(hz ? hz : snd_hz), (uint16_t)beep_ms, 0}}, (uint8_t)vol};
         buzzer_play(&t);
         printf(buzzer_ok ? "BEEP,%d,%d,%d\n" : "BEEP,%d,%d,%d,no-buzzer\n",
-               beep_ms, hz ? hz : BUZZER_HZ, vol ? vol : BUZZER_VOL);
+               beep_ms, hz ? hz : snd_hz, vol ? vol : snd_vol);
+    } else if ((snd = parse_sound(line, &smode, &svol, &shz)) != SOUND_BAD) {
+        if (snd == SOUND_DEFAULT) {
+            snd_mode = MOTION_ALARM ? SND_ALARM : SND_BEEP;
+            snd_vol = BUZZER_VOL;
+            snd_hz = BUZZER_HZ;
+        } else if (snd == SOUND_SET) {
+            snd_mode = smode;
+            if (svol > 0) snd_vol = svol;
+            if (shz > 0) snd_hz = shz;
+        }
+        if (snd == SOUND_TEST) {
+            tune_t t = tune_motion(true);
+            buzzer_play(&t);             // even when off: asked for
+        } else if (snd != SOUND_QUERY && snd_mode == SND_OFF) {
+            buzzer_stop();               // cut whatever is playing
+        }
+        print_sound();
     } else if (cmd == CMD_SCAN) {
         // Commands wait in the USB buffer while a scan runs, so a SCAN sent
         // during one arrives just after it: that scan already answered it.
@@ -593,14 +634,14 @@ static void run_cmd(const char *line) {
         if (ssid_save(dflt ? NULL : name)) {
             printf("NETWORK,saved,%s\n", dflt ? MY_SSID : name);
             fflush(stdout);
-            buzzer_play(&TUNE_TICK);
+            buzzer_auto(&TUNE_TICK);
             vTaskDelay(pdMS_TO_TICKS(300));
             esp_restart();                 // start clean on the new network
         }
         printf("NETWORK,error,not-saved\n");
     } else if (cmd == CMD_CAL) {
         cal_request = 1;
-        buzzer_play(&TUNE_TICK);
+        buzzer_auto(&TUNE_TICK);
         printf("BUTTON,recalibrate,pc\n");
     } else if (cmd == CMD_UNPOKE_ALL) {
         for (int k = 0; k < MAX_DEVS; k++) dev_clear(&nodes, k);
@@ -722,7 +763,7 @@ static void control_task(void *arg) {
         if (btn_ok && gpio_get_level(CAL_BUTTON_GPIO) == 0) {
             if (++held == 2) {
                 cal_request = 1;
-                buzzer_play(&TUNE_TICK);
+                buzzer_auto(&TUNE_TICK);
                 printf("BUTTON,recalibrate\n");
             }
         } else {
@@ -783,8 +824,8 @@ static void control_task(void *arg) {
             printf("CHANNEL,%" PRId64 ",%d,%s\n", esp_timer_get_time(),
                    ch, ch ? "scan" : "lost");
             static bool lost;                  // sound once per loss, not every sweep
-            if (!ch && !lost) buzzer_play(&TUNE_LOST);
-            if (ch && lost) buzzer_play(&TUNE_FOUND);
+            if (!ch && !lost) buzzer_auto(&TUNE_LOST);
+            if (ch && lost) buzzer_auto(&TUNE_FOUND);
             lost = !ch;
         }
     }
@@ -860,7 +901,7 @@ static void print_task(void *arg) {
             }
         }
         bool cal = det.phase <= MD_CAL_COLLECT;  // no quiet level yet
-        if (led_cal && !cal) buzzer_play(&TUNE_READY);   // calibrated: watching now
+        if (led_cal && !cal) buzzer_auto(&TUNE_READY);   // calibrated: watching now
         led_cal = cal;
         led_motion = det.motion;
         if (md_take_cal_event(&det) || p.ts >= next_calib) {
@@ -873,25 +914,30 @@ static void print_task(void *arg) {
             printf("STATE,%" PRId64 ",%s,%d,%d\n", p.ts, change > 0 ? "motion" : "still",
                    (int)(ms * 1000), (int)(ml * 1000));
             beep_at = change > 0 ? p.ts + (int64_t)BEEP_AFTER_MS * 1000 : -1;
-            if (change < 0 && beeped) buzzer_play(&TUNE_STILL);
+            if (change < 0 && beeped && snd_mode != SND_OFF) {
+                tune_t t = tune_motion(false);
+                buzzer_play(&t);
+            }
             if (change < 0) led_ended_ms = clock_ms() | 1;
             beeped = false;
         }
         if (beep_at >= 0 && p.ts >= beep_at) {  // lasted long enough: not a brief blip
             beep_at = -1;
-            if (MOTION_ALARM && det.motion && !link_weak) {
+            if (snd_mode == SND_ALARM && det.motion && !link_weak) {
                 next_whoop = p.ts;           // sounds until motion ends
                 beeped = true;
-            } else if (det.motion && !link_weak && p.ts - last_beep >= (int64_t)BEEP_GAP_MS * 1000) {
-                buzzer_play(&TUNE_MOTION);
+            } else if (snd_mode == SND_BEEP && det.motion && !link_weak &&
+                       p.ts - last_beep >= (int64_t)BEEP_GAP_MS * 1000) {
+                tune_t t = tune_motion(true);
+                buzzer_play(&t);
                 beeped = true;
                 last_beep = p.ts;
             }
         }
         if (next_whoop >= 0) {
-            if (!det.motion || link_weak) {
-                next_whoop = -1;             // motion over (or link went bad): stop
-                if (link_weak) { tune_t quiet = {{{0, 1, 0}}, 0}; buzzer_play(&quiet); }
+            if (!det.motion || link_weak || snd_mode != SND_ALARM) {
+                next_whoop = -1;             // motion over, link went bad or mode changed: stop
+                if (det.motion) buzzer_stop();
             } else if (p.ts >= next_whoop) {
                 buzzer_play(&TUNE_WHOOP);
                 next_whoop = p.ts + WHOOP_EVERY_US;
@@ -912,6 +958,7 @@ void app_main(void) {
     gate_init(&gate);
     buzzer_init();                           // never fatal
     buzzer_play(&TUNE_HELLO);                // power-on chirp: shows the wiring works
+    print_sound();
     led_init();                              // never fatal
     led_hello();
 #if CAL_BUTTON_GPIO >= 0

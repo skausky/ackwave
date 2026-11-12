@@ -104,6 +104,14 @@ dialog::backdrop { background: rgba(0,0,0,.55); backdrop-filter: blur(2px); }
 .dlg h2 { margin: 0; font-size: 16px; }
 .dlg .now { margin: 0; font-weight: 600; }
 .dlg-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dlg hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
+.snd { display: grid; gap: 10px; }
+.snd .seg { justify-self: start; }
+.snd-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.slider { display: grid; grid-template-columns: 64px 1fr 72px; gap: 10px; align-items: center; }
+.slider input { width: 100%; accent-color: var(--accent); }
+.slider output { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+.snd.off .slider { opacity: .45; }
 .table-wrap { overflow: auto; max-height: 50vh; border: 1px solid var(--line); border-radius: 8px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { position: sticky; top: 0; background: var(--card2); text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; }

@@ -75,6 +75,7 @@ HEAD_C = '#222932'                              # table header
 POKE_C = '#5fd4d0'                              # devices being poked
 WINDOWS = (30.0, 120.0, 600.0)                  # selectable detail windows (s)
 BRIEF_S = 2.0                                   # as record.py: shorter = brief blip
+SOUND_MODES = ('off', 'beep', 'alarm')                 # the board's buzzer modes (SOUND)
 COLORS = ['#4ea8ff', '#ffb547', '#b48cff', '#5fd4d0', '#ff7eb6', '#c3e88d', '#f78c6c', '#89ddff']
 
 
@@ -91,6 +92,9 @@ class State:
         self.nets, self.nets_state = [], 'idle'          # SCAN results: [(name, ch, rssi)]
         self.net_aps = {}                                # name -> [(bssid, ch, rssi)]
         self.net_confirmed = None                        # last network the board reported watching
+        self.sound = None                                # board's buzzer: dict(mode, vol, hz, buzzer)
+        self.sound_want = None                           # PC's choice (mode, vol, hz), kept applied
+        self._sound_sent = None                          # clock() of the last SOUND we sent
         # Whole-session history on the wall clock (survives board reboots):
         # one bin per second with the highest short / long score
         self.hist_t, self.hist_s, self.hist_l = [], [], []
@@ -143,6 +147,35 @@ class State:
         elif rest.startswith('ignored'):                 # it had just scanned: try again shortly
             self.nets_state = 'idle'
 
+    def _sound_line(self, line):
+        p = line.split(',')
+        if len(p) < 4 or p[1] not in SOUND_MODES:
+            return
+        try:
+            self.sound = dict(mode=p[1], vol=int(p[2]), hz=int(p[3]), buzzer=p[4:5] != ['no-buzzer'])
+        except ValueError:
+            return
+        w = self.sound_want                              # board restarted or someone else changed it
+        if w and (self.sound['mode'], self.sound['vol'], self.sound['hz']) != w and \
+                (self._sound_sent is None or not 0 <= self.clock() - self._sound_sent <= 3):
+            self._send_sound()
+
+    def want_sound(self, mode, vol, hz):
+        """Keep the board's buzzer at this (mode, vol 1-50, hz 500-6000), or
+        None = leave it at the firmware's settings."""
+        if mode is None:
+            self.sound_want = None
+            self.outbox.append('SOUND,default')
+            return
+        if mode not in SOUND_MODES or not 1 <= vol <= 50 or not 500 <= hz <= 6000:
+            raise ValueError('bad sound setting')
+        self.sound_want = (mode, int(vol), int(hz))
+        self._send_sound()
+
+    def _send_sound(self):
+        self._sound_sent = self.clock()
+        self.outbox.append('SOUND,%s,%d,%d' % self.sound_want)
+
     def start_scan(self):
         """Ask the board for nearby networks (about 4 s; pokes pause meanwhile)."""
         if self.scanning():
@@ -190,6 +223,9 @@ class State:
             return
         if line.startswith(('NETWORK,', 'NET,', 'NETAP,', 'NETS,')):
             self._network_line(line.rstrip('\r\n'))
+            return
+        if line.startswith('SOUND,'):
+            self._sound_line(line.rstrip('\r\n'))
             return
         ev = parse_line(line)
         if ev is None:
@@ -1159,7 +1195,10 @@ def reader(lines, q, log=None):
     try:
         for line in lines:
             if log:
-                log.feed(line)                   # in this thread: never waits for drawing
+                try:
+                    log.feed(line)               # in this thread: never waits for drawing
+                except Exception as e:           # one odd line must not stop the stream
+                    print(f"log: skipped a line ({e})", file=sys.stderr)
             q.put(line)
     except Exception as e:                       # serial unplugged etc.
         q.put(f"#ERR {e}")
@@ -1203,6 +1242,15 @@ def main():
     mode, picks = Devices.load_prefs(prefs)
     state.devices = Devices(oui=Oui(), mode=mode, manual=picks)
     lines, send = open_port(a.source, a.baud)
+    if send:                                     # buzzer choice made in the web dashboard
+        try:
+            import json
+            with open(os.path.join(a.out, 'dashboard.json')) as f:
+                snd = json.load(f).get('sound')
+            if snd:
+                state.want_sound(*snd)
+        except (OSError, ValueError, TypeError):
+            pass
     q = queue.Queue()
     threading.Thread(target=reader, args=(lines, q, log), daemon=True).start()
     view = View(state, plt, os.path.basename(log.ev_path) if log else None, a.window, send)
