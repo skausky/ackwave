@@ -350,11 +350,13 @@ def set_thresholds(c, on_short=None, on_long=None):
         c['on_long'], c['off_long'] = on_long, on_long * CFG['off_long'] / CFG['on_long']
 
 
-def skip_backlog(port, wait_s=0.3):
+def skip_backlog(port, wait_s=1.0):
     """Throw away what the board queued while nobody was reading: up to 32 KB
-    of lines that can be minutes old, which would put the wall clock (set from
-    the first line) that far ahead. It arrives within a few ms of opening."""
-    time.sleep(wait_s)
+    of lines that can be minutes old (it drains in well under a second). The
+    dashboard's clock also corrects itself if some still gets through."""
+    end = time.monotonic() + wait_s
+    while time.monotonic() < end:
+        port.read(max(1, port.in_waiting))   # timeout 1 s: returns sooner with data
     port.reset_input_buffer()
     port.readline()                          # the rest of a line cut by the reset
 

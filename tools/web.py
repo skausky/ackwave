@@ -477,6 +477,12 @@ class Dashboard:
         """The board's own verdict (router link) as motion spans in [t0, t1]."""
         s = self.s
         spans, start = [], None
+        # The board reports changes only (older ones are dropped): the state
+        # before the first change kept is its opposite, or with none kept, the
+        # current verdict
+        before = (not s.board_states[0][1]) if s.board_states else bool(s.board_motion)
+        if before:
+            start = -float('inf')
         for t, m in s.board_states:
             if m and start is None:
                 start = t
@@ -676,6 +682,7 @@ def main():
     mode, picks = Devices.load_prefs(prefs)
     state.devices = Devices(oui=Oui(), mode=mode, manual=picks)
     lines, send = open_port(a.source, a.baud)
+    state.live = send is not None
     dash = Dashboard(state, send, os.path.basename(log.ev_path) if log else None, prefs,
                      os.path.join(a.out, 'dashboard.json'))
     q = queue.Queue()

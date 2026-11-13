@@ -69,6 +69,16 @@ def main():
     assert any(r['spans'] for r in sl600['links']), "per-link motion spans"
     assert all(a <= b for r in sl600['links'] for a, b in r['spans'])
     assert isinstance(sl600['board_spans'], list)
+    # motion that started before the kept history still shows (it ends in view)
+    bs = dash.s.board_states
+    saved_states, saved_motion = list(bs), dash.s.board_motion
+    bs.clear(); bs.append((dash.s.now - 5, False))
+    w1 = dash.s.wall(dash.s.now)
+    spans = dash._board_spans(dash.s.now - 30, dash.s.now)
+    assert len(spans) == 1 and abs(spans[0][0] - (w1 - 30)) < 0.05 and abs(spans[0][1] - (w1 - 5)) < 0.05, spans
+    bs.clear(); dash.s.board_motion = True       # ongoing, its start long gone
+    assert len(dash._board_spans(dash.s.now - 30, dash.s.now)) == 1
+    bs.extend(saved_states); dash.s.board_motion = saved_motion
     router = [ln for ln in dash.links.values()][0]['md'].det
     assert router.c['on_long'] == s.det.c['on_long'], "links follow the board's thresholds"
     other = [r['src'] for r in links if r['src'] != 0][0]
@@ -142,6 +152,20 @@ def main():
     assert abs(c['on_short'] - 2.8) < 1e-9 and abs(c['off_short'] - 2.0) < 1e-9
     assert dash.command({'cmd': 'sens', 'x100': 'default'})[0] and sent[-1] == 'SENS,default'
     assert json.load(open(path))['sens'] is None
+
+    # Live clock: a stale first line (from the board's USB buffer) put the
+    # mapping ahead; the first fresh line pulls it back. Files never correct.
+    st = State(60)
+    st.live, now = True, [1000.0]
+    st.clock = lambda: now[0]
+    st.feed('STATS,100000000,1,0,1,0,0,0\n')        # board time 100 s, but from 17 min ago
+    st.feed('STATS,1120000000,1,0,1,0,0,0\n')       # board time 1120 s: fresh
+    assert abs(st.wall() - now[0]) < 0.01, st.wall() - now[0]
+    st2 = State(60)
+    st2.clock = lambda: 1000.0
+    st2.feed('STATS,100000000,1,0,1,0,0,0\n')
+    st2.feed('STATS,1120000000,1,0,1,0,0,0\n')      # a file: read fast, never corrected
+    assert abs(st2.wall() - (1000.0 + 1020)) < 0.01
 
     # HTTP: pages, one-off snapshot, and the safety checks
     srv = serve(dash, '127.0.0.1', 0)

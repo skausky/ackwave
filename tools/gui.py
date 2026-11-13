@@ -135,6 +135,7 @@ class State:
         self.hist_peak = []                          # peak short score per hist_motion entry
         self.hist_scans = []                         # [wall0, wall1]: router scans ignored
         self.wall_off, self.last_wall = None, None
+        self.live = False                            # a board, not a file: arrival time ~ now
         self.last_rx = None                          # clock() of the last line received
         self.lost = None                             # error text once the source failed
         self.ended = False                           # input ran out (file / demo)
@@ -312,6 +313,11 @@ class State:
                 if self.last_wall is not None:
                     w = max(w, self.last_wall + 0.1)
                 self.wall_off = w - self.now
+            elif self.live and self.clock() - self.now < self.wall_off - 1.0:
+                # A live line can arrive late (it waited in the board's USB
+                # buffer) but never early: a line this much "earlier" than the
+                # mapping says means the mapping came from a stale line
+                self.wall_off = self.clock() - self.now
             self.last_wall = self.wall()
         if kind == 'channel':
             self.channel = (d['ch'], d['why'])
@@ -1302,6 +1308,7 @@ def main():
     mode, picks = Devices.load_prefs(prefs)
     state.devices = Devices(oui=Oui(), mode=mode, manual=picks)
     lines, send = open_port(a.source, a.baud)
+    state.live = send is not None
     if send:                                     # buzzer choice made in the web dashboard
         try:
             import json
