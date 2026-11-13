@@ -37,8 +37,8 @@ def main():
     assert len(blob) < 400_000, len(blob)
     assert f['header']['badge']['word'] in ('STILL', 'MOTION', 'CALIBRATING')
     assert f['score']['series'] and f['window'][1] > f['window'][0]
-    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None}
-    assert sent[0] == 'SOUND', "asks the board for its buzzer settings"
+    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None, 'sens': None}
+    assert sent[:2] == ['SOUND', 'SENS'], "asks the board for its buzzer and threshold settings"
     assert sl['timeline']['end'] >= sl['timeline']['start']
     f600 = dash.fast(600)
     assert all(len(se['t']) <= 702 for se in f600['score']['series']), "series thinned"
@@ -56,7 +56,7 @@ def main():
 
     # Per-link mode: off by default; once on, each ACK link gets its own analysis
     assert dash.command({'cmd': 'settings', 'per_link': True})[0]
-    assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {'per_link': True, 'sound': None}
+    assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {'per_link': True, 'sound': None, 'sens': None}
     for line in lines[half:]:
         dash.feed(line)
     sl = dash.slow(30)
@@ -87,12 +87,31 @@ def main():
     assert dash.command({'cmd': 'sound', 'test': True})[0] and sent[-1] == 'SOUND,test'
     sent2 = []
     d2 = Dashboard(State(60), send=sent2.append, settings=path)
-    assert d2.cfg['sound'] == ['off', 15, 3500] and d2.s.outbox == ['SOUND,off,15,3500'], d2.s.outbox
+    assert d2.cfg['sound'] == ['off', 15, 3500] and d2.s.outbox == ['SOUND,off,15,3500', 'SENS'], d2.s.outbox
     assert dash.command({'cmd': 'sound', 'mode': 'default'})[0] and sent[-1] == 'SOUND,default'
     assert json.load(open(path))['sound'] is None
     dash.feed('SOUND,beep,15,3500,no-buzzer\n')
     assert sent[-1] == 'SOUND,default' and dash.slow(30)['sound']['buzzer'] is False
     assert not Dashboard(State(60), settings=path).command({'cmd': 'sound', 'test': True})[0], "needs a board"
+
+    # Sensitivity: the board's long threshold, kept applied; the PC detector follows it
+    s.clock = lambda: 2e9
+    dash.feed('SENS,140\n')
+    assert dash.slow(30)['sens'] == 140 and s.det.c['on_long'] == 1.4
+    assert dash.command({'cmd': 'sens', 'x100': 160})[0] and sent[-1] == 'SENS,160'
+    assert json.load(open(path))['sens'] == 160
+    for bad in (109, 301, 'x', None, '160\nCAL'):
+        assert not dash.command({'cmd': 'sens', 'x100': bad})[0], bad
+    dash.feed('SENS,160\n')
+    assert abs(s.det.c['on_long'] - 1.6) < 1e-9 and abs(s.det.c['off_long'] - 1.6 * 1.2 / 1.4) < 1e-9
+    n = len(sent)
+    s.clock = lambda: 3e9                            # board restarted: back at its own value
+    dash.feed('SENS,140\n')
+    assert sent[n:] == ['SENS,160'], sent[n:]
+    d3 = Dashboard(State(60), send=[].append, settings=path)
+    assert d3.cfg['sens'] == 160 and 'SENS,160' in d3.s.outbox
+    assert dash.command({'cmd': 'sens', 'x100': 'default'})[0] and sent[-1] == 'SENS,default'
+    assert json.load(open(path))['sens'] is None
 
     # HTTP: pages, one-off snapshot, and the safety checks
     srv = serve(dash, '127.0.0.1', 0)

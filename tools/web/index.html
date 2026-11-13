@@ -141,6 +141,15 @@
       <span class="muted small">Analyse every link separately (router, and each device being poked): its own activity level, breathing and Doppler, side by side. Display only: the board's motion verdict still comes from the router link. Saved for next time.</span></span>
     </label>
     <hr>
+    <section class="snd" id="sens">
+      <div class="snd-head"><b>Sensitivity</b><span id="sens-state" class="muted small"></span></div>
+      <div class="seg" id="sens-level">
+        <button type="button" data-x="140">High · ×1.4</button><button type="button" data-x="160">Medium · ×1.6</button><button type="button" data-x="180">Low · ×1.8</button>
+      </div>
+      <p class="muted small">How far the slow (4 s) score must rise above the quiet level to count as motion. Lower sensitivity ignores faint, steady changes (someone asleep or breathing near the link, a curtain in a draft); clear movement is still caught by the fast (0.5 s) score. Kept on the board while this dashboard runs, like the buzzer.</p>
+      <div class="dlg-tools"><button type="button" id="sens-default">Use the firmware's</button></div>
+    </section>
+    <hr>
     <section class="snd">
       <div class="snd-head"><b>Buzzer</b><span id="snd-state" class="muted small"></span></div>
       <div class="seg" id="snd-mode">

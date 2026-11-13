@@ -404,6 +404,17 @@ int main(void) {
         CHECK(parse_glide("GLIDE,0,1500,4500", &hz, &hz2, &vol) == -1 && parse_glide("GLIDE,600,1500,4500,0", &hz, &hz2, &vol) == -1);
         CHECK(parse_glide("BEEP,600,1500,4500", &hz, &hz2, &vol) == -1 && parse_beep("GLIDE,600,1500,4500", &hz, &vol) == -1);
         CHECK(parse_cmd("BEEP,150", cm) == CMD_NONE);
+        {   // SENS: long-window threshold at run time
+            int x;
+            CHECK(parse_sens("SENS", &x) == SENS_QUERY && parse_sens("SENS\r\n", &x) == SENS_QUERY);
+            CHECK(parse_sens("SENS,default", &x) == SENS_DEFAULT);
+            CHECK(parse_sens("SENS,160", &x) == SENS_SET && x == 160);
+            CHECK(parse_sens("SENS,110\n", &x) == SENS_SET && x == 110 && parse_sens("SENS,300", &x) == SENS_SET);
+            CHECK(parse_sens("SENS,109", &x) == SENS_BAD && parse_sens("SENS,301", &x) == SENS_BAD);
+            CHECK(parse_sens("SENS,", &x) == SENS_BAD && parse_sens("SENS,1.6", &x) == SENS_BAD);
+            CHECK(parse_sens("SENS,16000", &x) == SENS_BAD && parse_sens("SENSE", &x) == SENS_BAD);
+            CHECK(parse_sens("SOUND", &x) == SENS_BAD && parse_cmd("SENS,160", cm) == CMD_NONE);
+        }
         {   // SOUND: buzzer settings at run time
             int sm, sv, sh;
             CHECK(parse_sound("SOUND", &sm, &sv, &sh) == SOUND_QUERY && sm == -1);

@@ -252,6 +252,9 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //   SOUND,<off|beep|alarm>[,<vol>[,<hz>]]  change them until the next restart
 //   SOUND,default  back to the build's buzzer settings
 //   SOUND,test     play the current mode's sound (siren in alarm mode)
+//   SENS           report the long-window threshold (parse_sens)
+//   SENS,<x100>    set it until the next restart: 110-300 = x1.1-x3.0
+//   SENS,default   back to the build's
 enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL, CMD_SCAN };
 
 static inline bool parse_mac(const char *s, uint8_t out[6]) {
@@ -386,6 +389,27 @@ static inline int parse_sound(const char *line, int *mode, int *vol, int *hz) {
     if (v[1] >= 0 && (v[1] < SOUND_HZ_MIN || v[1] > SOUND_HZ_MAX)) return SOUND_BAD;
     *mode = m; *vol = v[0]; *hz = v[1];
     return SOUND_SET;
+}
+
+// SENS, SENS,default or SENS,<on_long x 100>: returns SENS_QUERY, SENS_DEFAULT
+// or SENS_SET (with *x100 = 110-300), or SENS_BAD
+enum { SENS_BAD = -1, SENS_QUERY = 0, SENS_SET, SENS_DEFAULT };
+#define SENS_MIN 110
+#define SENS_MAX 300
+static inline int parse_sens(const char *line, int *x100) {
+    *x100 = 0;
+    if (!line || strncmp(line, "SENS", 4) != 0) return SENS_BAD;
+    const char *s = line + 4;
+#define SENS_END(c) ((c) == '\0' || (c) == '\r' || (c) == '\n')
+    if (SENS_END(*s)) return SENS_QUERY;
+    if (*s++ != ',') return SENS_BAD;
+    if (strncmp(s, "default", 7) == 0 && SENS_END(s[7])) return SENS_DEFAULT;
+    int v = 0, digits = 0;
+    while (*s >= '0' && *s <= '9' && digits < 4) { v = v * 10 + (*s++ - '0'); digits++; }
+    if (!digits || !SENS_END(*s) || v < SENS_MIN || v > SENS_MAX) return SENS_BAD;
+#undef SENS_END
+    *x100 = v;
+    return SENS_SET;
 }
 
 // True if the MAC is locally administered: phones' private / random addresses

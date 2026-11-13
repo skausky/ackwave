@@ -43,7 +43,7 @@ from collections import defaultdict, deque
 
 import numpy as np
 
-from analyze import MAX_APS, VALID, MotionDetector, open_port, open_source, parse_line
+from analyze import CFG, MAX_APS, VALID, MotionDetector, open_port, open_source, parse_line
 from breathing import Breathing, text as breathing_text
 from doppler import FREQS, LOW_HZ, Doppler
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
@@ -76,6 +76,7 @@ POKE_C = '#5fd4d0'                              # devices being poked
 WINDOWS = (30.0, 120.0, 600.0)                  # selectable detail windows (s)
 BRIEF_S = 2.0                                   # as record.py: shorter = brief blip
 SOUND_MODES = ('off', 'beep', 'alarm')                 # the board's buzzer modes (SOUND)
+SENS_RANGE = (110, 300)                                # long threshold x100 the board accepts (SENS)
 COLORS = ['#4ea8ff', '#ffb547', '#b48cff', '#5fd4d0', '#ff7eb6', '#c3e88d', '#f78c6c', '#89ddff']
 
 
@@ -95,6 +96,9 @@ class State:
         self.sound = None                                # board's buzzer: dict(mode, vol, hz, buzzer)
         self.sound_want = None                           # PC's choice (mode, vol, hz), kept applied
         self._sound_sent = None                          # clock() of the last SOUND we sent
+        self.sens = None                                 # board's long threshold x100 (SENS)
+        self.sens_want = None                            # PC's choice, kept applied
+        self._sens_sent = None
         # Whole-session history on the wall clock (survives board reboots):
         # one bin per second with the highest short / long score
         self.hist_t, self.hist_s, self.hist_l = [], [], []
@@ -176,6 +180,42 @@ class State:
         self._sound_sent = self.clock()
         self.outbox.append('SOUND,%s,%d,%d' % self.sound_want)
 
+    def _sens_line(self, line):
+        try:
+            x = int(line.split(',')[1])
+        except (IndexError, ValueError):
+            return
+        if not SENS_RANGE[0] <= x <= SENS_RANGE[1]:
+            return
+        self.sens = x
+        self._apply_sens()
+        w = self.sens_want
+        if w and x != w and (self._sens_sent is None or not 0 <= self.clock() - self._sens_sent <= 3):
+            self._send_sens()
+
+    def _apply_sens(self):
+        """The PC's detector uses the board's long threshold (same on/off ratio)."""
+        if self.sens:
+            c = self.det.c
+            c['on_long'] = self.sens / 100
+            c['off_long'] = c['on_long'] * CFG['off_long'] / CFG['on_long']
+
+    def want_sens(self, x100):
+        """Keep the board's long-window threshold at x100 (110-300), or None =
+        the firmware's own."""
+        if x100 is None:
+            self.sens_want = None
+            self.outbox.append('SENS,default')
+            return
+        if not SENS_RANGE[0] <= int(x100) <= SENS_RANGE[1]:
+            raise ValueError('bad sensitivity')
+        self.sens_want = int(x100)
+        self._send_sens()
+
+    def _send_sens(self):
+        self._sens_sent = self.clock()
+        self.outbox.append(f'SENS,{self.sens_want}')
+
     def start_scan(self):
         """Ask the board for nearby networks (about 4 s; pokes pause meanwhile)."""
         if self.scanning():
@@ -195,6 +235,8 @@ class State:
 
     def reset(self):
         self.det = MotionDetector()
+        if getattr(self, 'sens', None):
+            self._apply_sens()                     # survives a reset
         self.scores = defaultdict(deque)          # (src, kind) -> deque[(t, short / floor)]
         self.long = deque()                       # [(t, long / floor)]
         self.cal_spans = []                       # [t0, t1 or None] without a floor
@@ -226,6 +268,9 @@ class State:
             return
         if line.startswith('SOUND,'):
             self._sound_line(line.rstrip('\r\n'))
+            return
+        if line.startswith('SENS,'):
+            self._sens_line(line.rstrip('\r\n'))
             return
         ev = parse_line(line)
         if ev is None:
@@ -1246,9 +1291,11 @@ def main():
         try:
             import json
             with open(os.path.join(a.out, 'dashboard.json')) as f:
-                snd = json.load(f).get('sound')
-            if snd:
-                state.want_sound(*snd)
+                saved = json.load(f)
+            if saved.get('sound'):
+                state.want_sound(*saved['sound'])
+            if saved.get('sens'):
+                state.want_sens(saved['sens'])
         except (OSError, ValueError, TypeError):
             pass
     q = queue.Queue()

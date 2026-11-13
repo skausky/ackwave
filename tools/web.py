@@ -35,7 +35,7 @@ from breathing import Breathing
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from doppler import FREQS, LOW_HZ, Doppler
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LONG_C, MOTION_C, SCAN_C, STILL_C,
-                 SOUND_MODES, WINDOWS, State, reader, thin)
+                 SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
@@ -58,20 +58,32 @@ class Dashboard:
         self.lock = threading.Lock()
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
-        self.cfg = dict(SETTINGS, sound=None)    # sound: [mode, vol, hz] kept on the board, None = its own
+        self.cfg = dict(SETTINGS, sound=None, sens=None)   # kept on the board; None = its own
+        # sound: [mode, vol, hz]; sens: long-window threshold x100
+        got = {}
         if settings:
             try:
                 with open(settings) as f:
                     got = json.load(f)
                 self.cfg.update({k: got[k] for k in SETTINGS if k in got})
-                snd = got.get('sound')
-                if snd is not None:
-                    state.want_sound(*snd)       # re-applied whenever the board differs
-                    self.cfg['sound'] = list(state.sound_want)
-            except (OSError, ValueError, TypeError):
-                pass
+            except (OSError, ValueError, TypeError, AttributeError):
+                got = {}
+        try:                                     # re-applied whenever the board differs
+            if got.get('sound') is not None:
+                state.want_sound(*got['sound'])
+                self.cfg['sound'] = list(state.sound_want)
+        except (ValueError, TypeError):
+            pass
+        try:
+            if got.get('sens') is not None:
+                state.want_sens(got['sens'])
+                self.cfg['sens'] = state.sens_want
+        except (ValueError, TypeError):
+            pass
         if send and state.sound_want is None:
             state.outbox.append('SOUND')         # ask the board for its buzzer settings
+        if send and state.sens_want is None:
+            state.outbox.append('SENS')
         # Per-link analysis (experimental, off unless switched on): node -> analysers
         self.links = {}                          # src -> dict(br=Breathing, dop=Doppler, hist=deque)
         state.on_csi = self._on_csi
@@ -164,6 +176,22 @@ class Dashboard:
                     self.cfg['sound'] = list(self.s.sound_want)
                     self._save_settings()
                     msg = 'Buzzer off' if c['mode'] == 'off' else f"Buzzer: {c['mode']}"
+            elif what == 'sens':
+                if not self.send:
+                    return False, 'sensitivity needs a board'
+                x = c.get('x100')
+                if x == 'default':
+                    self.s.want_sens(None)
+                    self.cfg['sens'] = None
+                    msg = "Sensitivity back to the firmware's"
+                else:
+                    try:
+                        self.s.want_sens(int(x))
+                    except (TypeError, ValueError):
+                        return False, 'bad sensitivity'
+                    self.cfg['sens'] = self.s.sens_want
+                    msg = f'Long-window threshold x{self.s.sens_want / 100:.1f}'
+                self._save_settings()
             elif what == 'mode':
                 if c.get('mode') not in MODES:
                     return False, 'bad mode'
@@ -229,7 +257,7 @@ class Dashboard:
         with self.lock:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
-                       settings=self.cfg, sound=s.sound)
+                       settings=self.cfg, sound=s.sound, sens=s.sens)
             if s.wall_off is None:
                 return out
             t1 = max(s.now, win)

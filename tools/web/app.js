@@ -385,7 +385,7 @@ function renderSlow() {
   renderRaw();
   if ($('#dlg-net').open) renderNet();
   if ($('#dlg-dev').open) renderDev();
-  if ($('#dlg-set').open) renderSound();
+  if ($('#dlg-set').open) { renderSound(); renderSens(); }
   const n = slow.network;
   $('#net').textContent = n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
 }
@@ -417,6 +417,13 @@ function renderSound() {
   for (const [id, v] of [['#snd-vol', cur.vol], ['#snd-hz', cur.hz]])
     if (document.activeElement !== $(id) || !$(id).dataset.drag) $(id).value = v;
   showSoundValues();
+}
+function renderSens() {
+  const board = slow && slow.sens, want = slow && slow.settings && slow.settings.sens;
+  const cur = want || board;
+  $('#sens-state').textContent = !board ? 'waiting for the board (firmware too old?)'
+    : `×${(board / 100).toFixed(1)} on the board · ${want ? 'kept by this dashboard' : "the firmware's"}`;
+  for (const b of $('#sens-level').children) b.classList.toggle('on', +b.dataset.x === cur);
 }
 function showSoundValues() {
   $('#snd-vol-out').textContent = `${$('#snd-vol').value * 2}%`;
@@ -600,7 +607,9 @@ $('#btn-cal').onclick = () => cmd({ cmd: 'cal' });
 $('#btn-net').onclick = openNet;
 $('#btn-dev').onclick = openDev;
 $('#btn-help').onclick = () => $('#dlg-help').showModal();
-$('#btn-set').onclick = () => { $('#dlg-set').showModal(); renderSound(); };
+$('#btn-set').onclick = () => { $('#dlg-set').showModal(); renderSound(); renderSens(); };
+for (const b of $('#sens-level').children) b.onclick = () => cmd({ cmd: 'sens', x100: +b.dataset.x });
+$('#sens-default').onclick = () => cmd({ cmd: 'sens', x100: 'default' });
 for (const b of $('#snd-mode').children) b.onclick = () => setSound(b.dataset.m);
 for (const id of ['#snd-vol', '#snd-hz']) {
   const el = $(id);
@@ -644,7 +653,7 @@ if (params.has('shot')) {
   if (params.get('link')) link = +params.get('link');
   renderFast(); renderSlow();
   const dlg = { net: '#dlg-net', dev: '#dlg-dev', help: '#dlg-help', set: '#dlg-set' }[params.get('dlg')];
-  if (dlg) { $(dlg).showModal(); renderNet(); renderDev(); renderSound(); }
+  if (dlg) { $(dlg).showModal(); renderNet(); renderDev(); renderSound(); renderSens(); }
 } else {
   window.addEventListener('load', connect);
 }

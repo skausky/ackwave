@@ -193,6 +193,12 @@ static volatile int snd_mode = MOTION_ALARM ? SND_ALARM : SND_BEEP;
 static volatile int snd_vol = BUZZER_VOL;    // default volume, % (1-50)
 static volatile int snd_hz = BUZZER_HZ;      // motion chime pitch
 
+// Long-window threshold x100, changeable with SENS until the next restart
+// (print_task applies it; off_long keeps the build's on/off ratio)
+static volatile int sens_x100, sens_build_x100;
+
+static void print_sens(void) { printf("SENS,%d\n", sens_x100); }
+
 // Rising = something started, falling = it ended, low = a problem.
 // Motion uses BUZZER_HZ and a minor third above it.
 static const tune_t TUNE_HELLO  = {{{BUZZER_SOFT_HZ, 70, 0}, {3000, 70, 0}, {BUZZER_HZ, 120, 0}}, 0};  // rising chirp
@@ -604,7 +610,7 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
-    int snd, smode, svol, shz;
+    int snd, smode, svol, shz, sens, sx;
     if (glide_ms > 0) {
         tune_t t = {{{(uint16_t)hz, (uint16_t)glide_ms, (uint16_t)hz2}}, (uint8_t)vol};
         buzzer_play(&t);
@@ -632,6 +638,10 @@ static void run_cmd(const char *line) {
             buzzer_stop();               // cut whatever is playing
         }
         print_sound();
+    } else if ((sens = parse_sens(line, &sx)) != SENS_BAD) {
+        if (sens == SENS_SET) sens_x100 = sx;
+        else if (sens == SENS_DEFAULT && sens_build_x100) sens_x100 = sens_build_x100;
+        print_sens();
     } else if (cmd == CMD_SCAN) {
         // Commands wait in the USB buffer while a scan runs, so a SCAN sent
         // during one arrives just after it: that scan already answered it.
@@ -894,6 +904,9 @@ static void print_task(void *arg) {
     cfg.off_long = MD_ON_LONG * (1.2f / 1.4f);
 #endif
     md_init(&det, &cfg, esp_timer_get_time());
+    const float off_ratio = cfg.off_long / cfg.on_long;
+    int sens_cur = sens_build_x100 = sens_x100 = (int)lroundf(cfg.on_long * 100);
+    print_sens();
     uint32_t epoch = ch_epoch;
     int64_t next_calib = 0;
     int64_t beep_at = -1;                    // when to beep for the current motion, -1 = no
@@ -907,6 +920,11 @@ static void print_task(void *arg) {
     csi_pkt_t p;
     for (;;) {
         if (!xQueueReceive(q, &p, portMAX_DELAY)) continue;
+        if (sens_x100 != sens_cur) {             // SENS from the PC
+            sens_cur = sens_x100;
+            det.c.on_long = sens_cur / 100.0f;
+            det.c.off_long = det.c.on_long * off_ratio;
+        }
         if (epoch != ch_epoch) {                 // channel changed: new baselines
             epoch = ch_epoch;
             md_reset(&det, esp_timer_get_time());

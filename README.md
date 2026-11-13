@@ -269,6 +269,7 @@ DEV,<mac>,<rssi>,<frames_sent>,<frames_received>,<ms_since_heard>   devices on o
 UNPOKED,<mac|all>   REFUSED,<mac>,<not-seen-on-network|is-an-ap|full>   REFUSED,bad-command
 BUZZER,<off|gpioN|error,...>
 SOUND,<off|beep|alarm>,<vol>,<hz>[,no-buzzer]   buzzer settings: at boot and after each SOUND command
+SENS,<x100>   slow-window motion threshold: at boot and after each SENS command
 NETWORK,<default|chosen|none|saved>,<name>   the network being watched, at boot and every 5 s
 LINK,<ts>,<weak|ok>,<acks/s>,<rssi>   router link quality changed (weak = no motion beeps)
 LED,<off|gpioN|error,...>
@@ -293,6 +294,9 @@ SOUND,<off|beep|alarm>[,<vol>[,<hz>]]  change them until the next restart (vol 1
                 off silences every automatic sound (BEEP and SOUND,test still play)
 SOUND,default   back to the build's BUZZER_VOL, BUZZER_HZ and MOTION_ALARM
 SOUND,test      play the current mode's sound (the siren in alarm mode)
+SENS            report the slow (4 s) window's motion threshold: SENS,<x100> (140 = x1.4)
+SENS,<110-300>  change it until the next restart (the web dashboard's Sensitivity setting)
+SENS,default    back to the build's
 ```
 
 ## Project layout
