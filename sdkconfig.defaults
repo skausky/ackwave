@@ -1,6 +1,7 @@
 CONFIG_ESP_WIFI_CSI_ENABLED=y
-# The baud rate below is only honoured with a "custom" UART console; with the
-# default UART console IDF silently keeps 115200, which throttles all output.
-CONFIG_ESP_CONSOLE_UART_CUSTOM=y
-CONFIG_ESP_CONSOLE_UART_BAUDRATE=921600
+# All output goes over the board's own USB port (USB Serial/JTAG), through
+# the driver's buffer (main.c, usb_init). No copy to the UART: at 921600 baud
+# it capped output at ~92 KB/s, short of the router plus four devices.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_FREERTOS_HZ=1000

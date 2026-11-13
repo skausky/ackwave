@@ -13,7 +13,8 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "driver/rmt_tx.h"
-#include "hal/usb_serial_jtag_ll.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "csi_core.h"
 
 // The network to watch is chosen at run time (`./csi network`: SCAN, then
@@ -165,6 +166,7 @@ static void print_network(void) {
 }
 
 static volatile uint32_t n_poke, n_tx_err, n_ack, n_ap, n_drop, n_qfull, n_reply;
+static volatile uint32_t n_lost;                 // CSI lines not sent: USB buffer full (print_task only)
 
 static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static inline uint32_t now_us(void) { return (uint32_t)esp_timer_get_time(); }
@@ -680,14 +682,45 @@ static void run_cmd(const char *line) {
     }
 }
 
-// Commands arrive on the USB port, which this build uses for output only,
-// so read its RX FIFO directly (never blocks, works with no PC attached).
+// ---------------- USB output ----------------
+// All output goes over the USB port through the driver's 32 KB buffer, which
+// rides out a PC that stops reading for a moment (about 0.3 s of data at the
+// busiest). stdout is replaced by a line-buffered stream whose every flush is
+// queued whole or not at all (counted in n_lost): a line is never cut in half,
+// and with no PC reading, nothing waits.
+#define USB_TX_BUF 32768
+#define LINE_MAX_LEN 1024                // longest line (a CSI line is ~500 bytes)
+static bool usb_ok;
+static char usb_line_buf[LINE_MAX_LEN];
+
+static int usb_write(void *cookie, const char *buf, int n) {
+    (void)cookie;
+    if (n > 0 && usb_serial_jtag_write_bytes(buf, n, 0) != n) n_lost++;
+    return n;                            // dropped or sent: never an error, never a wait
+}
+
+static void usb_init(void) {
+    usb_serial_jtag_driver_config_t c = { .tx_buffer_size = USB_TX_BUF, .rx_buffer_size = 512 };
+    usb_ok = usb_serial_jtag_driver_install(&c) == ESP_OK;
+    if (!usb_ok) return;                 // keep the default console
+    usb_serial_jtag_vfs_use_driver();    // the old console stream too (tasks started earlier)
+    FILE *f = funopen(NULL, NULL, usb_write, NULL, NULL);
+    if (!f) return;
+    setvbuf(f, usb_line_buf, _IOLBF, sizeof usb_line_buf);
+    _REENT_STDOUT(_GLOBAL_REENT) = f;    // tasks created from now on
+    stdout = f;                          // this one
+}
+
+static void put_line(const char *line, int n) {
+    fwrite(line, 1, n, stdout);          // one line: one flush, under stdout's lock
+}
+
+// Commands from the PC (never blocks, works with no PC attached)
 static void poll_cmds(void) {
     static char buf[48];
     static int n;
     uint8_t c;
-    while (usb_serial_jtag_ll_rxfifo_data_available() &&
-           usb_serial_jtag_ll_read_rxfifo(&c, 1) == 1) {
+    while (usb_ok && usb_serial_jtag_read_bytes(&c, 1, 0) == 1) {
         if (c == '\n' || c == '\r') {
             if (n) { buf[n] = '\0'; run_cmd(buf); }
             n = 0;
@@ -804,8 +837,8 @@ static void control_task(void *arg) {
             print_devices();
             print_network();
             printf("STATS,%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
-                   ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 "\n", esp_timer_get_time(), n_poke,
-                   n_tx_err, n_ack, n_ap, n_drop, n_qfull, n_reply);
+                   ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 "\n", esp_timer_get_time(), n_poke,
+                   n_tx_err, n_ack, n_ap, n_drop, n_qfull, n_reply, n_lost);
         }
 
         int pending = csa_ch;
@@ -883,7 +916,7 @@ static void print_task(void *arg) {
             md_recalibrate(&det, p.ts, (int64_t)CAL_DELAY_S * 1000000, MD_WHY_BUTTON);
         }
         int n = format_csi_line(line, sizeof line, &p);
-        if (n > 0) fwrite(line, 1, n, stdout);
+        if (n > 0) put_line(line, n);
 
         if (p.kind == 1 && p.src < MAX_APS) { link_acks++; link_rssi_sum += p.rssi; }
         if (p.ts - link_from >= 5000000) {   // every 5 s
@@ -962,6 +995,7 @@ void app_main(void) {
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    usb_init();
     ssid_load();
 
     gate_init(&gate);

@@ -96,12 +96,13 @@ def parse_line(line):
                                    why=p[-1])
         if line.startswith('STATS,'):                    # firmware counters
             p = line.split(',')
-            if len(p) not in (8, 9):                     # 9th field: newer firmware
+            if len(p) not in (8, 9, 10):                 # 9th, 10th field: newer firmware
                 return None
             ts, poke, tx_err, ack, ap, drop, qfull = map(int, p[1:8])
             return 'stats', dict(ts=ts, poke=poke, tx_err=tx_err, ack=ack, ap=ap,
                                  drop=drop, qfull=qfull,
-                                 reply=int(p[8]) if len(p) > 8 else 0)
+                                 reply=int(p[8]) if len(p) > 8 else 0,
+                                 lost=int(p[9]) if len(p) > 9 else 0)
         if line.startswith('STATE,'):                    # firmware's own verdict
             p = line.split(',')
             if p[2] not in ('motion', 'still'):

@@ -250,6 +250,8 @@ It cross-references ACKs seen by the sniffer with CSI callbacks by radio timesta
 
 ## Serial protocol
 
+Everything goes over the board's own USB port (on a DevKit, the one labelled USB, not UART), through a 32 KB buffer. If the PC stops reading for a moment, up to about a third of a second of data waits there. Beyond that, whole lines are dropped and counted in `STATS` (`usb_lost`); a line is never cut in half. With nothing reading at all (a power bank), the board carries on as usual.
+
 ```
 ME,<board mac>
 LEARNED,<idx>,<bssid>
@@ -258,7 +260,8 @@ CSI,<ts_us>,<node>,<kind 0=AP 1=ACK>,<ch>,<rssi>,<sig_mode>,<cwb>,<len>,<b0 b1 .
 STATE,<ts_us>,<motion|still>,<short×1000>,<long×1000>     on-board verdict changes
 CALIB,<ts_us>,<wait|collect|fast|track>,<boot|button|rssi|channel>,<quiet×1e6>,<short_thr×1e6>,<long_thr×1e6>
                                                  on every calibration change and every 5 s
-STATS,<ts_us>,<pokes>,<tx_err>,<ack_csi>,<ap_csi>,<dropped>,<queue_full>,<poke_replies>   every 5 s
+STATS,<ts_us>,<pokes>,<tx_err>,<ack_csi>,<ap_csi>,<dropped>,<queue_full>,<poke_replies>,<usb_lost>   every 5 s
+                    (usb_lost: CSI lines not sent because the PC wasn't reading fast enough)
                                                  (ME, LEARNED and GATE are repeated just before it)
 GATE,<idx>,<beacon_rssi>,<yield_pct|-1>,<pokes>,<ok|weak|silent|far>   per poked AP / device, every 5 s (far = AP over 15 dB under the strongest: skipped)
 POKING,<idx>,<mac>                               devices being poked (nodes 8..11), every 5 s

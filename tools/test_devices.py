@@ -60,6 +60,8 @@ def test_parse():
     check(parse_line("UNPOKED,all") == ('unpoked', dict(mac='all')), 'UNPOKED')
     check(parse_line(f"REFUSED,{PLUG},not-seen-on-network") ==
           ('refused', dict(mac=PLUG, why='not-seen-on-network')), 'REFUSED')
+    check(parse_line("STATS,1,10,0,9,1,0,0,55,7")[1]['lost'] == 7 and
+          parse_line("STATS,1,10,0,9,1,0,0")[1]['lost'] == 0, 'STATS lost-lines field (newer firmware)')
     check(parse_line("REFUSED,bad-command") == ('refused', dict(mac='', why='bad-command')),
           'REFUSED without MAC')
     check(parse_line("DEV,short,-55,1,1,1") is None, 'bad DEV')
@@ -103,7 +105,7 @@ def test_analyzer_takes_new_lines():
     lines[100:100] = ["GATE,0,-60,97,500,ok", "GATE,8,-70,0,50,silent", f"POKING,8,{TV}",
                       f"UNPOKED,{TV}", "UNPOKED,all", f"REFUSED,{PLUG},full",
                       "REFUSED,bad-command", "BUTTON,recalibrate,pc",
-                      "STATS,1000,10,0,9,1,0,0,55", "STATS,2000,10,0,9,1,0,0"]
+                      "STATS,1000,10,0,9,1,0,0,55", "STATS,2000,10,0,9,1,0,0", "STATS,3000,10,0,9,1,0,0,55,7"]
     here = os.path.dirname(os.path.abspath(__file__))
     r = subprocess.run([sys.executable, os.path.join(here, 'analyze.py'), '-'],
                        input='\n'.join(lines) + '\n', capture_output=True, text=True)

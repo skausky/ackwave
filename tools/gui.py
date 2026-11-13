@@ -701,7 +701,7 @@ class View:
                 ratio = st['ack'] / st['poke'] if st['poke'] else 0
                 rows.append(f"pokes {st['poke']}  ACK CSI {st['ack']} ({ratio:.0%})  "
                             f"tx err {st['tx_err']}")
-                rows.append(f"queue drops {st['qfull']}  router replies {st.get('reply', 0)}"
+                rows.append(f"queue drops {st['qfull']}  USB lost {st.get('lost', 0)}  router replies {st.get('reply', 0)}"
                             f"  APs {len(s.nodes)}   d = less")
         if self.paused and self.details:
             rows[0] += '   [PAUSED]'

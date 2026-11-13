@@ -396,7 +396,7 @@ function renderRaw() {
   for (const s of d.streams) lines.push(`${s.label.padEnd(26)} ${s.rate.toFixed(0).padStart(4)}/s  ${s.rssi} dBm`);
   if (d.stats) {
     const st = d.stats, ratio = st.poke ? Math.round(100 * st.ack / st.poke) : 0;
-    lines.push(`pokes ${st.poke}   ACK CSI ${st.ack} (${ratio}%)   tx errors ${st.tx_err}   queue drops ${st.qfull}   router replies ${st.reply ?? 0}`);
+    lines.push(`pokes ${st.poke}   ACK CSI ${st.ack} (${ratio}%)   tx errors ${st.tx_err}   queue drops ${st.qfull}   lines lost on USB ${st.lost ?? 0}   router replies ${st.reply ?? 0}`);
   }
   $('#raw-text').textContent = lines.join('\n') || 'waiting…';
 }
