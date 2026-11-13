@@ -30,7 +30,7 @@ import numpy as np
 
 from collections import deque
 
-from analyze import MAX_APS, open_port
+from analyze import MAX_APS, MotionDetector, open_port
 from breathing import Breathing
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from doppler import FREQS, LOW_HZ, Doppler
@@ -43,7 +43,43 @@ STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/style.css': ('style.css', 'text/css; charset=utf-8')}
 FAST_S, SLOW_S = 0.25, 1.0                  # update periods of the two event types
 SETTINGS = {'per_link': False}              # dashboard settings (sessions/dashboard.json)
-LINK_BASE_S = 120.0                         # per-link quiet level: 10th percentile over this
+
+
+THRESHOLD_KEYS = ('on_short', 'off_short', 'on_long', 'off_long', 'short_gate')
+
+
+class LinkDetector:
+    """One link's own motion verdict (experimental, display only): the board's
+    algorithm fed just this link's ACKs, with its own quiet level, so a device
+    link is judged against its own noise, not the router's. Spans are in board
+    time (State.now) and kept for the longest window."""
+
+    def __init__(self):
+        self.det = MotionDetector()
+        self.spans = []                          # [t0, t1 or None]
+        self.last_ts = self.ch = None
+
+    def feed(self, d, t, thresholds):
+        if self.last_ts is not None and d['ts'] < self.last_ts - 1_000_000:
+            self.__init__()                      # board restarted: a new time base
+        self.last_ts = d['ts']
+        if self.ch is not None and d['ch'] != self.ch:
+            self.det.on_channel(d['ts'])         # new channel: new baselines
+        self.ch = d['ch']
+        self.det.c.update(thresholds)            # the board's (SENS can change them)
+        self.det.on_csi(dict(d, src=0))          # scored as this detector's only link
+        change = self.det.evaluate(d['ts'])
+        if change > 0:
+            self.spans.append([t, None])
+        elif change < 0 and self.spans and self.spans[-1][1] is None:
+            self.spans[-1][1] = t
+        while self.spans and self.spans[0][1] is not None and self.spans[0][1] < t - WINDOWS[-1]:
+            self.spans.pop(0)
+
+    def state(self):
+        if self.det.floor <= 0 or self.det.phase in ('wait', 'collect'):
+            return 'calibrating'
+        return 'motion' if self.det.motion else 'still'
 
 
 def r2(x):
@@ -96,8 +132,10 @@ class Dashboard:
             return
         src = d['src']
         if src not in self.links:
-            self.links[src] = dict(br=Breathing(src), dop=Doppler(WINDOWS[-1], src), hist=deque())
+            self.links[src] = dict(br=Breathing(src), dop=Doppler(WINDOWS[-1], src), hist=deque(),
+                                   md=LinkDetector())
         ln = self.links[src]
+        ln['md'].feed(d, t, {k: self.s.det.c[k] for k in THRESHOLD_KEYS})
         ln['dop'].feed(d, t)
         r = ln['br'].feed(d, t)
         if r is not None:
@@ -268,7 +306,8 @@ class Dashboard:
             out['doppler'] = self._doppler(t1 - win, t1, self._pick(link)[2])
             out['timeline'] = self._timeline()
             if self.cfg['per_link']:
-                out['links'] = self._links()
+                out['links'] = self._links(t1 - win, t1)
+                out['board_spans'] = self._board_spans(t1 - win, t1)
             return out
 
     def _header(self, br=None, dop=None):
@@ -398,39 +437,56 @@ class Dashboard:
         out['scans'] = [r2(a) for a, _b in s.hist_scans]
         return out
 
-    def _links(self):
-        """One row per ACK link: rate, signal, activity against its own quiet level
-        (10th percentile of its last 2 min), and its own breathing / Doppler."""
+    def _links(self, t0, t1):
+        """One row per ACK link: rate, signal, its own motion verdict and scores
+        against its own quiet level, when it saw motion in [t0, t1], and its
+        own breathing / Doppler."""
         s = self.s
-        f = s.det.floor
         out = []
         for key in sorted(k for k in s.scores if k[1] == 1):
-            pts = s.scores[key]
-            if not pts or f <= 0:
-                continue
-            t, v = np.array(pts).T
-            base_v = v[t >= s.now - LINK_BASE_S]
-            if len(base_v) < 20:
-                continue
-            q = max(float(np.percentile(base_v, 10)), 1e-6)
-            recent = t >= s.now - 30
-            tt, vv = thin(t[recent], v[recent] / q, 150)
-            now = v[t >= s.now - 0.5]
-            act = float(now.mean() / q) if len(now) else 0.0
             ln = self.links.get(key[0])
+            pts = s.scores[key]
+            if not ln or not pts:
+                continue
+            md = ln['md']
+            f = md.det.floor                     # its own quiet level (0 while calibrating)
+            t, v = np.array(pts).T
+            recent = t >= s.now - 30
+            q = f if f > 0 else max(float(np.percentile(v, 10)), 1e-6)
+            tt, vv = thin(t[recent], v[recent] / q, 150)
+            ms, ml = md.det.max_scores(md.last_ts) if md.last_ts is not None else (None, None)
+            short = ms / f if ms is not None and f > 0 else None
+            long_ = ml / f if ml is not None and f > 0 else None
+            state = md.state()
             row = dict(src=key[0], label=s.devices.link_label(key[0]), ap=key[0] < MAX_APS,
-                       rate=round(s.rate(key)), rssi=s.rssi.get(key, 0), activity=r2(act),
-                       moving=act > s.det.c['on_short'],
+                       rate=round(s.rate(key)), rssi=s.rssi.get(key, 0), state=state,
+                       activity=r2(short or 0.0), long=r2(long_), moving=state == 'motion',
+                       spans=[[r2(s.wall(max(a, t0))), r2(s.wall(min(b if b is not None else t1, t1)))]
+                              for a, b in md.spans if (b is None or b >= t0) and a <= t1],
                        spark=dict(t=[r2(s.wall(x)) for x in tt], v=[r2(x) for x in vv]),
                        breathing=None, doppler=None)
-            if ln:
-                b = ln['br'].last
-                row['breathing'] = None if b is None else dict(rate=r2(b['rate']), level=b['level'])
-                d = s.doppler_reading(ln['dop'])
-                row['doppler'] = None if d is None else (
-                    {} if not d else dict(f=r2(d['f']), scan=bool(d.get('scan')), step=bool(d.get('step'))))
+            b = ln['br'].last
+            row['breathing'] = None if b is None else dict(rate=r2(b['rate']), level=b['level'])
+            d = s.doppler_reading(ln['dop'])
+            row['doppler'] = None if d is None else (
+                {} if not d else dict(f=r2(d['f']), scan=bool(d.get('scan')), step=bool(d.get('step'))))
             out.append(row)
         return out
+
+    def _board_spans(self, t0, t1):
+        """The board's own verdict (router link) as motion spans in [t0, t1]."""
+        s = self.s
+        spans, start = [], None
+        for t, m in s.board_states:
+            if m and start is None:
+                start = t
+            elif not m and start is not None:
+                if t >= t0:
+                    spans.append([r2(s.wall(max(start, t0))), r2(s.wall(min(t, t1)))])
+                start = None
+        if start is not None:
+            spans.append([r2(s.wall(max(start, t0))), r2(s.wall(t1))])
+        return spans
 
     def _devices(self):
         dv = self.s.devices

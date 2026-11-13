@@ -62,6 +62,15 @@ def main():
     sl = dash.slow(30)
     links = sl['links']
     assert len(links) >= 2 and all(r['activity'] >= 0 and r['spark']['t'] for r in links), links
+    # each link has its own verdict; the demo's motion shows on some link, and
+    # the board's own verdict comes along for comparison
+    assert all(r['state'] in ('motion', 'still', 'calibrating') for r in links)
+    sl600 = dash.slow(600)
+    assert any(r['spans'] for r in sl600['links']), "per-link motion spans"
+    assert all(a <= b for r in sl600['links'] for a, b in r['spans'])
+    assert isinstance(sl600['board_spans'], list)
+    router = [ln for ln in dash.links.values()][0]['md'].det
+    assert router.c['on_long'] == s.det.c['on_long'], "links follow the board's thresholds"
     other = [r['src'] for r in links if r['src'] != 0][0]
     assert dash.fast(30, other)['breathing'] is not None and dash.slow(30, other)['doppler'] is not None
     assert dash.command({'cmd': 'settings', 'per_link': False})[0] and not dash.links

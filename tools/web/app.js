@@ -454,7 +454,7 @@ function renderLinks() {
     if (!el) {
       el = document.createElement('button');
       el.type = 'button'; el.className = 'link'; el.dataset.src = r.src;
-      el.innerHTML = '<div class="name"><span></span><small></small></div><div class="act"></div>' +
+      el.innerHTML = '<div class="name"><span></span><small></small></div><div><span class="act"></span><span class="state"></span></div>' +
         '<div class="spark"><canvas></canvas></div><div class="meta"><span class="br"></span><span class="dop"></span></div>';
       el.onclick = () => { link = link === r.src ? null : r.src; connect(); renderLinks(); };
       box.append(el);
@@ -462,9 +462,12 @@ function renderLinks() {
     el.classList.toggle('sel', link === r.src);
     el.querySelector('.name span').textContent = r.label + (r.ap ? '' : ' · device');
     el.querySelector('.name small').textContent = `${r.rate}/s ${r.rssi} dBm`;
-    const act = el.querySelector('.act');
-    act.textContent = `×${r.activity.toFixed(1)}`;
+    const act = el.querySelector('.act'), st = el.querySelector('.state');
+    act.textContent = r.state === 'calibrating' ? '—' : `×${r.activity.toFixed(1)}`;
+    act.title = r.long === null ? '' : `fast (0.5 s) ×${r.activity.toFixed(2)} · slow (4 s) ×${r.long.toFixed(2)} of its quiet level`;
     act.style.color = r.moving ? C.motion : r.activity > 1.6 ? C.brief : C.fg;
+    st.textContent = r.state === 'motion' ? 'MOTION' : r.state === 'calibrating' ? 'calibrating' : 'still';
+    st.className = 'state' + (r.state === 'motion' ? ' motion' : r.state === 'calibrating' ? ' cal' : '');
     const b = r.breathing, d = r.doppler;
     el.querySelector('.br').textContent = 'breathing ' + (!b ? '…' : b.level === 'none' ? '—' : `${b.rate.toFixed(0)}/min (${b.level})`);
     el.querySelector('.dop').textContent = 'Doppler ' + (d === null || d === undefined ? '…' : !Object.keys(d).length ? '—' : d.scan ? 'scan' : `${d.f.toFixed(1)} Hz`);
@@ -472,6 +475,50 @@ function renderLinks() {
   }
   for (const el of [...box.children]) if (!seen.has(el.dataset.src)) el.remove();
   if (!rows.length) box.textContent = 'collecting: each link needs about a minute of data';
+  drawLanes();
+}
+
+// Motion by link: one lane per link (plus the board's own verdict) over the
+// window shown above. Names sit in a left gutter, never over the lanes.
+function drawLanes() {
+  const box = $('#lanes');
+  const rows = (slow && slow.links) || [];
+  const win = fast && fast.window;
+  box.hidden = !rows.length || !win;
+  if (box.hidden) return;
+  const lanes = [{ label: 'board verdict', spans: slow.board_spans || [], board: true }]
+    .concat(rows.map((r) => ({ label: r.label + (r.ap ? '' : ' · device'), spans: r.spans, state: r.state })));
+  const cv = box.querySelector('canvas'), dpr = window.devicePixelRatio || 1;
+  const LH = 20, AX = 18, w = box.clientWidth, h = lanes.length * LH + AX;
+  const G = Math.min(170, Math.max(110, w * 0.22));            // label gutter
+  cv.style.height = `${h}px`;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const [t0, t1] = win, X = (t) => G + (t - t0) / (t1 - t0) * (w - G);
+  ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  lanes.forEach((ln, i) => {
+    const y = i * LH;
+    ctx.fillStyle = C.grid; ctx.fillRect(G, y + 3, w - G, LH - 6);
+    ctx.fillStyle = ln.state === 'calibrating' ? C.muted : C.fg;
+    let label = ln.label;
+    while (label.length > 3 && ctx.measureText(label).width > G - 10) label = label.slice(0, -2) + '…';
+    ctx.fillText(label, 0, y + LH / 2);
+    ctx.fillStyle = ln.board ? C.motion : C.brief;
+    for (const [a, b] of ln.spans) {
+      const xa = Math.max(G, X(a)), xb = Math.min(w, X(b));
+      if (xb > xa) ctx.fillRect(xa, y + 3, Math.max(2, xb - xa), LH - 6);
+    }
+  });
+  ctx.font = FONT; ctx.fillStyle = C.muted; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+  const { ticks, step } = timeTicks(t0, t1, w - G);
+  for (const t of ticks) {
+    const x = X(t), label = clock(t, step < 60), tw = ctx.measureText(label).width;
+    if (x - tw / 2 >= G && x + tw / 2 <= w) ctx.fillText(label, x, lanes.length * LH + 4);
+  }
+  ctx.textAlign = 'left';
 }
 
 function drawSpark(box, r) {
@@ -637,7 +684,7 @@ document.addEventListener('keydown', (e) => {
 let resizeTimer = null;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { renderFast(); drawTimeline(); }, 80);
+  resizeTimer = setTimeout(() => { renderFast(); drawTimeline(); drawLanes(); }, 80);
 });
 
 // ?shot: render one snapshot synchronously (headless screenshots); ?dlg=net|dev|help opens one
