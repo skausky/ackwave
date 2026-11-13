@@ -46,6 +46,7 @@ SETTINGS = {'per_link': False}              # dashboard settings (sessions/dashb
 
 
 THRESHOLD_KEYS = ('on_short', 'off_short', 'on_long', 'off_long', 'short_gate')
+SPARK_S = 30.0                              # a link's score trace in its card
 
 
 class LinkDetector:
@@ -57,6 +58,7 @@ class LinkDetector:
     def __init__(self):
         self.det = MotionDetector()
         self.spans = []                          # [t0, t1 or None]
+        self.scores = deque()                    # (t, its short score) for SPARK_S
         self.last_ts = self.ch = None
 
     def feed(self, d, t, thresholds):
@@ -67,8 +69,21 @@ class LinkDetector:
             self.det.on_channel(d['ts'])         # new channel: new baselines
         self.ch = d['ch']
         self.det.c.update(thresholds)            # the board's (SENS can change them)
-        self.det.on_csi(dict(d, src=0))          # scored as this detector's only link
-        change = self.det.evaluate(d['ts'])
+        sc = self.det.on_csi(dict(d, src=0))     # scored as this detector's only link
+        if sc is not None:
+            self.scores.append((t, sc))
+        while self.scores and self.scores[0][0] < t - SPARK_S:
+            self.scores.popleft()
+        self._verdict(d['ts'], t)
+
+    def idle(self, now_us, t):
+        """Another link's packet arrived: a link that went silent mid-motion
+        ends its motion once its data is stale, as the board's detector would."""
+        if self.det.motion and now_us - self.last_ts > self.det.c['stale_s'] * 1e6:
+            self._verdict(now_us, t)
+
+    def _verdict(self, now_us, t):
+        change = self.det.evaluate(now_us)
         if change > 0:
             self.spans.append([t, None])
         elif change < 0 and self.spans and self.spans[-1][1] is None:
@@ -123,12 +138,20 @@ class Dashboard:
         if send and state.sens_want is None:
             state.outbox.append('SENS')
         # Per-link analysis (experimental, off unless switched on): node -> analysers
-        self.links = {}                          # src -> dict(br=Breathing, dop=Doppler, hist=deque)
+        self.links = {}                          # src -> dict(br=Breathing, dop=Doppler, hist=deque, md)
+        self.csi_ts = None                       # last CSI time seen with per-link on
         state.on_csi = self._on_csi
 
     def _on_csi(self, d, t):
         """Every CSI packet (called inside State.feed, lock held)."""
-        if not self.cfg['per_link'] or d['kind'] != 1:
+        if not self.cfg['per_link']:
+            return
+        if self.csi_ts is not None and d['ts'] < self.csi_ts - 1_000_000:
+            self.links.clear()                   # board restarted: old times mean nothing now
+        self.csi_ts = d['ts']
+        for ln in self.links.values():
+            ln['md'].idle(d['ts'], t)
+        if d['kind'] != 1:
             return
         src = d['src']
         if src not in self.links:
@@ -194,6 +217,7 @@ class Dashboard:
                 self.cfg.update(changed)
                 if not self.cfg['per_link']:
                     self.links.clear()               # free the analysers
+                    self.csi_ts = None
                 self._save_settings()
                 msg = 'Per-link analysis on (experimental)' if self.cfg['per_link'] \
                     else 'Per-link analysis off'
@@ -441,18 +465,18 @@ class Dashboard:
         own breathing / Doppler."""
         s = self.s
         out = []
-        for key in sorted(k for k in s.scores if k[1] == 1):
-            ln = self.links.get(key[0])
-            pts = s.scores[key]
-            if not ln or not pts:
-                continue
+        for src in sorted(self.links):
+            key, ln = (src, 1), self.links[src]
             md = ln['md']
+            pts = [p for p in md.scores if p[0] >= s.now - SPARK_S]
+            if not pts and not s.scores.get(key):    # nothing from it in the whole window
+                continue
             f = md.det.floor                     # its own quiet level (0 while calibrating)
-            t, v = np.array(pts).T
-            recent = t >= s.now - 30
-            q = f if f > 0 else max(float(np.percentile(v, 10)), 1e-6)
-            tt, vv = thin(t[recent], v[recent] / q, 150)
-            ms, ml = md.det.max_scores(md.last_ts) if md.last_ts is not None else (None, None)
+            # its own scores (not State.scores: those are in units of the board's quiet level)
+            t, v = np.array(pts).T if pts else (np.zeros(0), np.zeros(0))
+            q = f if f > 0 else max(float(np.percentile(v, 10)), 1e-6) if pts else 1.0
+            tt, vv = thin(t, v / q, 150)
+            ms, ml = md.det.max_scores(int(s.now * 1e6))     # None once its data is stale
             short = ms / f if ms is not None and f > 0 else None
             long_ = ml / f if ml is not None and f > 0 else None
             state = md.state()

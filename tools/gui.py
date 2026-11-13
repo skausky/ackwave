@@ -375,7 +375,7 @@ class State:
                 self.long.append((t, ml / f))
             if ms is not None:
                 sec = int(w)
-                if self.hist_t and self.hist_t[-1] == sec:
+                if self.hist_t and self.hist_t[-1] >= sec:   # >: the live clock was pulled back
                     self.hist_s[-1] = max(self.hist_s[-1], ms / f)
                     self.hist_l[-1] = max(self.hist_l[-1], ml / f)
                 else:

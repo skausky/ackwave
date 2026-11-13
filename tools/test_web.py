@@ -167,6 +167,38 @@ def main():
         sd.feed(f'CSI,{gap + i * 10_000},0,1,6,-50,0,0,128,{amp}\n')
     assert sd.scan_spans, "a gap on the router link is still a scan"
 
+    # Per-link: a link's trace is in units of its own quiet level; a link that
+    # goes silent mid-motion ends its motion; a board restart drops old link data
+    sp = State(600)
+    dp = Dashboard(sp)
+    dp.cfg['per_link'] = True
+    rng = np.random.default_rng(1)
+
+    def csi(ts, src, wild=False):
+        a = 30 + rng.normal(0, 8 if wild else 0.3, 64)
+        if wild:
+            a += 10 * np.sin(ts / 1e6 * 6 + np.arange(64) / 5)
+        return f"CSI,{ts},{src},1,6,-50,0,0,128,{' '.join(f'0 {int(round(x))}' for x in a)}\n"
+    ts = 1_000_000
+    for _ in range(4000):                            # 40 s still: router and a device
+        dp.feed(csi(ts, 0)); dp.feed(csi(ts + 3000, 10))
+        ts += 10_000
+    row = [r for r in dp.slow(30)['links'] if r['src'] == 10][0]
+    assert row['state'] == 'still' and 0.3 < np.median(row['spark']['v']) < 2.8, row
+    for _ in range(800):                             # the device link sees motion...
+        dp.feed(csi(ts, 0)); dp.feed(csi(ts + 3000, 10, wild=True))
+        ts += 10_000
+    assert dp.links[10]['md'].state() == 'motion'
+    for _ in range(500):                             # ...then stops answering
+        dp.feed(csi(ts, 0))
+        ts += 10_000
+    row = [r for r in dp.slow(30)['links'] if r['src'] == 10][0]
+    assert row['state'] == 'still' and row['activity'] == 0, row
+    a, b = dp.links[10]['md'].spans[-1]
+    assert b is not None and b - a < 8 + 2.5, (a, b)
+    dp.feed(csi(1_000_000, 0))                       # board restarted
+    assert list(dp.links) == [0] and not dp.links[0]['md'].spans
+
     # Live clock: a stale first line (from the board's USB buffer) put the
     # mapping ahead; the first fresh line pulls it back. Files never correct.
     st = State(60)
