@@ -2,6 +2,7 @@
 // on stdin and prints every score, state change and calibration change, so
 // tools/test_pipeline.py can check the C and Python detectors agree.
 // Build: make build-host/score_lines
+// Thresholds can be overridden from the environment (see main).
 #include <stdlib.h>
 #include "csi_core.h"
 
@@ -10,6 +11,11 @@ int main(void) {
     static char line[8192];
     md_cfg_t cfg;
     md_cfg_default(&cfg);
+    // Try other thresholds on a recording: MD_ON_LONG=1.6 MD_OFF_LONG=1.3 ...
+    const char *e;
+    if ((e = getenv("MD_ON_LONG"))) cfg.on_long = strtof(e, NULL);
+    if ((e = getenv("MD_OFF_LONG"))) cfg.off_long = strtof(e, NULL);
+    if ((e = getenv("MD_ON_SHORT"))) cfg.on_short = strtof(e, NULL);
     md_init(&det, &cfg, 0);
     md_take_cal_event(&det);                 // the boot event is implied
     while (fgets(line, sizeof line, stdin)) {
