@@ -250,13 +250,15 @@ It cross-references ACKs seen by the sniffer with CSI callbacks by radio timesta
 
 ## Serial protocol
 
-Everything goes over the board's own USB port (on a DevKit, the one labelled USB, not UART), through a 32 KB buffer. If the PC stops reading for a moment, up to about a third of a second of data waits there. Beyond that, whole lines are dropped and counted in `STATS` (`usb_lost`); a line is never cut in half. With nothing reading at all (a power bank), the board carries on as usual.
+Everything goes over the board's own USB port (on a DevKit, the one labelled USB, not UART), through a 32 KB buffer. If the PC stops reading for a moment, up to about half a second of data waits there. Beyond that, whole lines are dropped and counted in `STATS` (`usb_lost`); a line is never cut in half. With nothing reading at all (a power bank), the board carries on as usual.
 
 ```
 ME,<board mac>
 LEARNED,<idx>,<bssid>
 CHANNEL,<ts_us>,<ch>,<csa|scan|lost>
-CSI,<ts_us>,<node>,<kind 0=AP 1=ACK>,<ch>,<rssi>,<sig_mode>,<cwb>,<len>,<b0 b1 ...>   int8 [imag, real] pairs, LLTF
+CSI,<ts_us>,<node>,<kind 0=AP 1=ACK>,<ch>,<rssi>,<sig_mode>,<cwb>,<len>,<base64>   len int8 values, [imag, real] pairs, LLTF
+                    (len 104: subcarriers 1-26 and 38-63 only; the other 12 are always zero and left out.
+                     Recordings made before this have <len> decimal numbers there instead; the tools read both)
 STATE,<ts_us>,<motion|still>,<short×1000>,<long×1000>     on-board verdict changes
 CALIB,<ts_us>,<wait|collect|fast|track>,<boot|button|rssi|channel>,<quiet×1e6>,<short_thr×1e6>,<long_thr×1e6>
                                                  on every calibration change and every 5 s

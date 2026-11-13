@@ -9,11 +9,14 @@ CALIB lines come from the same detector the board runs.
     python fake_csi.py --realtime   # paced like the real board (for gui.py)
 """
 import argparse
+import base64
 import math
 import sys
 import time
 
 import numpy as np
+
+from analyze import PACKED_AT
 
 K = np.arange(64)
 NULLS = [0] + list(range(27, 38))
@@ -54,7 +57,20 @@ def to_line(ts, src, kind, ch, h, scale, rssi):
     buf = np.empty(128, dtype=int)
     buf[0::2] = np.clip(np.round(h.imag), -128, 127)   # imag first
     buf[1::2] = np.clip(np.round(h.real), -128, 127)
-    return f"CSI,{ts},{src},{kind},{ch},{rssi},0,0,128," + " ".join(map(str, buf))
+    return csi_line(ts, src, kind, ch, rssi, buf)
+
+
+def csi_line(ts, src, kind, ch, rssi, buf, text=False):
+    """A CSI line as the firmware sends it (format_csi_line in csi_core.h), or
+    with text=True in the first format (decimal numbers), which recordings
+    made before the change hold."""
+    buf = np.asarray(buf, dtype=int)
+    if text:
+        return f"CSI,{ts},{src},{kind},{ch},{rssi},0,0,{buf.size}," + " ".join(map(str, buf))
+    if buf.size == 128 and not np.delete(buf, PACKED_AT).any():   # as lltf_pack
+        buf = buf[PACKED_AT]
+    data = base64.b64encode(buf.astype(np.int8).tobytes()).decode()
+    return f"CSI,{ts},{src},{kind},{ch},{rssi},0,0,{buf.size},{data}"
 
 
 def schedule(t_end):

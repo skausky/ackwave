@@ -4,6 +4,7 @@ Usage: python analyze.py /dev/ttyUSB0       (or COM5)
        python fake_csi.py | python analyze.py -
 """
 import argparse
+import base64
 import math
 import sys
 import time
@@ -16,6 +17,8 @@ import numpy as np
 VALID = np.r_[1:27, 38:64]
 KIND_NAMES = {0: 'ap', 1: 'ack'}
 MAX_APS = 8          # nodes 0..7 are APs, 8.. are devices we poke (csi_core.h)
+PACKED_LEN = 104     # a CSI line's LLTF without its 12 unused subcarriers (lltf_pack)
+PACKED_AT = np.repeat(VALID * 2, 2) + np.tile([0, 1], VALID.size)   # their places in the 128
 
 # Defaults shared with the firmware: md_cfg_default() in main/csi_core.h.
 # Keep them in sync (test_pipeline.py checks C and Python agree).
@@ -59,7 +62,16 @@ def parse_line(line):
             if len(p) != 10:
                 return None
             ts, src, kind, ch, rssi, sig, cwb, n = map(int, p[1:9])
-            raw = np.fromiter(map(int, p[9].split()), dtype=np.int64)  # a garbled line can hold any number
+            if ' ' in p[9]:                              # the first format: decimal numbers
+                raw = np.fromiter(map(int, p[9].split()), dtype=np.int64)  # a garbled line can hold any number
+            else:                                        # base64 (format_csi_line)
+                raw = np.frombuffer(base64.b64decode(p[9], validate=True), dtype=np.int8)
+                if raw.size != n:
+                    return None
+                if n == PACKED_LEN:
+                    full = np.zeros(128, dtype=np.int8)
+                    full[PACKED_AT] = raw
+                    raw, n = full, 128
             if n < 128 or raw.size != n or kind not in KIND_NAMES:
                 return None
             if raw.min() < -128 or raw.max() > 127:
@@ -241,7 +253,7 @@ class MotionDetector:
         s.n += 1
         s.t_last = ts
         s.score_s = s.score_l = None
-        if (not self.external and ts - s.rssi_t0 >= c['rssi_min_age_us']
+        if (not self.external and d['src'] < MAX_APS and ts - s.rssi_t0 >= c['rssi_min_age_us']
                 and abs(s.rssi_f - s.rssi_s) > c['rssi_step_db']):
             self.recalibrate(ts, 0, 'rssi')
         if s.n < c['min_pkts'] or (ts - s.t_start) * 1e-6 < c['warm_s']:

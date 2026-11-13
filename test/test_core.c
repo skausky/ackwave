@@ -122,9 +122,52 @@ int main(void) {
     p.sig_mode = 1; p.cwb = 0; p.len = 4;
     p.buf[0] = -128; p.buf[1] = 127; p.buf[2] = 0; p.buf[3] = -1;
     char line[2048];
-    const char *want = "CSI,1234567890123,1,1,6,-42,1,0,4,-128 127 0 -1\n";
+    const char *want = "CSI,1234567890123,1,1,6,-42,1,0,4,gH8A/w==\n";   // base64 of the 4 bytes
     int n = format_csi_line(line, sizeof line, &p);
     CHECK(n == (int)strlen(want) && strcmp(line, want) == 0);
+    {   // base64 both ways, every padding; bad input refused
+        uint8_t in[7] = {0, 255, 16, 131, 1, 2, 250}, back[8];
+        char b[16];
+        static const char *enc[] = {"", "AA==", "AP8=", "AP8Q", "AP8Qgw==", "AP8QgwE=", "AP8QgwEC", "AP8QgwEC+g=="};
+        for (int k = 0; k <= 7; k++) {
+            CHECK(b64_encode(in, k, b, sizeof b) == (int)strlen(enc[k]) && strcmp(b, enc[k]) == 0);
+            CHECK(b64_decode(b, back, sizeof back) == k && memcmp(back, in, (size_t)k) == 0);
+        }
+        CHECK(b64_encode(in, 7, b, 12) == -1);                    // no room for the NUL
+        CHECK(b64_decode("AP8QgwEC\n", back, sizeof back) == 6);  // up to the end of the line
+        CHECK(b64_decode("AP8QgwEC", back, 5) == -1);             // doesn't fit
+        CHECK(b64_decode("AP8Q gwEC", back, sizeof back) == -1);
+        CHECK(b64_decode("AP8", back, sizeof back) == -1 && b64_decode("A", back, sizeof back) == -1);
+        CHECK(b64_decode("AP8Q====", back, sizeof back) == -1);
+    }
+    {   // A 128-byte LLTF goes out without its 12 unused subcarriers (len 104)
+        // and reads back the same; other lengths, or a value where none
+        // belongs, go out whole. The first format (decimal text) still reads.
+        static csi_pkt_t q;
+        q.ts = 5; q.src = 9; q.kind = CSI_KIND_ACK; q.ch = 11; q.rssi = -70; q.len = 128;
+        for (int k = 0; k < 64; k++) {
+            q.buf[2 * k] = lltf_used(k) ? (int8_t)(k - 90) : 0;
+            q.buf[2 * k + 1] = lltf_used(k) ? (int8_t)(127 - k) : 0;
+        }
+        int8_t back[CSI_MAX_LEN];
+        int len = 0, off = 0;
+        int m = format_csi_line(line, sizeof line, &q);
+        CHECK(m > 0 && m < 185);
+        CHECK(sscanf(line, "CSI,5,9,1,11,-70,0,0,%d,%n", &len, &off) == 1 && len == 104);
+        CHECK(parse_csi_data(line + off, len, back) == 128 && memcmp(back, q.buf, 128) == 0);
+        q.buf[2 * 30] = 3;                                        // a guard subcarrier with a value
+        CHECK(format_csi_line(line, sizeof line, &q) > 0);
+        CHECK(sscanf(line, "CSI,5,9,1,11,-70,0,0,%d,%n", &len, &off) == 1 && len == 128);
+        CHECK(parse_csi_data(line + off, len, back) == 128 && memcmp(back, q.buf, 128) == 0);
+        q.len = 256;
+        CHECK(format_csi_line(line, sizeof line, &q) > 0);
+        CHECK(sscanf(line, "CSI,5,9,1,11,-70,0,0,%d,%n", &len, &off) == 1 && len == 256);
+        CHECK(parse_csi_data(line + off, len, back) == 256 && memcmp(back, q.buf, 256) == 0);
+        CHECK(parse_csi_data(line + off, 255, back) == -1);       // len must match the data
+        CHECK(parse_csi_data("-128 127 0 -1\n", 4, back) == 4 && back[0] == -128 && back[3] == -1);
+        CHECK(parse_csi_data("-128 127 0\n", 4, back) == -1 && parse_csi_data("1 2 300 4\n", 4, back) == -1);
+        CHECK(parse_csi_data("AAAA", CSI_MAX_LEN + 1, back) == -1);
+    }
     p.len = CSI_MAX_LEN; p.kind = 255; p.src = 255; p.ch = 255;  // worst case
     p.ts = INT64_MIN; p.rssi = -128; p.sig_mode = 255; p.cwb = 255;
     memset(p.buf, -128, sizeof p.buf);
@@ -607,6 +650,34 @@ int main(void) {
             any |= ad.motion;
         }
         CHECK(any);
+    }
+
+    {   // A device slot's signal level never recalibrates the board: the slot
+        // can be given to another device (or the device carried around), and
+        // that says nothing about the board having moved
+        static motion_det_t rd;
+        md_cfg_t rc;
+        md_cfg_default(&rc);
+        md_init(&rd, &rc, 0);
+        int8_t still[128];
+        uint32_t r = 777;
+        int64_t t = 0;
+        bool recal = false;
+        for (; t < 60000000; t += 10000) {                       // device: -70 dBm, then -50 from 30 s
+            for (int i = 0; i < 128; i++) still[i] = (int8_t)((i & 1) ? 40 + (int)((r = r * 1103515245u + 12345u) >> 30) : 0);
+            md_update(&rd, 0, 1, t, -50, still, 128);
+            md_update(&rd, MAX_APS, 1, t + 3000, t < 30000000 ? -70 : -50, still, 128);
+            md_eval(&rd, t);
+            recal |= rd.why == MD_WHY_RSSI;
+        }
+        CHECK(!recal && rd.floor > 0);
+        for (int64_t end = t + 30000000; t < end; t += 10000) {   // control: the router's level steps
+            for (int i = 0; i < 128; i++) still[i] = (int8_t)((i & 1) ? 40 + (int)((r = r * 1103515245u + 12345u) >> 30) : 0);
+            md_update(&rd, 0, 1, t, -70, still, 128);
+            md_eval(&rd, t);
+            recal |= rd.why == MD_WHY_RSSI;
+        }
+        CHECK(recal);
     }
 
     static motion_det_t md;

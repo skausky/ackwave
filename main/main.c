@@ -694,12 +694,12 @@ static void run_cmd(const char *line) {
 
 // ---------------- USB output ----------------
 // All output goes over the USB port through the driver's 32 KB buffer, which
-// rides out a PC that stops reading for a moment (about 0.3 s of data at the
+// rides out a PC that stops reading for a moment (about 0.6 s of data at the
 // busiest). stdout is replaced by a line-buffered stream whose every flush is
 // queued whole or not at all (counted in n_lost): a line is never cut in half,
 // and with no PC reading, nothing waits.
 #define USB_TX_BUF 32768
-#define LINE_MAX_LEN 1024                // longest line (a CSI line is ~500 bytes)
+#define LINE_MAX_LEN 1024                // longest line (a CSI line is ~175 bytes)
 static bool usb_ok;
 static char usb_line_buf[LINE_MAX_LEN];
 

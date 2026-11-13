@@ -15,7 +15,7 @@ import sys
 import numpy as np
 
 from analyze import MotionDetector, SETTLE_US, parse_line
-from fake_csi import generate
+from fake_csi import csi_line, generate
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 C_SCORER = os.path.join(HERE, '..', 'build-host', 'score_lines')
@@ -341,7 +341,48 @@ def test_real_captures():
     check_c_agrees('real movement', py, real['move'])
 
 
+def test_line_formats():
+    """The firmware's CSI line (base64, the LLTF's 12 unused subcarriers left
+    out) and the first format (decimal text, in older recordings) carry the
+    same data: both parsers read both, and the detectors score them alike."""
+    path = os.path.join(DATA, 'move.log.gz')
+    if not os.path.exists(path):
+        print("line formats: test/data missing, skipped")
+        return
+    with gzip.open(path, 'rt', errors='replace') as f:
+        text = f.read().splitlines()[:3000]
+    packed, sizes = [], []
+    for line in text:
+        if not line.startswith('CSI,') or parse_line(line) is None:
+            packed.append(line)
+            continue
+        p = line.split(',', 9)
+        new = csi_line(*map(int, (p[1], p[2], p[3], p[4], p[5])), list(map(int, p[9].split())))
+        assert ',104,' in new and ' ' not in new, new
+        a, b = parse_line(line)[1], parse_line(new)[1]
+        assert a.keys() == b.keys() and all(np.array_equal(a[k], b[k]) for k in a), line
+        sizes.append((len(line), len(new)))
+        packed.append(new)
+    old, new = np.mean(sizes, axis=0)
+    assert new < 185 and new < 0.55 * old, (old, new)
+    # a value on an unused subcarrier: sent whole, nothing lost
+    buf = list(range(-64, 64))
+    whole = csi_line(1, 0, 1, 6, -40, buf)
+    assert ',128,' in whole and np.array_equal(parse_line(whole)[1]['amp'],
+                                               parse_line(csi_line(1, 0, 1, 6, -40, buf, text=True))[1]['amp'])
+    for bad in ('CSI,1,0,1,6,-40,0,0,104,AAAA', 'CSI,1,0,1,6,-40,0,0,104,' + 'A' * 139 + '!',
+                'CSI,1,0,1,6,-40,0,0,128,' + 'A' * 140, 'CSI,1,0,1,6,-40,0,0,64,' + 'A' * 88):
+        assert parse_line(bad) is None, bad
+    py_t, py_p = run_python(text), run_python(packed)
+    assert py_t['scores'] == py_p['scores'] and py_t['states'] == py_p['states'] and py_t['scores']
+    c_t, c_p = run_c(text), run_c(packed)
+    if c_t is not None:
+        assert c_t == c_p and c_t['scores'], "C detector: the two line formats disagree"
+    print(f"line formats: {len(sizes)} lines, {old:.0f} -> {new:.0f} bytes each, same scores in both")
+
+
 def main():
+    test_line_formats()
     test_default()
     test_motion_while_calibrating()
     test_board_moved()

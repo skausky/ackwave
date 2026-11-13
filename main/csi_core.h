@@ -640,23 +640,123 @@ typedef struct {
     int8_t   buf[CSI_MAX_LEN];
 } csi_pkt_t;
 
-// "CSI,ts,src,kind,ch,rssi,sig_mode,cwb,len,b0 b1 ...\n"   kind: 0 = AP frame, 1 = ACK
+// Base64 (standard alphabet, '=' padding). Returns chars written (excluding
+// NUL), or -1 if it doesn't fit.
+static inline int b64_encode(const uint8_t *in, int n, char *out, size_t cap) {
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    if (n < 0 || (size_t)(n + 2) / 3 * 4 + 1 > cap) return -1;
+    int o = 0;
+    for (int i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)in[i] << 16;
+        if (i + 1 < n) v |= (uint32_t)in[i + 1] << 8;
+        if (i + 2 < n) v |= in[i + 2];
+        out[o++] = T[v >> 18];
+        out[o++] = T[(v >> 12) & 63];
+        out[o++] = i + 1 < n ? T[(v >> 6) & 63] : '=';
+        out[o++] = i + 2 < n ? T[v & 63] : '=';
+    }
+    out[o] = '\0';
+    return o;
+}
+
+static inline int b64_val(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    return c == '+' ? 62 : c == '/' ? 63 : -1;
+}
+
+// Decodes up to the end of the line. Returns the bytes written, or -1 if it
+// isn't base64 or doesn't fit.
+static inline int b64_decode(const char *in, uint8_t *out, int cap) {
+    int n = 0, bits = 0, chars = 0, pad = 0;
+    uint32_t acc = 0;
+    for (; b64_val((unsigned char)*in) >= 0; in++, chars++) {
+        acc = acc << 6 | (uint32_t)b64_val((unsigned char)*in);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (n >= cap) return -1;
+            out[n++] = (uint8_t)(acc >> bits);
+        }
+    }
+    for (; *in == '='; in++) pad++;
+    if (pad > 2 || (chars + pad) % 4 || chars % 4 == 1) return -1;
+    if (*in != '\0' && *in != '\n' && *in != '\r') return -1;
+    return n;
+}
+
+// The LLTF's subcarriers that carry signal: 1..26 and 38..63 (0 is DC, 27..37
+// are guards; the radio reports those as zeros)
+#define CSI_LLTF_LEN   128                  // 64 subcarriers x [imag, real]
+#define CSI_PACKED_LEN 104                  // the 52 used ones
+static inline bool lltf_used(int k) { return k >= 1 && k < 64 && !(k >= 27 && k <= 37); }
+
+// The used subcarriers of a 128-byte LLTF. False (nothing to gain or lossy)
+// unless len is 128 and the unused subcarriers are all zero.
+static inline bool lltf_pack(const int8_t *buf, int len, int8_t out[CSI_PACKED_LEN]) {
+    if (len != CSI_LLTF_LEN) return false;
+    int j = 0;
+    for (int k = 0; k < 64; k++) {
+        if (lltf_used(k)) { out[j++] = buf[2 * k]; out[j++] = buf[2 * k + 1]; }
+        else if (buf[2 * k] || buf[2 * k + 1]) return false;
+    }
+    return true;
+}
+
+static inline void lltf_unpack(const int8_t in[CSI_PACKED_LEN], int8_t out[CSI_LLTF_LEN]) {
+    int j = 0;
+    for (int k = 0; k < 64; k++) {
+        bool u = lltf_used(k);
+        out[2 * k] = u ? in[j++] : 0;
+        out[2 * k + 1] = u ? in[j++] : 0;
+    }
+}
+
+// "CSI,ts,src,kind,ch,rssi,sig_mode,cwb,len,<base64>\n"   kind: 0 = AP frame, 1 = ACK
+// The data is len int8 values, [imag, real] per subcarrier, in base64. len 104
+// = a 128-byte LLTF without its 12 unused subcarriers (lltf_pack); any other
+// len is the bytes as received. About 175 bytes a line; the USB port carries
+// about 70 kB/s, and the first format (decimal text, ~380 bytes, still read by
+// the PC tools) filled it at 200 lines a second.
 // Returns chars written (excluding NUL), or -1 if it doesn't fit.
 static inline int format_csi_line(char *out, size_t cap, const csi_pkt_t *p) {
-    int n = snprintf(out, cap, "CSI,%" PRId64 ",%u,%u,%u,%d,%u,%u,%u,",
+    int8_t packed[CSI_PACKED_LEN];
+    const int8_t *data = p->buf;
+    int len = p->len;
+    if (lltf_pack(p->buf, p->len, packed)) { data = packed; len = CSI_PACKED_LEN; }
+    int n = snprintf(out, cap, "CSI,%" PRId64 ",%u,%u,%u,%d,%u,%u,%d,",
                      p->ts, (unsigned)p->src, (unsigned)p->kind, (unsigned)p->ch,
-                     (int)p->rssi, (unsigned)p->sig_mode, (unsigned)p->cwb,
-                     (unsigned)p->len);
+                     (int)p->rssi, (unsigned)p->sig_mode, (unsigned)p->cwb, len);
     if (n < 0 || (size_t)n >= cap) return -1;
-    for (int i = 0; i < p->len; i++) {
-        int k = snprintf(out + n, cap - n, i ? " %d" : "%d", (int)p->buf[i]);
-        if (k < 0 || (size_t)k >= cap - n) return -1;
-        n += k;
-    }
-    if ((size_t)n + 2 > cap) return -1;
+    int k = b64_encode((const uint8_t *)data, len, out + n, cap - (size_t)n);
+    if (k < 0 || (size_t)(n + k) + 2 > cap) return -1;
+    n += k;
     out[n++] = '\n';
     out[n] = '\0';
     return n;
+}
+
+// The data field of a CSI line (after "len,"), in either format: base64, or
+// the first format's decimal numbers. Fills buf (cap CSI_MAX_LEN) and returns
+// the length in bytes, a packed LLTF already unpacked to 128; -1 if malformed.
+static inline int parse_csi_data(const char *p, int len, int8_t *buf) {
+    if (len < 0 || len > CSI_MAX_LEN) return -1;
+    if (!strchr(p, ' ')) {
+        int8_t raw[CSI_MAX_LEN];
+        if (b64_decode(p, (uint8_t *)raw, CSI_MAX_LEN) != len) return -1;
+        if (len == CSI_PACKED_LEN) { lltf_unpack(raw, buf); return CSI_LLTF_LEN; }
+        memcpy(buf, raw, (size_t)len);
+        return len;
+    }
+    for (int got = 0; got < len; got++) {
+        char *e;
+        long v = strtol(p, &e, 10);
+        if (e == p || v < -128 || v > 127) return -1;
+        buf[got] = (int8_t)v;
+        p = e;
+    }
+    return len;
 }
 
 // ---------- On-device motion detector ----------
@@ -935,8 +1035,10 @@ static inline float md_update(motion_det_t *d, int node, int kind, int64_t ts, i
     s->t_last = ts;
     s->score_s = s->score_l = -1;
 
-    // A lasting RSSI step means the board (or the AP) was moved: recalibrate
-    if (ts - s->rssi_t0 >= c->rssi_min_age_us &&
+    // A lasting RSSI step means the board (or the AP) was moved: recalibrate.
+    // AP links only: a device slot's level also steps when the slot is given
+    // to another device, or the device itself is carried around
+    if (node < MAX_APS && ts - s->rssi_t0 >= c->rssi_min_age_us &&
         fabsf(s->rssi_f - s->rssi_s) > c->rssi_step_db)
         md_recalibrate(d, ts, 0, MD_WHY_RSSI);
 

@@ -53,19 +53,11 @@ int main(void) {
             continue;
         }
         if (sscanf(line, "CSI,%lld,%d,%d,%d,%d,%d,%d,%d,%n", &ts, &src, &kind, &ch,
-                   &rssi, &sig, &cwb, &len, &off) != 8 || len < 128 || len > CSI_MAX_LEN)
+                   &rssi, &sig, &cwb, &len, &off) != 8 || off == 0)
             continue;
         int8_t buf[CSI_MAX_LEN];
-        char *p = line + off;
-        int got = 0;
-        for (; got < len; got++) {
-            char *e;
-            long v = strtol(p, &e, 10);
-            if (e == p || v < -128 || v > 127) break;
-            buf[got] = (int8_t)v;
-            p = e;
-        }
-        if (got != len) continue;
+        len = parse_csi_data(line + off, len, buf);      // either line format
+        if (len < 128) continue;
         if (kind < 0 || kind > 1) continue;  // the Python parser rejects these too
         float s = md_update(&det, src, kind, ts, rssi, buf, len);
         if (s >= 0)
