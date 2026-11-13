@@ -153,6 +153,20 @@ def main():
     assert dash.command({'cmd': 'sens', 'x100': 'default'})[0] and sent[-1] == 'SENS,default'
     assert json.load(open(path))['sens'] is None
 
+    # A device that answers now and then (long gaps) isn't the router scanning
+    import numpy as np
+    sd = State(60)
+    amp = ' '.join(['0 30'] * 64)
+    for i in range(400):                             # router: 100/s, steady
+        sd.feed(f'CSI,{1_000_000 + i * 10_000},0,1,6,-50,0,0,128,{amp}\n')
+        if i % 50 == 0:                              # device: one ACK every 0.5 s
+            sd.feed(f'CSI,{1_000_000 + i * 10_000 + 5000},10,1,6,-60,0,0,128,{amp}\n')
+    assert not sd.scan_spans, sd.scan_spans
+    gap = 4_990_000 + 400_000                        # now the router goes quiet for 0.4 s
+    for i in range(100):
+        sd.feed(f'CSI,{gap + i * 10_000},0,1,6,-50,0,0,128,{amp}\n')
+    assert sd.scan_spans, "a gap on the router link is still a scan"
+
     # Live clock: a stale first line (from the board's USB buffer) put the
     # mapping ahead; the first fresh line pulls it back. Files never correct.
     st = State(60)

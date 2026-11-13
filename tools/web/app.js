@@ -473,7 +473,7 @@ function renderLinks() {
     el.querySelector('.dop').textContent = 'Doppler ' + (d === null || d === undefined ? '…' : !Object.keys(d).length ? '—' : d.scan ? 'scan' : `${d.f.toFixed(1)} Hz`);
     drawSpark(el.querySelector('.spark'), r);
   }
-  for (const el of [...box.children]) if (!seen.has(el.dataset.src)) el.remove();
+  for (const n of [...box.childNodes]) if (!n.dataset || !seen.has(n.dataset.src)) n.remove();
   if (!rows.length) box.textContent = 'collecting: each link needs about a minute of data';
   drawLanes();
 }

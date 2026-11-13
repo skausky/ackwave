@@ -369,17 +369,15 @@ class Dashboard:
         series = []
         for key in sorted(set(s.arrivals) | set(s.scores)):
             pts = s.scores.get(key)
-            if not pts:
+            if not pts or key[0] >= MAX_APS:     # device links: see the Links card
                 continue
             t, v = np.array(pts).T
             keep = t >= t0
             if not keep.any():
                 continue
             t, v = thin(t[keep], v[keep], 700)
-            is_ap = key[0] < MAX_APS
-            series.append(dict(label=s.label(key) + ('' if is_ap else ' (extra link)'),
-                               color=COLORS[(key[0] * 2 + key[1]) % len(COLORS)],
-                               dash='solid' if is_ap and key[1] else 'dash' if is_ap else 'dot',
+            series.append(dict(label=s.label(key), color=COLORS[(key[0] * 2 + key[1]) % len(COLORS)],
+                               dash='solid' if key[1] else 'dash',
                                t=[r2(s.wall(x)) for x in t], v=[r2(x) for x in v]))
         long_ = None
         if s.long:

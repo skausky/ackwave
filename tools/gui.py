@@ -394,9 +394,11 @@ class State:
             self.hist_peak[-1] = max(self.hist_peak[-1], ms / f)
 
     def _scan(self, d, t):
-        """Track router scans the detector is filtering (ACK gaps, see md_update)."""
+        """Track router scans the detector is filtering (ACK gaps, see md_update).
+        Router links only: a device that answers now and then (a smart plug
+        asleep between ACKs) has long gaps too, but that isn't the router scanning."""
         st = self.det.streams.get((d['src'], 1))
-        if d['kind'] != 1 or st is None or d['ts'] >= st.scan_until:
+        if d['kind'] != 1 or d['src'] >= MAX_APS or st is None or d['ts'] >= st.scan_until:
             return
         end = st.scan_until / 1e6
         w = self.wall()
