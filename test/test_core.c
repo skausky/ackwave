@@ -573,6 +573,42 @@ int main(void) {
         CHECK(fabsf(fd.floor0 - 0.05f) < 1e-6f);
     }
 
+    {   // The board's verdict comes from AP links only: a device link changing
+        // wildly (someone near the TV, a PC sending POKE) never triggers it, so
+        // the board behaves the same with or without a PC attached
+        static motion_det_t ad;
+        md_cfg_t ac;
+        md_cfg_default(&ac);
+        md_init(&ad, &ac, 0);
+        int8_t still[128], wild[128];
+        for (int i = 0; i < 128; i += 2) { still[i] = 0; still[i + 1] = 40; }
+        uint32_t r = 12345;
+        int64_t t = 0;
+        for (; t < 30000000; t += 10000) {                       // 30 s: router steady, gets a floor
+            for (int i = 0; i < 128; i++) still[i] = (int8_t)((i & 1) ? 40 + (int)((r = r * 1103515245u + 12345u) >> 30) : 0);
+            md_update(&ad, 0, 1, t, -50, still, 128);
+            md_eval(&ad, t);
+        }
+        CHECK(ad.floor > 0 && !ad.motion);
+        bool any = false;
+        for (int64_t end = t + 20000000; t < end; t += 5000) {    // 20 s: the device link goes wild
+            for (int i = 0; i < 128; i++) still[i] = (int8_t)((i & 1) ? 40 + (int)((r = r * 1103515245u + 12345u) >> 30) : 0);
+            for (int i = 0; i < 128; i++) wild[i] = (int8_t)((i & 1) ? 10 + (int)((r = r * 1103515245u + 12345u) >> 26) : 0);
+            if ((t / 5000) & 1) md_update(&ad, MAX_APS, 1, t, -40, wild, 128);
+            else md_update(&ad, 0, 1, t, -50, still, 128);
+            md_eval(&ad, t);
+            any |= ad.motion;
+        }
+        CHECK(!any);
+        for (int64_t end = t + 10000000; t < end && !any; t += 10000) {   // control: the same on the router
+            for (int i = 0; i < 128; i++) wild[i] = (int8_t)((i & 1) ? 10 + (int)((r = r * 1103515245u + 12345u) >> 26) : 0);
+            md_update(&ad, 0, 1, t, -50, wild, 128);
+            md_eval(&ad, t);
+            any |= ad.motion;
+        }
+        CHECK(any);
+    }
+
     static motion_det_t md;
     md_cfg_t mc;
     md_cfg_default(&mc);
