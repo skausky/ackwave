@@ -341,6 +341,15 @@ class MotionDetector:
                 f"{int((on_s or 0) * 1e6)},{int((on_l or 0) * 1e6)}")
 
 
+def set_thresholds(c, on_short=None, on_long=None):
+    """Set a detector config's start thresholds; each end threshold keeps
+    CFG's on/off ratio, as the firmware does for MD_ON_LONG and SENS."""
+    if on_short is not None:
+        c['on_short'], c['off_short'] = on_short, on_short * CFG['off_short'] / CFG['on_short']
+    if on_long is not None:
+        c['on_long'], c['off_long'] = on_long, on_long * CFG['off_long'] / CFG['on_long']
+
+
 def skip_backlog(port, wait_s=0.3):
     """Throw away what the board queued while nobody was reading: up to 32 KB
     of lines that can be minutes old, which would put the wall clock (set from

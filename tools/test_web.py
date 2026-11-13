@@ -93,6 +93,10 @@ def main():
     dash.feed('SOUND,beep,15,3500,no-buzzer\n')
     assert sent[-1] == 'SOUND,default' and dash.slow(30)['sound']['buzzer'] is False
     assert not Dashboard(State(60), settings=path).command({'cmd': 'sound', 'test': True})[0], "needs a board"
+    for damaged in ('[]', '"x"', '{', '{"sound": [1, 2], "sens": "high"}'):
+        open(path, 'w').write(damaged)
+        d4 = Dashboard(State(60), send=[].append, settings=path)   # starts with defaults
+        assert d4.cfg['sound'] is None and d4.cfg['sens'] is None, damaged
 
     # Sensitivity: the board's long threshold, kept applied; the PC detector follows it
     s.clock = lambda: 2e9
@@ -100,7 +104,7 @@ def main():
     assert dash.slow(30)['sens'] == 140 and s.det.c['on_long'] == 1.4
     assert dash.command({'cmd': 'sens', 'x100': 160})[0] and sent[-1] == 'SENS,160'
     assert json.load(open(path))['sens'] == 160
-    for bad in (109, 301, 'x', None, '160\nCAL'):
+    for bad in (109, 301, 'x', None, '160\nCAL', 160.9, True, '160'):
         assert not dash.command({'cmd': 'sens', 'x100': bad})[0], bad
     dash.feed('SENS,160\n')
     assert abs(s.det.c['on_long'] - 1.6) < 1e-9 and abs(s.det.c['off_long'] - 1.6 * 1.2 / 1.4) < 1e-9
@@ -110,6 +114,23 @@ def main():
     assert sent[n:] == ['SENS,160'], sent[n:]
     d3 = Dashboard(State(60), send=[].append, settings=path)
     assert d3.cfg['sens'] == 160 and 'SENS,160' in d3.s.outbox
+    # A mismatch inside the 3 s window (the board restarted just after a send)
+    # is fixed by the board's next report, 5 s later
+    now = [4e9]
+    s.clock = lambda: now[0]
+    assert dash.command({'cmd': 'sens', 'x100': 160})[0] and sent[-1] == 'SENS,160'
+    n = len(sent)
+    now[0] += 1
+    dash.feed('SENS,140\n')                         # boot report, inside the window
+    assert len(sent) == n
+    now[0] += 5
+    dash.feed('SENS,140\n')                         # periodic report
+    assert sent[n:] == ['SENS,160'], sent[n:]
+    # CALIB carries the board's thresholds; the end thresholds keep the ratio
+    dash.feed('CALIB,1,track,boot,50000,140000,90000\n')
+    c = s.det.c
+    assert abs(c['on_long'] - 1.8) < 1e-9 and abs(c['off_long'] - 1.8 * 1.2 / 1.4) < 1e-9
+    assert abs(c['on_short'] - 2.8) < 1e-9 and abs(c['off_short'] - 2.0) < 1e-9
     assert dash.command({'cmd': 'sens', 'x100': 'default'})[0] and sent[-1] == 'SENS,default'
     assert json.load(open(path))['sens'] is None
 

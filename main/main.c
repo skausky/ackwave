@@ -846,6 +846,8 @@ static void control_task(void *arg) {
 #endif
             print_devices();
             print_network();
+            print_sound();                   // so the PC sees a change it missed (e.g. a restart)
+            if (sens_x100) print_sens();
             printf("STATS,%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
                    ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 "\n", esp_timer_get_time(), n_poke,
                    n_tx_err, n_ack, n_ap, n_drop, n_qfull, n_reply, n_lost);

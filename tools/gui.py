@@ -43,7 +43,8 @@ from collections import defaultdict, deque
 
 import numpy as np
 
-from analyze import CFG, MAX_APS, VALID, MotionDetector, open_port, open_source, parse_line
+from analyze import (MAX_APS, VALID, MotionDetector, open_port, open_source, parse_line,
+                     set_thresholds)
 from breathing import Breathing, text as breathing_text
 from doppler import FREQS, LOW_HZ, Doppler
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
@@ -80,6 +81,35 @@ SENS_RANGE = (110, 300)                                # long threshold x100 the
 COLORS = ['#4ea8ff', '#ffb547', '#b48cff', '#5fd4d0', '#ff7eb6', '#c3e88d', '#f78c6c', '#89ddff']
 
 
+class Kept:
+    """A board setting the PC keeps at its own choice: re-sent whenever the
+    board reports something else (it reports every 5 s, and from scratch after
+    a restart), but not more than once per 3 s while it catches up."""
+
+    def __init__(self, state, fmt, default_cmd):
+        self.state, self.fmt, self.default_cmd = state, fmt, default_cmd
+        self.want = None                                 # None = the board's own value
+        self.sent = None                                 # state.clock() of the last send
+
+    def set(self, value):
+        self.want = value
+        if value is None:
+            self.state.outbox.append(self.default_cmd)
+        else:
+            self._send()
+
+    def seen(self, value):
+        """The board reported value."""
+        now = self.state.clock()
+        if self.want is not None and value != self.want and \
+                (self.sent is None or not 0 <= now - self.sent <= 3):
+            self._send()
+
+    def _send(self):
+        self.sent = self.state.clock()
+        self.state.outbox.append(self.fmt(self.want))
+
+
 class State:
     """Everything the plots need; fed one parsed event at a time."""
 
@@ -93,12 +123,11 @@ class State:
         self.nets, self.nets_state = [], 'idle'          # SCAN results: [(name, ch, rssi)]
         self.net_aps = {}                                # name -> [(bssid, ch, rssi)]
         self.net_confirmed = None                        # last network the board reported watching
+        # Board settings the PC keeps applied (the board reports them every 5 s)
         self.sound = None                                # board's buzzer: dict(mode, vol, hz, buzzer)
-        self.sound_want = None                           # PC's choice (mode, vol, hz), kept applied
-        self._sound_sent = None                          # clock() of the last SOUND we sent
+        self.kept_sound = Kept(self, lambda w: 'SOUND,%s,%d,%d' % w, 'SOUND,default')
         self.sens = None                                 # board's long threshold x100 (SENS)
-        self.sens_want = None                            # PC's choice, kept applied
-        self._sens_sent = None
+        self.kept_sens = Kept(self, lambda w: f'SENS,{w}', 'SENS,default')
         # Whole-session history on the wall clock (survives board reboots):
         # one bin per second with the highest short / long score
         self.hist_t, self.hist_s, self.hist_l = [], [], []
@@ -159,26 +188,19 @@ class State:
             self.sound = dict(mode=p[1], vol=int(p[2]), hz=int(p[3]), buzzer=p[4:5] != ['no-buzzer'])
         except ValueError:
             return
-        w = self.sound_want                              # board restarted or someone else changed it
-        if w and (self.sound['mode'], self.sound['vol'], self.sound['hz']) != w and \
-                (self._sound_sent is None or not 0 <= self.clock() - self._sound_sent <= 3):
-            self._send_sound()
+        self.kept_sound.seen((self.sound['mode'], self.sound['vol'], self.sound['hz']))
 
-    def want_sound(self, mode, vol, hz):
+    def want_sound(self, mode, vol=0, hz=0):
         """Keep the board's buzzer at this (mode, vol 1-50, hz 500-6000), or
-        None = leave it at the firmware's settings."""
-        if mode is None:
-            self.sound_want = None
-            self.outbox.append('SOUND,default')
-            return
-        if mode not in SOUND_MODES or not 1 <= vol <= 50 or not 500 <= hz <= 6000:
+        mode None = leave it at the firmware's settings."""
+        if mode is not None and (mode not in SOUND_MODES or not 1 <= vol <= 50
+                                 or not 500 <= hz <= 6000):
             raise ValueError('bad sound setting')
-        self.sound_want = (mode, int(vol), int(hz))
-        self._send_sound()
+        self.kept_sound.set(None if mode is None else (mode, int(vol), int(hz)))
 
-    def _send_sound(self):
-        self._sound_sent = self.clock()
-        self.outbox.append('SOUND,%s,%d,%d' % self.sound_want)
+    @property
+    def sound_want(self):
+        return self.kept_sound.want
 
     def _sens_line(self, line):
         try:
@@ -189,32 +211,25 @@ class State:
             return
         self.sens = x
         self._apply_sens()
-        w = self.sens_want
-        if w and x != w and (self._sens_sent is None or not 0 <= self.clock() - self._sens_sent <= 3):
-            self._send_sens()
+        self.kept_sens.seen(x)
 
     def _apply_sens(self):
-        """The PC's detector uses the board's long threshold (same on/off ratio)."""
+        """The PC's detector uses the board's long threshold (CALIB carries it
+        too, every 5 s; this applies a change at once)."""
         if self.sens:
-            c = self.det.c
-            c['on_long'] = self.sens / 100
-            c['off_long'] = c['on_long'] * CFG['off_long'] / CFG['on_long']
+            set_thresholds(self.det.c, on_long=self.sens / 100)
 
     def want_sens(self, x100):
         """Keep the board's long-window threshold at x100 (110-300), or None =
         the firmware's own."""
-        if x100 is None:
-            self.sens_want = None
-            self.outbox.append('SENS,default')
-            return
-        if not SENS_RANGE[0] <= int(x100) <= SENS_RANGE[1]:
+        if x100 is not None and (isinstance(x100, bool) or not isinstance(x100, int)
+                                 or not SENS_RANGE[0] <= x100 <= SENS_RANGE[1]):
             raise ValueError('bad sensitivity')
-        self.sens_want = int(x100)
-        self._send_sens()
+        self.kept_sens.set(x100)
 
-    def _send_sens(self):
-        self._sens_sent = self.clock()
-        self.outbox.append(f'SENS,{self.sens_want}')
+    @property
+    def sens_want(self):
+        return self.kept_sens.want
 
     def start_scan(self):
         """Ask the board for nearby networks (about 4 s; pokes pause meanwhile)."""
@@ -305,8 +320,8 @@ class State:
         elif kind == 'calib':                     # the board's quiet level wins
             self.board_calib = d
             c = self.det.c
-            if d['floor'] > 0:
-                c['on_short'], c['on_long'] = d['on_short'] / d['floor'], d['on_long'] / d['floor']
+            if d['floor'] > 0:                   # the board's thresholds (SENS may change on_long)
+                set_thresholds(c, on_short=d['on_short'] / d['floor'], on_long=d['on_long'] / d['floor'])
             self.det.set_external(d['floor'], d['phase'], d['why'])
         elif kind == 'stats':
             self.stats = d
@@ -1292,6 +1307,8 @@ def main():
             import json
             with open(os.path.join(a.out, 'dashboard.json')) as f:
                 saved = json.load(f)
+            if not isinstance(saved, dict):
+                saved = {}
             if saved.get('sound'):
                 state.want_sound(*saved['sound'])
             if saved.get('sens'):

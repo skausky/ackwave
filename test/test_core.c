@@ -569,7 +569,7 @@ int main(void) {
         for (; t < 90000000; t += 100000) md_floor_step(&fd, t, 0.012f);    // quieter than at first
         CHECK(fd.floor < 0.02f);                                            // falls freely
         md_recalibrate(&fd, t, 0, MD_WHY_BUTTON);                           // a new first floor
-        for (int64_t e = t + 10000000; t < e; t += 100000) md_floor_step(&fd, t, 0.05f);
+        for (int64_t stop = t + 10000000; t < stop; t += 100000) md_floor_step(&fd, t, 0.05f);
         CHECK(fabsf(fd.floor0 - 0.05f) < 1e-6f);
     }
 

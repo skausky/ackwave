@@ -6,16 +6,43 @@
 #include <stdlib.h>
 #include "csi_core.h"
 
+// A threshold from the environment: false if unset; exits on a bad value
+static bool env_threshold(const char *name, float *out) {
+    const char *s = getenv(name);
+    if (!s) return false;
+    char *end;
+    float v = strtof(s, &end);
+    if (end == s || *end != '\0' || !(v > 0.0f && v < 100.0f)) {
+        fprintf(stderr, "score_lines: bad %s=\"%s\" (want a number like 1.6)\n", name, s);
+        exit(2);
+    }
+    *out = v;
+    return true;
+}
+
 int main(void) {
     static motion_det_t det;
     static char line[8192];
     md_cfg_t cfg;
     md_cfg_default(&cfg);
-    // Try other thresholds on a recording: MD_ON_LONG=1.6 MD_OFF_LONG=1.3 ...
-    const char *e;
-    if ((e = getenv("MD_ON_LONG"))) cfg.on_long = strtof(e, NULL);
-    if ((e = getenv("MD_OFF_LONG"))) cfg.off_long = strtof(e, NULL);
-    if ((e = getenv("MD_ON_SHORT"))) cfg.on_short = strtof(e, NULL);
+    // Try other thresholds on a recording: MD_ON_LONG=1.6 MD_ON_SHORT=3.0.
+    // Each end threshold keeps the default on/off ratio, as the firmware does
+    // for SENS and MD_ON_LONG, unless MD_OFF_LONG / MD_OFF_SHORT is given.
+    float v;
+    if (env_threshold("MD_ON_LONG", &v)) {
+        cfg.off_long *= v / cfg.on_long;
+        cfg.on_long = v;
+    }
+    if (env_threshold("MD_ON_SHORT", &v)) {
+        cfg.off_short *= v / cfg.on_short;
+        cfg.on_short = v;
+    }
+    if (env_threshold("MD_OFF_LONG", &v)) cfg.off_long = v;
+    if (env_threshold("MD_OFF_SHORT", &v)) cfg.off_short = v;
+    if (cfg.off_long >= cfg.on_long || cfg.off_short >= cfg.on_short) {
+        fprintf(stderr, "score_lines: an end threshold must be below its start threshold\n");
+        return 2;
+    }
     md_init(&det, &cfg, 0);
     md_take_cal_event(&det);                 // the boot event is implied
     while (fgets(line, sizeof line, stdin)) {

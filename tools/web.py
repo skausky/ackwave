@@ -65,8 +65,10 @@ class Dashboard:
             try:
                 with open(settings) as f:
                     got = json.load(f)
+                if not isinstance(got, dict):    # damaged: same as missing
+                    got = {}
                 self.cfg.update({k: got[k] for k in SETTINGS if k in got})
-            except (OSError, ValueError, TypeError, AttributeError):
+            except (OSError, ValueError):
                 got = {}
         try:                                     # re-applied whenever the board differs
             if got.get('sound') is not None:
@@ -164,7 +166,7 @@ class Dashboard:
                     self.s.outbox.append('SOUND,test')
                     msg = 'Playing the motion sound'
                 elif c.get('mode') == 'default':
-                    self.s.want_sound(None, 0, 0)
+                    self.s.want_sound(None)
                     self.cfg['sound'] = None
                     self._save_settings()
                     msg = "Buzzer back to the firmware's settings"
@@ -185,9 +187,11 @@ class Dashboard:
                     self.cfg['sens'] = None
                     msg = "Sensitivity back to the firmware's"
                 else:
+                    if x is None:                # only 'default' resets it
+                        return False, 'bad sensitivity'
                     try:
-                        self.s.want_sens(int(x))
-                    except (TypeError, ValueError):
+                        self.s.want_sens(x)      # a whole number, 110-300
+                    except ValueError:
                         return False, 'bad sensitivity'
                     self.cfg['sens'] = self.s.sens_want
                     msg = f'Long-window threshold x{self.s.sens_want / 100:.1f}'
