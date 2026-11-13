@@ -6,6 +6,7 @@ Usage: python analyze.py /dev/ttyUSB0       (or COM5)
 import argparse
 import math
 import sys
+import time
 from collections import defaultdict
 
 import numpy as np
@@ -334,6 +335,15 @@ class MotionDetector:
                 f"{int((on_s or 0) * 1e6)},{int((on_l or 0) * 1e6)}")
 
 
+def skip_backlog(port, wait_s=0.3):
+    """Throw away what the board queued while nobody was reading: up to 32 KB
+    of lines that can be minutes old, which would put the wall clock (set from
+    the first line) that far ahead. It arrives within a few ms of opening."""
+    time.sleep(wait_s)
+    port.reset_input_buffer()
+    port.readline()                          # the rest of a line cut by the reset
+
+
 def open_port(src, baud):
     """(lines, send): an iterator of text lines, and send(text) to write a
     command to the board (None for stdin / a file)."""
@@ -341,6 +351,7 @@ def open_port(src, baud):
         return sys.stdin, None
     import serial                            # pip install pyserial
     port = serial.Serial(src, baud, timeout=1)
+    skip_backlog(port)
     lines = (b.decode('utf-8', 'ignore') for b in iter(port.readline, None))
     return lines, lambda text: port.write(text.encode('ascii') + b'\n')
 

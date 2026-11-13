@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 
-from analyze import parse_line
+from analyze import parse_line, skip_backlog
 
 BRIEF_S = 2.0       # motion shorter than this is listed apart: often noise or a twitch
 
@@ -226,6 +226,7 @@ def main():
             if ser is None:
                 try:
                     ser = serial.Serial(port, a.baud, timeout=1)
+                    skip_backlog(ser)
                     if warned:
                         log.say("Board reconnected")
                     warned = False
