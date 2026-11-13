@@ -51,8 +51,10 @@ main { padding: var(--gap) 20px; display: grid; gap: var(--gap); max-width: 1500
 .tile .value { font-size: 26px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .tile .detail { font-size: 12.5px; }
 .recent ol { list-style: none; margin: 0; padding: 0; font: 12.5px/1.75 var(--mono); }
-.recent li { display: grid; grid-template-columns: 74px 1fr auto; gap: 10px; }
+.recent li { display: grid; grid-template-columns: 74px auto 1fr auto; gap: 10px; }
 .recent li .peak { color: var(--muted); }
+.recent li .where { color: var(--muted); font-family: var(--font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent li.only, .recent li.only .where { color: var(--accent); }
 .recent li.going { color: var(--motion); }
 .recent li.brief { color: var(--brief); }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
@@ -61,6 +63,13 @@ main { padding: var(--gap) 20px; display: grid; gap: var(--gap); max-width: 1500
 .chart { position: relative; height: 300px; }
 .chart.short { height: 170px; }
 .chart canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.chart, .lanes { touch-action: pan-y; }
+.cross { position: absolute; width: 1px; background: var(--fg); opacity: .45; pointer-events: none; z-index: 2; }
+.tip { position: absolute; z-index: 3; pointer-events: none; background: rgba(27,34,43,.94); border: 1px solid #34404d;
+  border-radius: 8px; padding: 5px 9px; font-size: 12px; line-height: 1.5; color: var(--fg);
+  font-variant-numeric: tabular-nums; }
+.tip b { font-family: var(--mono); font-weight: 600; color: var(--accent); }
+.cross[hidden], .tip[hidden] { display: none; }
 .overlay { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
   color: var(--muted); font-size: 13px; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
@@ -130,7 +139,10 @@ td:first-child { white-space: normal; }
 .keys dd { margin: 0; }
 
 /* ---------- links (experimental) ---------- */
-.lanes { position: relative; margin-bottom: 12px; }
+.lanes { position: relative; }
+.lanes-legend { margin: 4px 0 12px; }
+.lanes[hidden] + .lanes-legend { display: none; }
+.link.dim { opacity: .62; }
 .lanes canvas { display: block; width: 100%; }
 .link .state { font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 1px 7px; border-radius: 999px;
   border: 1px solid var(--line); color: var(--muted); margin-left: 8px; vertical-align: 3px; }
@@ -185,5 +197,15 @@ td:first-child { white-space: normal; }
   .chart { height: 230px; }
   .chart.short { height: 150px; }
   .actions button:not(.icon) { padding: 5px 9px; font-size: 13px; }
-  .pill.net { max-width: 140px; }
+  /* header: two short rows (verdict; then link and buttons, scrolling sideways if they don't fit) */
+  .top { gap: 6px 10px; }
+  .brand span, .live span, .pill.net, #link span { display: none; }
+  .status { flex: 1 1 0; flex-direction: column; align-items: flex-start; gap: 0; }
+  .badge { font-size: 20px; line-height: 1.2; }
+  .badge.long { font-size: 16px; }
+  #badge-sub { align-self: stretch; font-size: 12px; }
+  .top-right { flex: 1 1 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: 6px; }
+  .top-right::-webkit-scrollbar { display: none; }
+  .actions, .pill { flex: none; }
+  .recent li { grid-template-columns: 66px auto 1fr auto; gap: 8px; }
 }

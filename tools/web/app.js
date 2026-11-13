@@ -89,8 +89,9 @@ function renderHeader(h) {
   }
   for (const r of h.recent) {
     const li = document.createElement('li');
-    if (r.going) li.className = 'going'; else if (r.brief) li.className = 'brief';
-    for (const [txt, cls] of [[r.at, ''], [r.dur, ''], [`×${r.peak.toFixed(1)}`, 'peak']]) {
+    li.className = r.only ? 'only' : r.going ? 'going' : r.brief ? 'brief' : '';
+    if (r.only) li.title = "Seen by a device link only: the board's own verdict stayed still";
+    for (const [txt, cls] of [[r.at, ''], [r.dur, ''], [r.where || '', 'where'], [r.peak === null ? '' : `×${r.peak.toFixed(1)}`, 'peak']]) {
       const s = document.createElement('span'); s.textContent = txt; if (cls) s.className = cls; li.append(s);
     }
     ol.append(li);
@@ -158,8 +159,59 @@ function frame(ctx, w, h, o) {
   }
   ctx.strokeStyle = C.line;
   ctx.strokeRect(r.l + .5, r.t + .5, r.r - r.l - 1, r.b - r.t - 1);
-  return { r, X, Y };
+  return { r, X, Y, o };
 }
+
+// ---------------------------------------------------------------- readout under the cursor
+// Every chart shows the time and values under the mouse or finger: a line on
+// the chart and a small box beside it (DOM, so the canvas isn't redrawn).
+const hov = {};                          // chart id -> { x, y, f, info, line, tip }
+function hoverable(id, f, info) {
+  const box = $(id);
+  let h = hov[id];
+  if (!h) {
+    h = hov[id] = { x: null, y: 0 };
+    h.line = Object.assign(document.createElement('div'), { className: 'cross', hidden: true });
+    h.tip = Object.assign(document.createElement('div'), { className: 'tip', hidden: true });
+    box.append(h.line, h.tip);
+    const move = (e) => {
+      const b = box.getBoundingClientRect();
+      h.x = e.clientX - b.left; h.y = e.clientY - b.top;
+      showHover(id);
+    };
+    const hide = () => { h.x = null; showHover(id); };
+    box.addEventListener('pointermove', move);
+    box.addEventListener('pointerdown', move);
+    box.addEventListener('pointerleave', hide);
+    box.addEventListener('pointercancel', hide);
+  }
+  h.f = f; h.info = info;
+  showHover(id);
+}
+function showHover(id) {
+  const h = hov[id], f = h.f;
+  const on = h.x !== null && !!f && h.x >= f.r.l && h.x <= f.r.r;
+  h.line.hidden = h.tip.hidden = !on;
+  if (!on) return;
+  const t = f.o.t0 + (h.x - f.r.l) / (f.r.r - f.r.l) * (f.o.t1 - f.o.t0);
+  const v = f.o.y0 + (f.r.b - h.y) / (f.r.b - f.r.t) * (f.o.y1 - f.o.y0);
+  h.line.style.cssText = `left:${h.x}px;top:${f.r.t}px;height:${f.r.b - f.r.t}px`;
+  h.tip.replaceChildren(Object.assign(document.createElement('b'), { textContent: clock(t, true) }));
+  for (const line of h.info(t, v)) if (line) h.tip.append(Object.assign(document.createElement('div'), { textContent: line }));
+  const left = h.x < (f.r.l + f.r.r) / 2;      // beside the line, on the roomier side
+  const bw = $(id).clientWidth;                // never wider than the room beside the line
+  h.tip.style.cssText = `top:${f.r.t + 4}px;max-width:${Math.max(90, (left ? bw - h.x : h.x) - 14)}px;` +
+    (left ? `left:${h.x + 10}px` : `right:${bw - h.x + 10}px`);
+}
+// Index of the value in the sorted array closest to t, or -1 if none within tol
+function nearest(t, arr, tol) {
+  let lo = 0, hi = arr.length - 1;
+  if (hi < 0) return -1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < t) lo = m + 1; else hi = m; }
+  if (lo > 0 && t - arr[lo - 1] < arr[lo] - t) lo--;
+  return Math.abs(arr[lo] - t) <= tol ? lo : -1;
+}
+const inSpan = (spans, t) => (spans || []).some(([a, b]) => a <= t && t <= b);
 
 function band(ctx, f, a, b, color, alpha) {
   const x0 = Math.max(f.X(a), f.r.l), x1 = Math.min(f.X(b), f.r.r);
@@ -253,6 +305,18 @@ function drawScore() {
   st.hidden = !s.calibrating;
   st.textContent = 'calibrating · keep still';
   renderLegend(s);
+  hoverable('#score', f, (t) => {
+    const tol = Math.max(s.gap, (t1 - t0) / 150), out = [];
+    for (const se of s.series) {
+      const i = nearest(t, se.t, tol);
+      if (i >= 0) out.push(`${se.label} ×${se.v[i].toFixed(1)}`);
+    }
+    const i = s.long ? nearest(t, s.long.t, tol) : -1;
+    if (i >= 0) out.push(`long window ×${s.long.v[i].toFixed(1)}`);
+    if (!out.length) out.push('no data');
+    out.push(inSpan(s.motion, t) && 'motion', inSpan(s.scans, t) && 'router scan (ignored)', inSpan(s.cal, t) && 'calibrating');
+    return out;
+  });
 }
 
 let legendKey = '';
@@ -315,6 +379,12 @@ function drawDoppler() {
   ctx.setLineDash([2, 3]); ctx.strokeStyle = C.muted;
   ctx.beginPath(); ctx.moveTo(f.r.l, f.Y(d.low)); ctx.lineTo(f.r.r, f.Y(d.low)); ctx.stroke();
   ctx.restore();
+  hoverable('#doppler', f, (t, hz) => {
+    const i = nearest(t - d.step / 2, d.t, d.step), j = Math.floor(hz / fmax * nb);
+    if (i < 0 || j < 0 || j >= nb) return ['no data'];
+    return [`${hz.toFixed(0)} Hz`, d.db[i][j] > 0 ? `${d.db[i][j]} dB over the quiet room` : 'as the quiet room',
+      fast.score && inSpan(fast.score.scans, t) && 'router scan (ignored)'];
+  });
 }
 
 function drawBreath() {
@@ -337,6 +407,12 @@ function drawBreath() {
     if (level === 'clear') { ctx.fillStyle = C.still; ctx.fill(); }
     else { ctx.strokeStyle = C.brief; ctx.lineWidth = 1.5; ctx.stroke(); }
   }
+  const pts = fast.breathing || [];
+  hoverable('#breath', f, (t) => {
+    const i = nearest(t, pts.map((p) => p[0]), 3);
+    if (i < 0) return ['no reading'];
+    return [pts[i][2] === 'none' ? 'no breathing found' : `${pts[i][1].toFixed(0)} a minute (${pts[i][2]})`];
+  });
 }
 
 function drawTimeline() {
@@ -368,6 +444,12 @@ function drawTimeline() {
     polyline(ctx, f, tl.t, tl.l, gap, ymax * .98);
   }
   ctx.restore();
+  hoverable('#timeline', f, (t) => {
+    const i = tl.t ? nearest(t, tl.t, Math.max(3, (tl.end - tl.start) / 200)) : -1;
+    const m = tl.motion.find(([a, b]) => a - 1 <= t && t <= b + 1);
+    return [i >= 0 ? `short ×${tl.s[i].toFixed(1)} · long ×${tl.l[i].toFixed(1)}` : 'no data',
+      m && (m[2] ? 'brief blip' : 'motion'), inSpan(tl.cal, t) && 'calibrating'];
+  });
 }
 
 // ---------------------------------------------------------------- render loops
@@ -463,11 +545,14 @@ function renderLinks() {
     el.querySelector('.name span').textContent = r.label + (r.ap ? '' : ' · device');
     el.querySelector('.name small').textContent = `${r.rate}/s ${r.rssi} dBm`;
     const act = el.querySelector('.act'), st = el.querySelector('.state');
-    act.textContent = r.state === 'calibrating' ? '—' : `×${r.activity.toFixed(1)}`;
+    const judged = r.state === 'motion' || r.state === 'still';
+    el.classList.toggle('dim', r.state === 'weak' || r.state === 'silent');
+    act.textContent = judged ? `×${r.activity.toFixed(1)}` : '—';
     act.title = r.long === null ? '' : `fast (0.5 s) ×${r.activity.toFixed(2)} · slow (4 s) ×${r.long.toFixed(2)} of its quiet level`;
-    act.style.color = r.moving ? C.motion : r.activity > 1.6 ? C.brief : C.fg;
-    st.textContent = r.state === 'motion' ? 'MOTION' : r.state === 'calibrating' ? 'calibrating' : 'still';
-    st.className = 'state' + (r.state === 'motion' ? ' motion' : r.state === 'calibrating' ? ' cal' : '');
+    act.style.color = r.moving ? C.motion : judged && r.activity > 1.6 ? C.brief : judged ? C.fg : C.muted;
+    st.textContent = { motion: 'MOTION', still: 'still', calibrating: 'calibrating', weak: 'weak link', silent: 'no signal' }[r.state] || r.state;
+    st.title = { weak: 'Too few ACKs a second to judge motion on this link (it needs about 20)', silent: 'Nothing from this device for over 2 s' }[r.state] || '';
+    st.className = 'state' + (r.state === 'motion' ? ' motion' : judged ? '' : ' cal');
     const b = r.breathing, d = r.doppler;
     el.querySelector('.br').textContent = 'breathing ' + (!b ? '…' : b.level === 'none' ? '—' : `${b.rate.toFixed(0)}/min (${b.level})`);
     el.querySelector('.dop').textContent = 'Doppler ' + (d === null || d === undefined ? '…' : !Object.keys(d).length ? '—' : d.scan ? 'scan' : `${d.f.toFixed(1)} Hz`);
@@ -487,7 +572,7 @@ function drawLanes() {
   box.hidden = !rows.length || !win;
   if (box.hidden) return;
   const lanes = [{ label: 'board verdict', spans: slow.board_spans || [], board: true }]
-    .concat(rows.map((r) => ({ label: r.label + (r.ap ? '' : ' · device'), spans: r.spans, state: r.state })));
+    .concat(rows.map((r) => ({ label: r.label + (r.ap ? '' : ' · device'), spans: r.spans, weak: r.weak, state: r.state })));
   const cv = box.querySelector('canvas'), dpr = window.devicePixelRatio || 1;
   const LH = 20, AX = 18, w = box.clientWidth, h = lanes.length * LH + AX;
   const G = Math.min(170, Math.max(110, w * 0.22));            // label gutter
@@ -502,7 +587,15 @@ function drawLanes() {
   lanes.forEach((ln, i) => {
     const y = i * LH;
     ctx.fillStyle = C.grid; ctx.fillRect(G, y + 3, w - G, LH - 6);
-    ctx.fillStyle = ln.state === 'calibrating' ? C.muted : C.fg;
+    for (const [a, b] of ln.weak || []) {          // too weak to judge: no lane, a dashed line
+      const xa = Math.max(G, X(a)), xb = Math.min(w, X(b));
+      if (xb <= xa) continue;
+      ctx.clearRect(xa, y + 3, xb - xa, LH - 6);
+      ctx.strokeStyle = C.line; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(xa, y + LH / 2 + .5); ctx.lineTo(xb, y + LH / 2 + .5); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.fillStyle = ln.board || ln.state === 'motion' || ln.state === 'still' ? C.fg : C.muted;
     let label = ln.label;
     while (label.length > 3 && ctx.measureText(label).width > G - 10) label = label.slice(0, -2) + '…';
     ctx.fillText(label, 0, y + LH / 2);
@@ -519,6 +612,11 @@ function drawLanes() {
     if (x - tw / 2 >= G && x + tw / 2 <= w) ctx.fillText(label, x, lanes.length * LH + 4);
   }
   ctx.textAlign = 'left';
+  hoverable('#lanes', { r: { l: G, r: w, t: 0, b: lanes.length * LH }, o: { t0, t1, y0: 0, y1: 1 } }, (t) => {
+    const saw = lanes.filter((ln) => inSpan(ln.spans, t)).map((ln) => ln.label);
+    const weak = lanes.filter((ln) => inSpan(ln.weak, t)).map((ln) => ln.label);
+    return [saw.length ? `motion: ${saw.join(', ')}` : 'no motion', weak.length && `too weak to judge: ${weak.join(', ')}`];
+  });
 }
 
 function drawSpark(box, r) {
@@ -687,7 +785,8 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(() => { renderFast(); drawTimeline(); drawLanes(); }, 80);
 });
 
-// ?shot: render one snapshot synchronously (headless screenshots); ?dlg=net|dev|help opens one
+// ?shot: render one snapshot synchronously (headless screenshots); ?dlg=net|dev|help opens one,
+// &hover=<0..1> shows the readout that far across every chart
 const params = new URLSearchParams(location.search);
 if (params.has('shot')) {
   document.body.classList.add('shot');
@@ -701,6 +800,12 @@ if (params.has('shot')) {
   renderFast(); renderSlow();
   const dlg = { net: '#dlg-net', dev: '#dlg-dev', help: '#dlg-help', set: '#dlg-set' }[params.get('dlg')];
   if (dlg) { $(dlg).showModal(); renderNet(); renderDev(); renderSound(); renderSens(); }
+  if (params.get('hover')) {                       // &hover=0.6: the readout at 60% across every chart
+    for (const [id, h] of Object.entries(hov)) {
+      h.x = h.f.r.l + (h.f.r.r - h.f.r.l) * +params.get('hover'); h.y = (h.f.r.t + h.f.r.b) / 2;
+      showHover(id);
+    }
+  }
 } else {
   window.addEventListener('load', connect);
 }

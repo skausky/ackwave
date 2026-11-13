@@ -50,7 +50,7 @@ Sessions from both `gui` and `record` are saved to `sessions/` in the project fo
 
 ### Web dashboard
 
-`./csi web` opens the live view in your browser at `http://localhost:8765`: status, link health, breathing, Doppler and quiet-level cards, the motion score with its thresholds, the Doppler and breathing charts and the whole session, plus **Recalibrate**, **Network** (choose the router) and **Devices** (extra links). Keys: space pauses, 1/2/3 pick 30 s / 2 min / 10 min, c recalibrates, n opens the network picker, ? shows help. It works on phone-sized screens too.
+`./csi web` opens the live view in your browser at `http://localhost:8765`: status, link health, breathing, Doppler and quiet-level cards, the motion score with its thresholds, the Doppler and breathing charts and the whole session, plus **Recalibrate**, **Network** (choose the router) and **Devices** (extra links). Keys: space pauses, 1/2/3 pick 30 s / 2 min / 10 min, c recalibrates, n opens the network picker, ? shows help. Move the mouse or a finger over any chart to read the time and values there. It works on phone-sized screens too.
 
 The server listens on this PC only (`127.0.0.1`), so nothing else on your network can reach it. To use it from your phone, forward the port over SSH, for example with Termux or any SSH app that supports local forwarding:
 
@@ -60,7 +60,7 @@ ssh -L 8765:localhost:8765 you@your-pc     # then open http://localhost:8765 on 
 
 Commands from the page need a header that other websites can't send, and the server refuses requests addressed to any other host name, so a web page you visit can't control the board through it. `--host 0.0.0.0` opens it to your whole LAN instead; only do that on a network you trust.
 
-**Settings (⚙): per-link analysis (experimental, off by default).** Analyses every link on its own (the router, and each device being poked): its activity against its own quiet level, its breathing and its Doppler, side by side. Click a link to point the breathing and Doppler charts at it. It is display only: the board's verdict still comes from the router link. Saved in `sessions/dashboard.json`.
+**Settings (⚙): per-link analysis (experimental, off by default).** Analyses every link on its own (the router, and each device being poked): its activity against its own quiet level, its breathing and its Doppler, side by side. Click a link to point the breathing and Doppler charts at it. It is display only: the board's verdict still comes from the router link. A link needs about 20 ACKs a second for a verdict of its own; below 15 it is shown as a weak link and not judged (a few ACKs a second read as motion that isn't there). With it on, the dashboard also says where a motion was: Recent motion names the device links that saw each one (`router + Espressif`), lists periods of 2 s or more that only a device link saw (`Espressif only`), and the header names the links seeing motion right now. Saved in `sessions/dashboard.json`.
 
 **First-time setup** (already done on this PC): `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`.
 

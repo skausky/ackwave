@@ -66,9 +66,14 @@
   <section class="card" id="links-card" hidden>
     <div class="card-head">
       <h2>Links <span class="chip warn">experimental</span></h2>
-      <span class="muted small">each link judged on its own, against its own quiet level · display only: the board's verdict comes from the router link · click a link to show its breathing and Doppler below</span>
+      <span class="hint" title="Each link is judged on its own, against its own quiet level. Display only: the board's verdict comes from the router link. A link with too few ACKs a second gets no verdict. Click a link to show its breathing and Doppler below.">ⓘ</span>
     </div>
     <div class="lanes" id="lanes"><canvas></canvas></div>
+    <div class="legend static lanes-legend">
+      <span><i style="background:var(--motion)"></i>the board's verdict</span>
+      <span><i style="background:var(--brief)"></i>motion on that link (display only)</span>
+      <span><i class="dash" style="color:var(--muted)"></i>too weak to judge</span>
+    </div>
     <div class="links" id="links"></div>
   </section>
 
@@ -175,6 +180,7 @@
       <dt>v</dt><dd>devices</dd>
       <dt>?</dt><dd>this help</dd>
     </dl>
+    <p class="muted small">Move the mouse (or a finger) over any chart to read the time and values there.</p>
     <p class="muted small">The motion score is each link's movement energy as a multiple of the room's quiet level. Motion starts when the short (0.5 s) score crosses its threshold while the long (4 s) one is up too, or when the long one crosses its own. Shaded red: motion. Grey bands: router background scans, which the board ignores. Ticks along the bottom: the board's own verdict changing.</p>
   </form>
 </dialog>

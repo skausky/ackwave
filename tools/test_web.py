@@ -64,7 +64,8 @@ def main():
     assert len(links) >= 2 and all(r['activity'] >= 0 and r['spark']['t'] for r in links), links
     # each link has its own verdict; the demo's motion shows on some link, and
     # the board's own verdict comes along for comparison
-    assert all(r['state'] in ('motion', 'still', 'calibrating') for r in links)
+    assert all(r['state'] in ('motion', 'still', 'calibrating', 'weak', 'silent') for r in links)
+    assert any(r['state'] in ('motion', 'still') for r in links), links
     sl600 = dash.slow(600)
     assert any(r['spans'] for r in sl600['links']), "per-link motion spans"
     assert all(a <= b for r in sl600['links'] for a, b in r['spans'])
@@ -185,19 +186,46 @@ def main():
         ts += 10_000
     row = [r for r in dp.slow(30)['links'] if r['src'] == 10][0]
     assert row['state'] == 'still' and 0.3 < np.median(row['spark']['v']) < 2.8, row
-    for _ in range(800):                             # the device link sees motion...
+    for i in range(800):                             # the device link sees motion...
         dp.feed(csi(ts, 0)); dp.feed(csi(ts + 3000, 10, wild=True))
+        if i % 25 == 0:                              # ...and one that rarely answers changes wildly
+            dp.feed(csi(ts + 6000, 11, wild=True))
         ts += 10_000
-    assert dp.links[10]['md'].state() == 'motion'
-    for _ in range(500):                             # ...then stops answering
+    assert dp.links[10]['md'].state(ts) == 'motion'
+    # 4 ACKs a second is too few to judge: no verdict, however wild
+    assert dp.links[11]['md'].state(ts) == 'weak' and not dp.links[11]['md'].spans
+    row = [r for r in dp.slow(30)['links'] if r['src'] == 11][0]
+    assert row['state'] == 'weak' and not row['moving'] and not row['spans'] and row['weak'], row
+    # where the motion is: the badge stays the board's verdict and names the link
+    badge = dp.fast(30)['header']['badge']
+    assert badge['word'] == 'STILL' and 'only the device 10 link sees motion now' in badge['sub'], badge
+    for _ in range(1000):                            # ...then it is quiet there again
+        dp.feed(csi(ts, 0)); dp.feed(csi(ts + 3000, 10))
+        ts += 10_000
+    assert dp.links[10]['md'].state(ts) == 'still'
+    rec = dp.fast(30)['header']['recent']            # a period only a device link saw is listed as such
+    assert [r for r in rec if r['only'] and r['where'] == 'device 10 only' and not r['going']], rec
+    assert all(e[2] == 10 and e[1] is not None for e in dp.link_events), dp.link_events
+    for _ in range(300):                             # motion on both links
+        dp.feed(csi(ts, 0, wild=True)); dp.feed(csi(ts + 3000, 10, wild=True))
+        ts += 10_000
+    h = dp.fast(30)['header']
+    assert h['badge']['word'] == 'MOTION' and h['badge']['sub'].endswith('seen by router + device 10'), h['badge']
+    assert h['recent'][0]['where'] == 'router + device 10' and not h['recent'][0]['only'], h['recent']
+    dp.cfg['per_link'] = False                       # without per-link analysis: as before
+    h = dp.fast(30)['header']
+    assert all(r['where'] == '' and not r['only'] for r in h['recent']) and 'seen by' not in h['badge']['sub']
+    dp.cfg['per_link'] = True
+    for _ in range(500):                             # the device stops answering mid-motion
         dp.feed(csi(ts, 0))
         ts += 10_000
     row = [r for r in dp.slow(30)['links'] if r['src'] == 10][0]
-    assert row['state'] == 'still' and row['activity'] == 0, row
+    assert row['state'] == 'silent' and row['activity'] == 0 and row['weak'], row
     a, b = dp.links[10]['md'].spans[-1]
-    assert b is not None and b - a < 8 + 2.5, (a, b)
+    assert b is not None and b - a < 3 + 2.5, (a, b)
     dp.feed(csi(1_000_000, 0))                       # board restarted
     assert list(dp.links) == [0] and not dp.links[0]['md'].spans
+    assert all(e[1] is not None for e in dp.link_events), "a restart ends the open link periods"
 
     # Live clock: a stale first line (from the board's USB buffer) put the
     # mapping ahead; the first fresh line pulls it back. Files never correct.

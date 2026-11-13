@@ -47,21 +47,32 @@ SETTINGS = {'per_link': False}              # dashboard settings (sessions/dashb
 
 THRESHOLD_KEYS = ('on_short', 'off_short', 'on_long', 'off_long', 'short_gate')
 SPARK_S = 30.0                              # a link's score trace in its card
+# ACKs a second (over its last 2 s) a link needs for a verdict of its own: weak
+# under the first, until back over the second
+LINK_MIN_RATE, LINK_OK_RATE = 15.0, 20.0
+LINK_EVENTS = 400                           # device-link motion periods remembered
 
 
 class LinkDetector:
     """One link's own motion verdict (experimental, display only): the board's
     algorithm fed just this link's ACKs, with its own quiet level, so a device
-    link is judged against its own noise, not the router's. Spans are in board
-    time (State.now) and kept for the longest window."""
+    link is judged against its own noise, not the router's. A link that
+    answers too rarely gets no verdict at all ("weak"): a handful of ACKs a
+    second reads as motion that isn't there. Spans are in board time
+    (State.now) and kept for the longest window."""
 
     def __init__(self):
         self.det = MotionDetector()
-        self.spans = []                          # [t0, t1 or None]
+        self.spans = []                          # motion: [t0, t1 or None]
+        self.weak_spans = []                     # too weak to judge: [t0, t1 or None]
         self.scores = deque()                    # (t, its short score) for SPARK_S
+        self.recent = deque()                    # times (us) of the last 2 s of ACKs
+        self.weak = True                         # until it shows a steady rate
+        self.motion = False                      # the verdict shown: never while weak
         self.last_ts = self.ch = None
 
     def feed(self, d, t, thresholds):
+        """One ACK. Returns +1 / -1 when the link's motion starts / ends, else 0."""
         if self.last_ts is not None and d['ts'] < self.last_ts - 1_000_000:
             self.__init__()                      # board restarted: a new time base
         self.last_ts = d['ts']
@@ -74,27 +85,53 @@ class LinkDetector:
             self.scores.append((t, sc))
         while self.scores and self.scores[0][0] < t - SPARK_S:
             self.scores.popleft()
-        self._verdict(d['ts'], t)
+        self.recent.append(d['ts'])
+        while self.recent[0] < d['ts'] - 2_000_000:
+            self.recent.popleft()
+        return self._verdict(d['ts'], t, len(self.recent) / 2.0)
+
+    def silent(self, now_us):
+        return self.last_ts is None or now_us - self.last_ts > self.det.c['stale_s'] * 1e6
 
     def idle(self, now_us, t):
-        """Another link's packet arrived: a link that went silent mid-motion
-        ends its motion once its data is stale, as the board's detector would."""
-        if self.det.motion and now_us - self.last_ts > self.det.c['stale_s'] * 1e6:
-            self._verdict(now_us, t)
+        """Another link's packet arrived: a link that went silent ends its
+        motion (as the board's detector would) and counts as weak from here."""
+        if (self.motion or not self.weak) and self.silent(now_us):
+            self.recent.clear()
+            return self._verdict(now_us, t, 0.0)
+        return 0
 
-    def _verdict(self, now_us, t):
-        change = self.det.evaluate(now_us)
-        if change > 0:
-            self.spans.append([t, None])
-        elif change < 0 and self.spans and self.spans[-1][1] is None:
-            self.spans[-1][1] = t
-        while self.spans and self.spans[0][1] is not None and self.spans[0][1] < t - WINDOWS[-1]:
-            self.spans.pop(0)
+    def _verdict(self, now_us, t, rate):
+        self.det.evaluate(now_us)
+        weak = rate < (LINK_OK_RATE if self.weak else LINK_MIN_RATE)
+        if weak or self.weak_spans:
+            self._span(self.weak_spans, weak, t)
+        self.weak = weak
+        motion = self.det.motion and not weak
+        change = int(motion) - int(self.motion)
+        self.motion = motion
+        self._span(self.spans, motion, t)
+        return change
 
-    def state(self):
+    @staticmethod
+    def _span(spans, on, t):
+        """Open, keep or close the last span; forget those older than the longest window."""
+        is_open = bool(spans) and spans[-1][1] is None
+        if on and not is_open:
+            spans.append([t, None])
+        elif not on and is_open:
+            spans[-1][1] = t
+        while spans and spans[0][1] is not None and spans[0][1] < t - WINDOWS[-1]:
+            spans.pop(0)
+
+    def state(self, now_us):
+        if self.silent(now_us):
+            return 'silent'
+        if self.weak:
+            return 'weak'
         if self.det.floor <= 0 or self.det.phase in ('wait', 'collect'):
             return 'calibrating'
-        return 'motion' if self.det.motion else 'still'
+        return 'motion' if self.motion else 'still'
 
 
 def r2(x):
@@ -140,6 +177,9 @@ class Dashboard:
         # Per-link analysis (experimental, off unless switched on): node -> analysers
         self.links = {}                          # src -> dict(br=Breathing, dop=Doppler, hist=deque, md)
         self.csi_ts = None                       # last CSI time seen with per-link on
+        # When each device link saw motion, on the wall clock (survives board
+        # restarts): [wall0, wall1 or None, node, name]. Says where a motion was.
+        self.link_events = []
         state.on_csi = self._on_csi
 
     def _on_csi(self, d, t):
@@ -147,10 +187,10 @@ class Dashboard:
         if not self.cfg['per_link']:
             return
         if self.csi_ts is not None and d['ts'] < self.csi_ts - 1_000_000:
-            self.links.clear()                   # board restarted: old times mean nothing now
+            self._drop_links()                   # board restarted: old times mean nothing now
         self.csi_ts = d['ts']
-        for ln in self.links.values():
-            ln['md'].idle(d['ts'], t)
+        for node, ln in self.links.items():
+            self._link_change(node, ln['md'].idle(d['ts'], t), t)
         if d['kind'] != 1:
             return
         src = d['src']
@@ -158,13 +198,84 @@ class Dashboard:
             self.links[src] = dict(br=Breathing(src), dop=Doppler(WINDOWS[-1], src), hist=deque(),
                                    md=LinkDetector())
         ln = self.links[src]
-        ln['md'].feed(d, t, {k: self.s.det.c[k] for k in THRESHOLD_KEYS})
+        self._link_change(src, ln['md'].feed(d, t, {k: self.s.det.c[k] for k in THRESHOLD_KEYS}), t)
         ln['dop'].feed(d, t)
         r = ln['br'].feed(d, t)
         if r is not None:
             ln['hist'].append((t, r))
             while ln['hist'] and ln['hist'][0][0] < t - WINDOWS[-1]:
                 ln['hist'].popleft()
+
+    def _link_change(self, src, change, t):
+        """A link's motion started (+1) or ended (-1): remembered for device links
+        (the router link is the board's own verdict, already in the history)."""
+        if not change or src < MAX_APS:
+            return
+        w = self.s.wall(t)
+        if change > 0:
+            self.link_events.append([w, None, src, self.s.devices.link_label(src)])
+            del self.link_events[:-LINK_EVENTS]
+        else:
+            for e in reversed(self.link_events):
+                if e[2] == src and e[1] is None:
+                    e[1] = w
+                    break
+
+    def _drop_links(self):
+        """Forget the per-link analysers; their open motion periods end here."""
+        for e in self.link_events:
+            if e[1] is None:
+                e[1] = max(e[0], self.s.last_wall or e[0])
+        self.links.clear()
+        self.csi_ts = None
+
+    def _link_motions(self):
+        """Device-link motion periods as (wall0, wall1, still going, name)."""
+        now = self.s.last_wall or 0
+        return [(a, b if b is not None else max(now, a), b is None, name)
+                for a, b, _src, name in self.link_events]
+
+    def _recent(self, n=6):
+        """Newest first: the last motion periods and, with per-link analysis on,
+        where each was: which device links saw it too, plus periods only a
+        device link saw (2 s or longer; the board itself stayed still)."""
+        s = self.s
+        rows = [dict(a=a, b=a + dur, going=going, peak=peak, only=False, where='')
+                for a, dur, peak, going in s.recent_motion(n)]
+        if self.cfg['per_link']:
+            ev = sorted(self._link_motions())
+            for r in rows:
+                names = sorted({nm for a, b, _g, nm in ev if a <= r['b'] + 1 and b >= r['a'] - 1})
+                r['where'] = ' + '.join(['router'] + names)
+            now = s.last_wall or 0
+            mains = [(a, b if b is not None else now) for a, b in s.hist_motion]
+            eps = []                             # periods at most 2 s apart are one
+            for a, b, going, nm in ev:
+                if eps and a <= eps[-1]['b'] + 2:
+                    e = eps[-1]
+                    e['b'], e['going'] = max(e['b'], b), e['going'] or going
+                    e['names'].add(nm)
+                else:
+                    eps.append(dict(a=a, b=b, going=going, names={nm}))
+            for e in eps[-4 * n:]:
+                if e['b'] - e['a'] < BRIEF_S or any(a <= e['b'] + 1 and b >= e['a'] - 1 for a, b in mains):
+                    continue
+                rows.append(dict(a=e['a'], b=e['b'], going=e['going'], peak=None, only=True,
+                                 where=' + '.join(sorted(e['names'])) + ' only'))
+        rows.sort(key=lambda r: -r['a'])
+        out = []
+        for r in rows[:n]:
+            dur = r['b'] - r['a']
+            out.append(dict(at=time.strftime('%H:%M:%S', time.localtime(r['a'])),
+                            dur=('now ' + fmt_age(dur)) if r['going']
+                            else ('brief' if dur < BRIEF_S else fmt_age(dur)),
+                            peak=r2(r['peak']), going=r['going'], only=r['only'], where=r['where'],
+                            brief=not r['going'] and dur < BRIEF_S))
+        return out
+
+    def _where_now(self):
+        """Names of the device links that see motion right now."""
+        return sorted({nm for _a, _b, going, nm in self._link_motions() if going})
 
     # ---------- input ----------
     def feed(self, line):
@@ -216,8 +327,7 @@ class Dashboard:
                     return False, 'nothing to change'
                 self.cfg.update(changed)
                 if not self.cfg['per_link']:
-                    self.links.clear()               # free the analysers
-                    self.csi_ts = None
+                    self._drop_links()               # free the analysers
                 self._save_settings()
                 msg = 'Per-link analysis on (experimental)' if self.cfg['per_link'] \
                     else 'Per-link analysis off'
@@ -343,8 +453,13 @@ class Dashboard:
         elif det.floor <= 0:
             badge = dict(word='CALIBRATING', color=CAL_C, sub='measuring the quiet level: keep still')
         else:
+            sub, near = s.last_motion(), self._where_now() if self.cfg['per_link'] else []
+            if det.motion and self.cfg['per_link']:
+                sub += ' · seen by ' + ' + '.join(['router'] + near)
+            elif near:                           # the verdict stays the board's
+                sub += f" · only the {' + '.join(near)} link{'s see' if len(near) > 1 else ' sees'} motion now"
             badge = dict(word='MOTION' if det.motion else 'STILL',
-                         color=MOTION_C if det.motion else STILL_C, sub=s.last_motion())
+                         color=MOTION_C if det.motion else STILL_C, sub=sub)
         hw, hc, hd = s.link_health()
         tiles = {}
         r = (br or s.br).last
@@ -372,12 +487,7 @@ class Dashboard:
                           else ('measuring', CAL_C, 'keep still'))
         if status:
             tiles = {k: (v, DIM, sub) for k, (v, _c, sub) in tiles.items()}
-        recent = []
-        for a, dur, peak, going in s.recent_motion(6):
-            recent.append(dict(at=time.strftime('%H:%M:%S', time.localtime(a)),
-                               dur=('now ' + fmt_age(dur)) if going
-                               else ('brief' if dur < BRIEF_S else fmt_age(dur)),
-                               peak=r2(peak), going=going, brief=not going and dur < BRIEF_S))
+        recent = self._recent()
         n_long, n_brief = s.session_counts()
         dv = s.devices
         return dict(badge=badge, stale=bool(status),
@@ -476,15 +586,20 @@ class Dashboard:
             t, v = np.array(pts).T if pts else (np.zeros(0), np.zeros(0))
             q = f if f > 0 else max(float(np.percentile(v, 10)), 1e-6) if pts else 1.0
             tt, vv = thin(t, v / q, 150)
-            ms, ml = md.det.max_scores(int(s.now * 1e6))     # None once its data is stale
-            short = ms / f if ms is not None and f > 0 else None
-            long_ = ml / f if ml is not None and f > 0 else None
-            state = md.state()
+            now_us = int(s.now * 1e6)
+            ms, ml = md.det.max_scores(now_us)   # None once its data is stale
+            state = md.state(now_us)
+            judged = f > 0 and state in ('motion', 'still')
+            short = ms / f if ms is not None and judged else None
+            long_ = ml / f if ml is not None and judged else None
+
+            def clip(spans):
+                return [[r2(s.wall(max(a, t0))), r2(s.wall(min(b if b is not None else t1, t1)))]
+                        for a, b in spans if (b is None or b >= t0) and a <= t1]
             row = dict(src=key[0], label=s.devices.link_label(key[0]), ap=key[0] < MAX_APS,
                        rate=round(s.rate(key)), rssi=s.rssi.get(key, 0), state=state,
                        activity=r2(short or 0.0), long=r2(long_), moving=state == 'motion',
-                       spans=[[r2(s.wall(max(a, t0))), r2(s.wall(min(b if b is not None else t1, t1)))]
-                              for a, b in md.spans if (b is None or b >= t0) and a <= t1],
+                       spans=clip(md.spans), weak=clip(md.weak_spans),
                        spark=dict(t=[r2(s.wall(x)) for x in tt], v=[r2(x) for x in vv]),
                        breathing=None, doppler=None)
             b = ln['br'].last
