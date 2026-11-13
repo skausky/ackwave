@@ -544,6 +544,24 @@ int main(void) {
     for (int i = 0; i < N_SC; i++) e[i] = 1.0f;
     CHECK(md_top_mean(e) == 1.0f);
 
+    {   // Floor while the ring fills: someone moving right after calibrating
+        // can't lift it above fast_rise_max x the first floor; it may still fall
+        static motion_det_t fd;
+        md_cfg_t fc;
+        md_cfg_default(&fc);
+        md_init(&fd, &fc, 0);
+        int64_t t = 0;
+        for (; t < 10000000; t += 100000) md_floor_step(&fd, t, 0.02f);     // 10 s quiet
+        CHECK(fd.phase == MD_CAL_FAST && fabsf(fd.floor - 0.02f) < 1e-6f && fabsf(fd.floor0 - 0.02f) < 1e-6f);
+        for (; t < 70000000; t += 100000) md_floor_step(&fd, t, 0.2f);      // 60 s of motion
+        CHECK(fd.phase == MD_CAL_FAST && fd.floor <= 0.02f * fc.fast_rise_max + 1e-6f);
+        for (; t < 90000000; t += 100000) md_floor_step(&fd, t, 0.012f);    // quieter than at first
+        CHECK(fd.floor < 0.02f);                                            // falls freely
+        md_recalibrate(&fd, t, 0, MD_WHY_BUTTON);                           // a new first floor
+        for (int64_t e = t + 10000000; t < e; t += 100000) md_floor_step(&fd, t, 0.05f);
+        CHECK(fabsf(fd.floor0 - 0.05f) < 1e-6f);
+    }
+
     static motion_det_t md;
     md_cfg_t mc;
     md_cfg_default(&mc);

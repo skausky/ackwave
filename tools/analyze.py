@@ -30,6 +30,7 @@ CFG = dict(
     long_cap=3.0,                        # long window input cap, x floor
     sample_us=100_000, floor_every_us=1_000_000,
     floor_min_n=100, floor_pct=10, floor_up_per_s=0.01,
+    fast_rise_max=1.5,                   # while the ring fills: at most this x the first floor
     floor_lo=0.005, floor_hi=0.2,
     rssi_tau_fast=5.0, rssi_tau_slow=60.0, rssi_step_db=4.0,
     rssi_min_age_us=10_000_000,
@@ -160,6 +161,7 @@ class MotionDetector:
         self.collect_from = self.next_sample = self.next_floor = now_us + delay_us
         self.ring = []                   # oldest first, at most RING
         self.floor = 0.0
+        self.floor0 = 0.0
         for s in self.streams.values():  # current RSSI is the new normal
             s.rssi_s, s.rssi_t0 = s.rssi_f, now_us
 
@@ -289,6 +291,10 @@ class MotionDetector:
             q = min(q, self.floor * (1 + c['floor_up_per_s'] * c['floor_every_us'] * 1e-6))
         else:
             nxt = 'track' if n == RING else 'fast'
+            if self.phase == 'collect':
+                self.floor0 = min(max(q, c['floor_lo']), c['floor_hi'])
+            else:                            # someone moving right after calibrating
+                q = min(q, self.floor0 * c['fast_rise_max'])
             if self.phase == 'collect':      # first floor: restart the long window
                 for st in self.streams.values():
                     if st.el is not None:

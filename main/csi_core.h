@@ -685,6 +685,7 @@ typedef struct {
     int     floor_min_n;            // samples before the first floor
     int     floor_pct;              // floor = this percentile of short scores
     float   floor_up_per_s;         // max relative rise per second once tracking
+    float   fast_rise_max;          // while the ring fills: at most this x the first floor
     float   floor_lo, floor_hi;     // floor clamps
     float   rssi_tau_fast, rssi_tau_slow;   // s
     float   rssi_step_db;           // lasting RSSI change that means "board moved"
@@ -714,6 +715,7 @@ static inline void md_cfg_default(md_cfg_t *c) {
     c->sample_us = 100000;  c->floor_every_us = 1000000;
     c->floor_min_n = 100;   c->floor_pct = 10;
     c->floor_up_per_s = 0.01f;
+    c->fast_rise_max = 1.5f;
     c->floor_lo = 0.005f;   c->floor_hi = 0.2f;
     c->rssi_tau_fast = 5.0f; c->rssi_tau_slow = 60.0f;
     c->rssi_step_db = 4.0f;  c->rssi_min_age_us = 10000000;
@@ -758,6 +760,7 @@ typedef struct {
     int64_t  collect_from, next_sample, next_floor;
     int      ring_n, ring_i;
     float    floor;                         // 0 = not known yet
+    float    floor0;                        // first floor after (re)calibrating
     float    ring[MD_RING], scratch[MD_RING];
 } motion_det_t;
 
@@ -964,8 +967,10 @@ static inline float md_clampf(float v, float lo, float hi) {
 // back to the quiet level in every brief pause, so this works even while
 // someone moves around, and it runs all the time, motion or not, so a board
 // moved somewhere noisier can't get stuck in "motion". While the ring fills
-// ("fast") the floor follows directly; afterwards ("track") it may fall
-// immediately but rise at most floor_up_per_s per second.
+// ("fast") the floor follows directly but stays under fast_rise_max x the
+// first one (someone moving around right after calibrating can't lift it to
+// their own level); afterwards ("track") it may fall immediately but rise at
+// most floor_up_per_s per second.
 static inline void md_floor_step(motion_det_t *d, int64_t ts, float score_short) {
     const md_cfg_t *c = &d->c;
     if (ts < d->collect_from) return;
@@ -986,6 +991,8 @@ static inline void md_floor_step(motion_det_t *d, int64_t ts, float score_short)
         if (q > cap) q = cap;
     } else {
         int next = d->ring_n == MD_RING ? MD_CAL_TRACK : MD_CAL_FAST;
+        if (d->phase == MD_CAL_COLLECT) d->floor0 = md_clampf(q, c->floor_lo, c->floor_hi);
+        else if (q > d->floor0 * c->fast_rise_max) q = d->floor0 * c->fast_rise_max;
         if (d->phase == MD_CAL_COLLECT)          // first floor: the long window's
             for (int i = 0; i < MAX_STREAMS; i++) { // memory predates the scale, restart it
                 memset(d->s[i].el, 0, sizeof d->s[i].el);
