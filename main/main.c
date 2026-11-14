@@ -81,7 +81,7 @@
 #endif
 #define BEEP_MS        150
 #ifndef BUZZER_VOL
-#define BUZZER_VOL     50        // loudness, % (50 = full; a piezo is much quieter at 5-10)
+#define BUZZER_VOL     1         // loudness, % PWM duty (1 = quietest, shown as 2 %; 50 = full)
 #endif
 #ifndef MOTION_ALARM
 #define MOTION_ALARM   0         // 1 = loop a two-tone siren while motion lasts (instead of one chime)
@@ -267,10 +267,10 @@ static tune_t tune_motion_test(void) {
     return t;
 }
 
-// Alarm: a two-tone (hi-lo) siren, looped while motion lasts, always at full volume
+// Alarm: a two-tone (hi-lo) siren, looped while motion lasts, at the set volume
 static tune_t tune_siren(void) {
     uint16_t lo = (uint16_t)snd_hz, hi = (uint16_t)SND_HI(snd_hz);
-    tune_t t = {{{lo, 350, 0}, {hi, 350, 0}, {lo, 350, 0}, {hi, 350, 0}}, SOUND_VOL_MAX};
+    tune_t t = {{{lo, 350, 0}, {hi, 350, 0}, {lo, 350, 0}, {hi, 350, 0}}, 0};
     return t;
 }
 #define SIREN_EVERY_US 1400000

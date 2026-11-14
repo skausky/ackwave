@@ -177,8 +177,8 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    | `BUZZER_ACTIVE` | 0 | 0 = passive piezo (PWM tone), 1 = active buzzer |
    | `BUZZER_HZ` | 2700 | pitch of the chime and siren: set it to your buzzer's loudest (find it with `BEEP,700,<hz>`; a piezo is only loud near its resonance, one OSEPP buzzer at 3800 Hz) |
    | `BUZZER_SOFT_HZ` | 2000 | pitch of the quieter status sounds |
-   | `BUZZER_VOL` | 50 | loudness in % (50 = full; 5-10 is much quieter) |
-   | `MOTION_ALARM` | 0 | 1 = loop a two-tone siren at full volume while motion lasts, instead of one chime |
+   | `BUZZER_VOL` | 1 | loudness, % PWM duty: 1 = quietest (the dashboard shows it as 2 %), 50 = full |
+   | `MOTION_ALARM` | 0 | 1 = loop a two-tone siren while motion lasts (at the set volume), instead of one chime |
    | `BEEP_GAP_MS` | 30000 | at most one motion beep per this long |
    | `LINK_MIN_ACKS` / `LINK_MIN_RSSI` | 50 / -85 | below either, the link counts as weak and motion beeps stop (a noisy link looks like motion) |
    | `BEEP_AFTER_MS` | 2000 | beep once motion has lasted this long (skips brief blips); 0 = at once |
