@@ -32,8 +32,6 @@
   <a href="#/stats" data-route="stats"><svg viewBox="0 0 24 24"><path d="M5 21V11M10 21V5M15 21v-7M20 21V9"/></svg><span>Stats</span></a>
   <a href="#/links" data-route="links"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M7.3 11l9.4-4M7.3 13l9.4 4"/></svg><span>Links</span></a>
   <a href="#/debug" data-route="debug"><svg viewBox="0 0 24 24"><path d="M8 6l-5 6 5 6M16 6l5 6-5 6M14 4l-4 16"/></svg><span>Debug</span></a>
-  <a href="#/train" data-route="train"><svg viewBox="0 0 24 24"><path d="M7 11V5a2 2 0 0 1 4 0v5M11 10V4a2 2 0 0 1 4 0v6M15 10V6a2 2 0 0 1 4 0v8a7 7 0 0 1-7 7h-1a7 7 0 0 1-6-3.5L3 13a2 2 0 0 1 3.4-2L7 12"/></svg><span>Train</span></a>
-  <a href="#/ai" data-route="ai"><svg viewBox="0 0 24 24"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/><path d="M19 15l1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1z"/></svg><span>AI</span></a>
   <a href="#/settings" data-route="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg><span>Settings</span></a>
 </nav>
 
@@ -60,8 +58,6 @@
           <span class="health" id="home-link" title="Link health"><i></i><span></span></span>
           <button id="btn-cal" class="primary" title="Measure the quiet level again (step away for 5 s)">Recalibrate</button>
         </div>
-        <p class="hero-extra" id="home-gesture" hidden></p>
-        <p class="hero-extra" id="home-ai" hidden></p>
       </article>
       <article class="card chart-card live-card">
         <div class="card-head"><h2>Live signal <span class="muted small">× quiet level · <span id="home-live-win">last 30 s</span></span></h2><span class="live-tag"><i></i>live</span></div>
@@ -240,20 +236,6 @@
     </section>
   </section>
 
-  <!-- ======================= TRAIN / AI ======================= -->
-  <section class="page" data-page="train" hidden>
-    <section class="card empty">
-      <h2>Training</h2>
-      <p class="muted">Not set up yet. This page will record a few examples of movements (wave, walk across the room, sit down…) so new motion can get a label like "probably: wave". It never changes the board's MOTION / STILL verdict.</p>
-    </section>
-  </section>
-  <section class="page" data-page="ai" hidden>
-    <section class="card empty">
-      <h2>AI summaries</h2>
-      <p class="muted">Not set up yet. A local model could write a short plain-English summary of the day's activity. It would never decide motion.</p>
-    </section>
-  </section>
-
   <!-- ======================= SETTINGS ======================= -->
   <section class="page" data-page="settings" hidden>
     <section class="card">
@@ -283,16 +265,6 @@
         <label class="slider"><span>Pitch</span><input type="range" id="snd-hz" min="500" max="6000" step="100"><output id="snd-hz-out"></output></label>
         <div class="dlg-tools"><button type="button" id="snd-test">Test sounds</button><button type="button" id="snd-default">Use the firmware's settings</button></div>
         <p class="muted small">Beeps: "di-di-DIIING" once motion has lasted 2 s (at most every 30 s), a sliding "dooooo" when it ends. Alarm: a siren while motion lasts (always loud). While this dashboard runs it keeps the board at these settings, even after a restart.</p>
-      </article>
-    </section>
-    <section class="row2">
-      <article class="card empty">
-        <h2>Training</h2>
-        <p class="muted small">Gesture labels are not set up yet.</p>
-      </article>
-      <article class="card empty">
-        <h2>AI</h2>
-        <p class="muted small">AI summaries are not set up yet.</p>
       </article>
     </section>
   </section>

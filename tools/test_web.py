@@ -288,10 +288,11 @@ def pages_and_debug(tmp):
     # Names from the network (devices, networks, labels) only ever go in as text
     for bad in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval('):
         assert bad not in js, bad
-    routes = ['home', 'graphs', 'stats', 'links', 'debug', 'train', 'ai', 'settings']
+    routes = ['home', 'graphs', 'stats', 'links', 'debug', 'settings']
     for r in routes:
         assert f'data-page="{r}"' in html and f'href="#/{r}"' in html, r
-    assert "const ROUTES = ['home', 'graphs', 'stats', 'links', 'debug', 'train', 'ai', 'settings'];" in js
+    assert "const ROUTES = ['home', 'graphs', 'stats', 'links', 'debug', 'settings'];" in js
+    assert 'data-page="train"' not in html and 'data-page="ai"' not in html, "no placeholder pages"
     assert js.count('new EventSource(') == 1, "one live connection for every page"
     assert "'X-Ackwave': '1'" in js and "fetch('/api/stats'" in js
 
@@ -317,7 +318,6 @@ def pages_and_debug(tmp):
     assert [(g['node'], g['state']) for g in sl['gates']] == [(0, 'ok'), (1, 'far')]
     assert sl['thresholds']['on_short'] == 2.8 and sl['thresholds']['short_gate'] == 1.2
     assert set(sl['today']) == {'periods', 'blips', 'motion_s'}
-    assert sl['gesture'] is None and sl['ai'] is None, "later features stay off"
     st = d.stats()
     assert st['sessions'][0]['live'] and st['sessions'][0]['periods'] == d.s.session_counts()[0]
 

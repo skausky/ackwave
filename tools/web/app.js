@@ -15,7 +15,7 @@ const C = {
   cal: css('--cal'), long: css('--long'), blue: css('--blue'), card: css('--card'), card2: css('--card2'),
 };
 const FONT = '11px ui-sans-serif, system-ui, sans-serif';
-const ROUTES = ['home', 'graphs', 'stats', 'links', 'debug', 'train', 'ai', 'settings'];
+const ROUTES = ['home', 'graphs', 'stats', 'links', 'debug', 'settings'];
 
 let win = 30, paused = false, es = null;
 let link = null;                         // per-link focus for breathing / Doppler (null = router)
@@ -217,11 +217,6 @@ function renderHome() {
   $('#home-n').textContent = t ? t.periods : '–';
   $('#home-min').textContent = t ? (t.motion_s / 60).toFixed(t.motion_s < 600 ? 1 : 0) : '–';
   $('#home-blips').textContent = t ? t.blips : '–';
-  const g = slow && slow.gesture, a = slow && slow.ai;   // later features; hidden until enabled
-  $('#home-gesture').hidden = !g;
-  if (g) $('#home-gesture').textContent = g.text;
-  $('#home-ai').hidden = !a;
-  if (a) $('#home-ai').textContent = a.text;
 }
 
 // ---------------------------------------------------------------- canvas helpers

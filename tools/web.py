@@ -524,8 +524,7 @@ class Dashboard:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        settings=self.cfg, sound=s.sound, sens=s.sens, gates=self._gates(),
-                       thresholds=self._thresholds(), today=self._today_totals(),
-                       gesture=None, ai=None)    # filled in by later features
+                       thresholds=self._thresholds(), today=self._today_totals())
             if s.wall_off is None:
                 return out
             t1 = max(s.now, win)
