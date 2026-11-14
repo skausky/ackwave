@@ -200,6 +200,14 @@ def network_lines():
     assert "Network switched from the PC" in text
     assert text.count("watching a different network") == 1
     assert text.count("scanned for networks") == 1, text
+    # Access points chosen one by one: said when the list changes, MACs never logged
+    m = ':'.join(f'{x:02x}' for x in (0x50, 2, 0x91, 0x1a, 0x2b, 1))
+    out, _ = drive([(0, "APS,0"), (5, "APS,0"), (10, f"APS,saved,1"), (40, f"APS,1,{m}"), (45, f"APS,1,{m}"),
+                    (60, "APS,0")])
+    text = '\n'.join(out)
+    assert "Access points chosen from the PC: the board restarts" in text
+    assert text.count("watches 1 chosen access point now") == 1 and m not in text, text
+    assert "watches every access point of the network now" in text
 
 
 def replay_raw_log():

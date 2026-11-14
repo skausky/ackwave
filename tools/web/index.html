@@ -244,7 +244,12 @@
       <p id="net-now" class="now"></p>
       <p id="net-state" class="muted small"></p>
       <div class="table-wrap"><table><thead><tr><th>Network</th><th>Ch</th><th>Signal</th><th></th></tr></thead><tbody id="net-list"></tbody></table></div>
-      <p class="muted small">Pick your own router. The board only listens and never joins, so no password is needed. It is 2.4 GHz only. The choice is saved on the board, which restarts and recalibrates (about 15 s).</p>
+      <div class="aps-bar">
+        <button type="button" id="aps-use" disabled>Watch the ticked access points</button>
+        <button type="button" id="aps-clear" class="ghost" hidden>Back to the whole network</button>
+        <span id="aps-note" class="muted small"></span>
+      </div>
+      <p class="muted small">Pick your own router: <b>Watch</b> uses every access point with that name on the board's channel. To combine several routers (any names), tick their access points instead. The board listens on one channel, so set those routers to the same 2.4 GHz channel in their own settings. The board only listens and never joins, so no password is needed. The choice is saved on the board, which restarts and recalibrates (about 15 s).</p>
     </section>
     <section class="row2">
       <article class="card">

@@ -287,6 +287,10 @@ int main(void) {
     { int g0 = 0; for (int j = 0; j < 20; j++) g0 += next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 0;
       CHECK(g0 == 20); }
     CHECK(ap_is_far(&pg, 1, ap_best_rssi_x16(&ct, nch, 6, &pg)) && !ap_is_far(&pg, 0, ap_best_rssi_x16(&ct, nch, 6, &pg)));
+    pg.keep_far = true;                                       // chosen one by one (APS): poked anyway
+    { int g1 = 0; for (int j = 0; j < 20; j++) g1 += next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 1;
+      CHECK(g1 == 10 && !ap_is_far(&pg, 1, ap_best_rssi_x16(&ct, nch, 6, &pg))); }
+    pg.keep_far = false;
     gate_init(&pg); gate_rssi(&pg, 0, -50); gate_rssi(&pg, 1, -60);   // close enough: shared
     { int g1 = 0; for (int j = 0; j < 20; j++) g1 += next_poke_target(&ct, nch, 6, &rr, &pg, 0) == 1;
       CHECK(g1 == 10); }
@@ -407,6 +411,44 @@ int main(void) {
         CHECK(parse_cmd(CMD("", "UNPOKE,", PLUG), cm) == CMD_UNPOKE);
         CHECK(parse_cmd("UNPOKE,all", cm) == CMD_UNPOKE_ALL);
         CHECK(parse_cmd("UNPOKE,allx", cm) == CMD_NONE);
+
+        // APS: chosen access points (MAC strings built here, never written out)
+        {
+            static const uint8_t A1[6] = {0x50,0x02,0x91,0x1a,0x2b,0x3c}, A2[6] = {0x52,0x02,0x91,0x1a,0x2b,0x3d};
+            char al[256], m1[18], m2[18];
+            snprintf(m1, sizeof m1, "%02x:%02x:%02x:%02x:%02x:%02x", A1[0], A1[1], A1[2], A1[3], A1[4], A1[5]);
+            snprintf(m2, sizeof m2, "%02x:%02x:%02x:%02x:%02x:%02x", A2[0], A2[1], A2[2], A2[3], A2[4], A2[5]);
+            ap_list_t L = {0}, keep;
+            snprintf(al, sizeof al, "APS,%s,%s\r\n", m1, m2);
+            CHECK(parse_aps(al, &L) == 2 && memcmp(L.mac[0], A1, 6) == 0 && memcmp(L.mac[1], A2, 6) == 0);
+            CHECK(ap_list_index(&L, A2) == 1 && ap_list_index(&L, PLUG) == -1);
+            keep = L;
+            CHECK(parse_aps("APS,clear", &L) == APS_CLEAR && parse_aps("APS", &L) == APS_QUERY);
+            CHECK(parse_aps("APS\r\n", &L) == APS_QUERY && parse_aps("APSX", &L) == APS_BAD);
+            snprintf(al, sizeof al, "APS,%s,%s", m1, m1);
+            CHECK(parse_aps(al, &L) == APS_BAD);                               // a repeat
+            snprintf(al, sizeof al, "APS,%s,", m1);
+            CHECK(parse_aps(al, &L) == APS_BAD);                               // empty entry
+            snprintf(al, sizeof al, "APS,%s x", m1);
+            CHECK(parse_aps(al, &L) == APS_BAD);                               // trailing junk
+            snprintf(al, sizeof al, "APS,51%s", m1 + 2);
+            CHECK(parse_aps(al, &L) == APS_BAD);                               // group address
+            CHECK(parse_aps("APS,", &L) == APS_BAD && parse_aps("APS,clearx", &L) == APS_BAD);
+            CHECK(memcmp(&L, &keep, sizeof L) == 0);                           // a bad line changes nothing
+            int n = snprintf(al, sizeof al, "APS");
+            for (int k = 0; k < MAX_APS + 1; k++)                              // 9 entries: too many
+                n += snprintf(al + n, sizeof al - (size_t)n, ",50:02:91:00:00:%02x", k);
+            CHECK(parse_aps(al, &L) == APS_BAD);
+            al[strlen(al) - 18] = '\0';                                       // 8: fine
+            CHECK(parse_aps(al, &L) == MAX_APS);
+            // The channel with the most chosen APs wins; on a tie, the strongest
+            int hits[14] = {0}, best[14] = {0};
+            CHECK(aps_best_channel(hits, best, 13) == 0);
+            hits[3] = 1; best[3] = -40; hits[11] = 2 | 4; best[11] = -60;
+            CHECK(aps_best_channel(hits, best, 13) == 11);
+            hits[6] = 1 | 8; best[6] = -55;
+            CHECK(aps_best_channel(hits, best, 13) == 6);
+        }
         CHECK(parse_cmd("CAL", cm) == CMD_CAL && parse_cmd("CAL\r\n", cm) == CMD_CAL);
         CHECK(parse_cmd("CALX", cm) == CMD_NONE);
         int hz, vol;

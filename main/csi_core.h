@@ -255,6 +255,10 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //   SENS           report the long-window threshold (parse_sens)
 //   SENS,<x100>    set it until the next restart: 110-300 = x1.1-x3.0
 //   SENS,default   back to the build's
+//   APS,<mac>[,<mac>...]  watch these access points (1-8, any network names,
+//                  saved; parse_aps) instead of every one named like the network
+//   APS,clear      back to watching every access point of the network by name
+//   APS            report the list (APS,<n>[,<mac>...])
 enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL, CMD_SCAN };
 
 static inline bool parse_mac(const char *s, uint8_t out[6]) {
@@ -287,6 +291,61 @@ static inline int parse_cmd(const char *line, uint8_t mac[6]) {
         return CMD_POKE;
     }
     return CMD_NONE;
+}
+
+// ---------- Chosen access points (APS) ----------
+// An explicit list of BSSIDs to watch instead of every access point with the
+// network's name: they may belong to different networks, but the board listens
+// on one channel, so only those on the channel it picks are poked.
+typedef struct { uint8_t mac[MAX_APS][6]; int n; } ap_list_t;
+
+static inline int ap_list_index(const ap_list_t *l, const uint8_t *mac) {
+    for (int i = 0; l && mac && i < l->n; i++)
+        if (memcmp(l->mac[i], mac, 6) == 0) return i;
+    return -1;
+}
+
+enum { APS_BAD = -1, APS_CLEAR = 0, APS_QUERY = -2 };
+// APS,<mac>[,<mac>...]: 1-MAX_APS different unicast MACs into *out, returns
+// how many; APS,clear -> APS_CLEAR; APS -> APS_QUERY; anything else APS_BAD
+// (and *out is left alone)
+static inline int parse_aps(const char *line, ap_list_t *out) {
+    if (!line || strncmp(line, "APS", 3) != 0) return APS_BAD;
+    const char *s = line + 3;
+    if (*s == '\0' || *s == '\r' || *s == '\n') return APS_QUERY;
+    if (*s++ != ',') return APS_BAD;
+    if (strncmp(s, "clear", 5) == 0 && (s[5] == '\0' || s[5] == '\r' || s[5] == '\n'))
+        return APS_CLEAR;
+    ap_list_t l;
+    l.n = 0;
+    for (;;) {
+        char tok[18];
+        size_t n = strcspn(s, ",\r\n");
+        if (n != 17 || l.n >= MAX_APS) return APS_BAD;
+        memcpy(tok, s, 17);
+        tok[17] = '\0';
+        if (!parse_mac(tok, l.mac[l.n]) || (l.mac[l.n][0] & 0x01)) return APS_BAD;  // no group MACs
+        if (ap_list_index(&l, l.mac[l.n]) >= 0) return APS_BAD;                       // no repeats
+        l.n++;
+        s += 17;
+        if (*s != ',') break;
+        s++;
+    }
+    if (*s != '\0' && *s != '\r' && *s != '\n') return APS_BAD;
+    *out = l;
+    return l.n;
+}
+
+// The channel to listen on for a list of access points: the one where most of
+// them were heard (hits[ch]: bit i = list entry i heard there), the strongest
+// on a tie (best[ch]: its strongest RSSI). 0 if none heard.
+static inline int aps_best_channel(const int *hits, const int *best, int max_ch) {
+    int ch = 0, n_best = 0;
+    for (int c = 1; c <= max_ch; c++) {
+        int n = __builtin_popcount((unsigned)hits[c]);
+        if (n && (n > n_best || (n == n_best && best[c] > best[ch]))) { ch = c; n_best = n; }
+    }
+    return ch;
 }
 
 // USE,<name>: copies the network name (1-32 bytes, the rest of the line
@@ -524,6 +583,7 @@ typedef struct {
     int  yield[MAX_NODES];      // last verdict in %, -1 = not judged yet (poke task)
     int  since_trial[2];        // pokes since the last trial, APs / devices (poke task)
     int  trial_rr[2];           // (poke task)
+    bool keep_far;              // APs chosen one by one: never skipped as "far" (set at boot)
 } poke_gate_t;
 
 static inline void gate_init(poke_gate_t *g) {
@@ -590,7 +650,7 @@ static inline int ap_best_rssi_x16(const node_table_t *t, const int *node_ch, in
     return best;
 }
 static inline bool ap_is_far(const poke_gate_t *g, int i, int best_x16) {
-    return i < MAX_APS && best_x16 && g->rssi_x16[i] &&
+    return !g->keep_far && i < MAX_APS && best_x16 && g->rssi_x16[i] &&
            g->rssi_x16[i] < best_x16 - POKE_FAR_DB * 16;
 }
 

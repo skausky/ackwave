@@ -50,6 +50,21 @@ def main():
     assert not dash.command({'cmd': 'use', 'name': 'x' * 33})[0], "name too long"
     assert not dash.command({'cmd': 'use', 'name': 'a\nCAL'})[0], "no command injection"
     assert dash.command({'cmd': 'use_default'})[0] and sent[-1] == 'USE_DEFAULT'
+    # Access points chosen one by one (APS): validated, any network names
+    mac = lambda last: ':'.join(f'{x:02x}' for x in (0x50, 2, 0x91, 0x1a, 0x2b, last))
+    assert dash.command({'cmd': 'aps', 'macs': [mac(1), mac(2).upper()]})[0]
+    assert sent[-1] == f'APS,{mac(1)},{mac(2)}'
+    for bad in ([], [mac(i) for i in range(9)], [mac(1), mac(1)], ['51' + mac(1)[2:]],
+                [mac(1) + '\nCAL'], ['nope'], mac(1), [1]):
+        assert not dash.command({'cmd': 'aps', 'macs': bad})[0], bad
+    assert sent[-1] == f'APS,{mac(1)},{mac(2)}', "nothing sent for a bad list"
+    assert dash.command({'cmd': 'aps_clear'})[0] and sent[-1] == 'APS,clear'
+    dash.feed(f'APS,2,{mac(1)},{mac(2)}\n')
+    assert dash.slow(30)['network']['ap_list'] == [mac(1), mac(2)]
+    dash.feed('APS,0\n')
+    assert dash.slow(30)['network']['ap_list'] == []
+    dash.feed('APS,3,junk\n')                        # malformed: ignored
+    assert dash.slow(30)['network']['ap_list'] == []
     assert not dash.command({'cmd': 'mode', 'mode': 'bogus'})[0]
     assert not dash.command({'cmd': 'toggle', 'mac': 'nope'})[0]
     assert not dash.command({'cmd': 'rm -rf'})[0]

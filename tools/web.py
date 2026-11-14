@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -49,6 +50,7 @@ SETTINGS = {'per_link': False}              # dashboard settings (sessions/dashb
 
 
 THRESHOLD_KEYS = ('on_short', 'off_short', 'on_long', 'off_long', 'short_gate')
+MAC_RE = re.compile(r'[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}')
 SPARK_S = 30.0                              # a link's score trace in its card
 # ACKs a second (over its last 2 s) a link needs for a verdict of its own: weak
 # under the first, until back over the second
@@ -405,6 +407,25 @@ class Dashboard:
                     return False, 'choosing a network needs a board'
                 self.s.outbox.append(f'USE,{name}')
                 msg = f'Switching to "{name}": the board restarts (about 15 s)'
+            elif what == 'aps':
+                macs = c.get('macs')
+                if not isinstance(macs, list) or not 1 <= len(macs) <= MAX_APS:
+                    return False, f'pick 1 to {MAX_APS} access points'
+                if not all(isinstance(m, str) and MAC_RE.fullmatch(m) for m in macs):
+                    return False, 'bad access point address'
+                macs = [m.lower() for m in macs]
+                if len(set(macs)) != len(macs) or any(int(m[:2], 16) & 1 for m in macs):
+                    return False, 'bad access point list'
+                if not self.send:
+                    return False, 'choosing access points needs a board'
+                self.s.outbox.append('APS,' + ','.join(macs))
+                msg = (f"Watching {len(macs)} chosen access point{'s' if len(macs) > 1 else ''}: "
+                       'the board restarts (about 15 s)')
+            elif what == 'aps_clear':
+                if not self.send:
+                    return False, 'choosing access points needs a board'
+                self.s.outbox.append('APS,clear')
+                msg = 'Back to every access point of the network: the board restarts (about 15 s)'
             elif what == 'use_default':
                 if not self.send:
                     return False, 'choosing a network needs a board'
@@ -802,7 +823,8 @@ class Dashboard:
 
     def _network(self):
         how, name = self.s.network or ('?', '')
-        return dict(how=how, name=name, state=self.s.nets_state,
+        return dict(how=how, name=name, state=self.s.nets_state, ap_list=self.s.ap_list,
+                    channel=self.s.channel[0] if self.s.channel else None,
                     nets=[dict(name=n, ch=ch, rssi=rssi,
                                aps=[dict(bssid=b, ch=c, rssi=r) for b, c, r in self.s.net_aps.get(n, [])])
                           for n, ch, rssi in self.s.nets])

@@ -596,7 +596,8 @@ function frameLoop() {
 function renderSlow() {
   if (!slow) return;
   const n = slow.network;
-  $('#net').textContent = n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
+  $('#net').textContent = n && n.ap_list && n.ap_list.length ? `${n.ap_list.length} chosen access point${n.ap_list.length > 1 ? 's' : ''}`
+    : n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
   if (page === 'home') { renderHome(); drawTimeline('#home-tl', true); }
   else if (page === 'graphs') drawTimeline();
   else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderDev(); }
@@ -1016,36 +1017,58 @@ function bars(rssi) {
   return '▮'.repeat(n) + '▯'.repeat(4 - n);
 }
 
+// Access points ticked on the Settings page (kept while the list is redrawn)
+const apPick = new Set();
+let apPickFrom = null;                   // the board's list the ticks were last set from
+
+function apName(n, mac) {                // "network name · ch 6" for a BSSID heard in the scan
+  for (const net of n.nets) for (const a of net.aps || []) if (a.bssid === mac) return { net: net.name, ch: a.ch, rssi: a.rssi };
+  return null;
+}
+
 function renderNet() {
   const n = slow && slow.network;
   if (!n) return;
-  $('#net-now').textContent = n.how === 'none' ? 'Not watching any network yet: pick one below.'
-    : n.how === 'switching' ? `Switching to "${n.name}"…`
+  const list = n.ap_list || [];
+  const key = JSON.stringify(list);
+  if (apPickFrom !== key) {              // the board's list changed: show it ticked
+    apPickFrom = key;
+    apPick.clear();
+    for (const m of list) apPick.add(m);
+  }
+  $('#net-now').textContent = n.how === 'switching' ? 'Switching: the board restarts…'
+    : list.length ? `Watching ${list.length} chosen access point${list.length > 1 ? 's' : ''}` +
+      (n.channel ? ` on channel ${n.channel}` : '') + ': ' +
+      list.map((m) => { const a = apName(n, m); return a ? `${a.net} (${m.slice(-5)}, ch ${a.ch})` : m; }).join(', ')
+    : n.how === 'none' ? 'Not watching any network yet: pick one below.'
     : n.how === '?' ? 'Waiting for the board…'
-    : `Watching "${n.name}"${n.how === 'default' ? ' (default)' : ' (chosen here)'}`;
+    : `Watching "${n.name}"${n.how === 'default' ? ' (default)' : ' (chosen here)'}, every access point with that name`;
+  $('#aps-clear').hidden = !list.length;
+  renderApsBar(n);
   $('#net-state').textContent = n.state === 'scanning' ? 'scanning all channels (about 4 s)…'
     : n.state === 'done' ? `${n.nets.length} networks nearby` : 'press Scan to list the networks nearby';
   const body = $('#net-list');
   body.replaceChildren();
   for (const net of n.nets) {
-    const tr = el('tr', net.name === n.name ? { className: 'cur' } : {});
+    const tr = el('tr', net.name === n.name && !list.length ? { className: 'cur' } : {});
     const name = el('td', { textContent: net.name });
     const aps = net.aps || [];
     if (aps.length) {                                // its access points (mesh nodes, extenders)
       const boardCh = slow.details && slow.details.channel ? slow.details.channel[0] : null;
       const box = el('div', { className: 'aps' }, el('div', { textContent: aps.length === 1 ? '1 access point' : `${aps.length} access points` }));
       for (const a of aps) {
-        const used = net.name === n.name && a.ch === boardCh;
-        box.append(el('div', {
-          className: used ? 'used' : '',
-          textContent: `${a.bssid} · ch ${a.ch} · ${a.rssi} dBm` + (net.name === n.name ? (used ? ' · in use' : ' · other channel') : ''),
-        }));
+        const used = list.length ? list.includes(a.bssid) && a.ch === boardCh
+          : net.name === n.name && a.ch === boardCh;
+        const cb = el('input', { type: 'checkbox', checked: apPick.has(a.bssid), title: 'combine this access point with others' });
+        cb.onchange = () => { if (cb.checked) apPick.add(a.bssid); else apPick.delete(a.bssid); renderApsBar(n); };
+        box.append(el('label', { className: used ? 'used' : '' }, cb,
+          `${a.bssid} · ch ${a.ch} · ${a.rssi} dBm` + (used ? ' · in use' : '')));
       }
       name.append(box);
     }
     const sig = el('td', {}, el('span', { className: 'bars', textContent: bars(net.rssi) + ' ' }), `${net.rssi} dBm`);
     const td = el('td');
-    if (net.name !== n.name) {
+    if (net.name !== n.name || list.length) {
       const b = el('button', { type: 'button', textContent: 'Watch' });
       b.onclick = () => {
         if (confirm(`Watch "${net.name}" from now on?\n\nThe board restarts and recalibrates (about 15 s). Only pick your own network.`))
@@ -1056,6 +1079,23 @@ function renderNet() {
     tr.append(name, el('td', { textContent: net.ch }), sig, td);
     body.append(tr);
   }
+}
+
+// The button and note under the network list: how many are ticked, and
+// whether they share a channel (the board listens on one)
+function renderApsBar(n) {
+  const picked = [...apPick], chans = new Set();
+  for (const m of picked) { const a = apName(n, m); if (a) chans.add(a.ch); }
+  const same = JSON.stringify([...picked].sort()) === JSON.stringify([...(n.ap_list || [])].sort());
+  const btn = $('#aps-use');
+  btn.disabled = !picked.length || picked.length > 8 || same || !(fast && fast.header.board_connected);
+  btn.textContent = picked.length ? `Watch the ${picked.length} ticked access point${picked.length > 1 ? 's' : ''}` : 'Watch the ticked access points';
+  const note = $('#aps-note');
+  note.className = 'small ' + (chans.size > 1 || picked.length > 8 ? 'warn' : 'muted');
+  note.textContent = picked.length > 8 ? 'At most 8 access points.'
+    : chans.size > 1 ? `These are on channels ${[...chans].sort((a, b) => a - b).join(', ')}. The board listens on one channel: it will use the one with the most of them and skip the rest. Set those routers to the same 2.4 GHz channel to use them all.`
+    : picked.length && !same ? 'Each one gets a share of the router pokes (about 94 a second in all); device links are not affected.'
+    : !picked.length ? 'Tick access points (any network) to watch several routers at once.' : '';
 }
 
 function renderDev() {
@@ -1138,6 +1178,15 @@ $('#snd-test').onclick = () => cmd({ cmd: 'sound', test: true });
 $('#snd-default').onclick = () => cmd({ cmd: 'sound', mode: 'default' });
 $('#set-per-link').onchange = (e) => cmd({ cmd: 'settings', per_link: e.target.checked });
 $('#net-scan').onclick = () => { netScanned = true; cmd({ cmd: 'scan' }); };
+$('#aps-use').onclick = () => {
+  const macs = [...apPick];
+  if (confirm(`Watch these ${macs.length} access point${macs.length > 1 ? 's' : ''} from now on?\n\n${macs.join('\n')}\n\nThe board restarts and recalibrates (about 15 s). Only pick your own routers.`))
+    cmd({ cmd: 'aps', macs });
+};
+$('#aps-clear').onclick = () => {
+  if (confirm('Go back to watching every access point of the network by name?\n\nThe board restarts (about 15 s).'))
+    cmd({ cmd: 'aps_clear' });
+};
 $('#net-default').onclick = () => {
   if (confirm('Go back to the network built into the firmware (main/my_network.h)?\n\nThe board restarts (about 15 s).'))
     cmd({ cmd: 'use_default' });

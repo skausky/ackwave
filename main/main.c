@@ -127,6 +127,12 @@ static poke_state_t      pk = {-1, 0};
 // The network we watch. Written only at boot (before Wi-Fi starts), read by the
 // beacon callback; a new choice is saved and the board restarts.
 static char my_ssid[33];
+// Access points chosen one by one (APS): when set, they are "ours" instead of
+// every access point named my_ssid. Same lifetime rules as my_ssid.
+static ap_list_t aps;
+// While sweeping with a chosen list: per channel, which list entries were heard
+// (bit i = aps.mac[i]) and the strongest of them (beacon callback writes)
+static volatile int sweep_hits[MAX_CH + 1], sweep_best[MAX_CH + 1];
 static volatile bool     net_collect = false;  // SCAN running: note every beacon
 static net_list_t        nets;                 // written by the Wi-Fi task while collecting
 static volatile uint32_t scan_request;         // set by run_cmd, done by control_task
@@ -147,6 +153,28 @@ static void ssid_load(void) {
     const char *use = saved[0] && strcmp(base, MY_SSID) == 0 ? saved : MY_SSID;
     strncpy(my_ssid, use, sizeof my_ssid - 1);
     my_ssid[sizeof my_ssid - 1] = '\0';
+    // The chosen access points, under the same rule: a new build default wins
+    aps.n = 0;
+    uint8_t blob[MAX_APS * 6];
+    size_t nb = sizeof blob;
+    if (strcmp(base, MY_SSID) == 0 && nvs_open("ackwave", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_blob(h, "aps", blob, &nb) == ESP_OK && nb % 6 == 0 && nb <= sizeof blob) {
+            aps.n = (int)(nb / 6);
+            memcpy(aps.mac, blob, nb);
+        }
+        nvs_close(h);
+    }
+}
+
+// l = NULL or empty: forget the list (watch the network by name again)
+static bool aps_save(const ap_list_t *l) {
+    nvs_handle_t h;
+    if (nvs_open("ackwave", NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t e = l && l->n ? nvs_set_blob(h, "aps", l->mac, (size_t)l->n * 6) : nvs_erase_key(h, "aps");
+    bool ok = (e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND) && nvs_set_str(h, "dflt", MY_SSID) == ESP_OK;
+    ok = ok && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    return ok;
 }
 
 // name = NULL: forget the choice (back to the build default)
@@ -155,6 +183,8 @@ static bool ssid_save(const char *name) {
     if (nvs_open("ackwave", NVS_READWRITE, &h) != ESP_OK) return false;
     bool ok = name ? nvs_set_str(h, "ssid", name) == ESP_OK && nvs_set_str(h, "dflt", MY_SSID) == ESP_OK
                    : nvs_erase_all(h) == ESP_OK;
+    esp_err_t e = name ? nvs_erase_key(h, "aps") : ESP_OK;    // a network by name: no list
+    ok = ok && (e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND);
     ok = ok && nvs_commit(h) == ESP_OK;
     nvs_close(h);
     return ok;
@@ -163,6 +193,16 @@ static bool ssid_save(const char *name) {
 static void print_network(void) {
     const char *how = !my_ssid[0] ? "none" : strcmp(my_ssid, MY_SSID) == 0 ? "default" : "chosen";
     printf("NETWORK,%s,%s\n", how, my_ssid);
+}
+
+// APS,<n>[,<mac>...]: the chosen access points (0 = the network by name)
+static void print_aps(void) {
+    char line[24 + MAX_APS * 18];
+    int k = snprintf(line, sizeof line, "APS,%d", aps.n);
+    for (int i = 0; i < aps.n; i++)
+        k += snprintf(line + k, sizeof line - (size_t)k, ",%02x:%02x:%02x:%02x:%02x:%02x",
+                      aps.mac[i][0], aps.mac[i][1], aps.mac[i][2], aps.mac[i][3], aps.mac[i][4], aps.mac[i][5]);
+    printf("%s\n", line);
 }
 
 static volatile uint32_t n_poke, n_tx_err, n_ack, n_ap, n_drop, n_qfull, n_reply;
@@ -491,7 +531,15 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (b.ok && net_collect)
         net_note(&nets, b.ssid, b.ssid_len, b.bssid, b.ds_ch ? b.ds_ch : pkt->rx_ctrl.channel,
                  pkt->rx_ctrl.rssi);
-    if (!b.ok || !b.ssid_match) return;
+    int li = aps.n ? ap_list_index(&aps, b.bssid) : -1;
+    if (!b.ok || (aps.n ? li < 0 : !b.ssid_match)) return;
+    if (scanning && li >= 0) {                     // sweeping: note where each chosen AP is
+        int c = b.ds_ch ? b.ds_ch : pkt->rx_ctrl.channel;
+        if (c >= 1 && c <= MAX_CH) {
+            sweep_hits[c] |= 1 << li;
+            if (!sweep_best[c] || pkt->rx_ctrl.rssi > sweep_best[c]) sweep_best[c] = pkt->rx_ctrl.rssi;
+        }
+    }
 
     int idx = node_add(&nodes, b.bssid);
     last_seen_ms = now_ms();
@@ -584,12 +632,20 @@ static int sweep(void) {
     int prev = cur_ch, got = 0;
     scanning = true;
     csa_ch = 0;
-    for (int ch = 1; ch <= MAX_CH && !got; ch++) {
+    for (int c = 0; c <= MAX_CH; c++) sweep_hits[c] = sweep_best[c] = 0;
+    // A network by name: the first channel it is heard on. Chosen access
+    // points: every channel, then the one with the most of them
+    for (int ch = 1; ch <= MAX_CH && (aps.n || !got); ch++) {
         found_ch = 0;
         set_ch(ch);
         vTaskDelay(pdMS_TO_TICKS(DWELL_MS));
         int f = found_ch;
-        if (f >= 1 && f <= MAX_CH) got = f;
+        if (!aps.n && f >= 1 && f <= MAX_CH) got = f;
+    }
+    if (aps.n) {
+        int hits[MAX_CH + 1], best[MAX_CH + 1];
+        for (int c = 0; c <= MAX_CH; c++) { hits[c] = sweep_hits[c]; best[c] = sweep_best[c]; }
+        got = aps_best_channel(hits, best, MAX_CH);
     }
     set_ch(got ? got : prev);
     scanning = false;
@@ -623,7 +679,8 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
-    int snd, smode, svol, shz, sens, sx;
+    int snd, smode, svol, shz, sens, sx, na;
+    ap_list_t new_aps;
     if (glide_ms > 0) {
         tune_t t = {{{(uint16_t)hz, (uint16_t)glide_ms, (uint16_t)hz2}}, (uint8_t)vol};
         buzzer_play(&t);
@@ -662,6 +719,18 @@ static void run_cmd(const char *line) {
             printf("NETS,ignored,just-scanned\n");
         else
             scan_request = 1;
+    } else if ((na = parse_aps(line, &new_aps)) != APS_BAD) {
+        if (na == APS_QUERY) {
+            print_aps();
+        } else if (aps_save(na == APS_CLEAR ? NULL : &new_aps)) {
+            printf("APS,saved,%d\n", na);
+            fflush(stdout);
+            buzzer_auto(&TUNE_TICK);
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();                 // start clean with the new list
+        } else {
+            printf("APS,error,not-saved\n");
+        }
     } else if (parse_use(line, name) > 0 || strncmp(line, "USE_DEFAULT", 11) == 0) {
         bool dflt = line[3] == '_';
         if (ssid_save(dflt ? NULL : name)) {
@@ -811,10 +880,11 @@ static void control_task(void *arg) {
     printf("ME,%02x:%02x:%02x:%02x:%02x:%02x\n", my_mac[0], my_mac[1], my_mac[2],
            my_mac[3], my_mac[4], my_mac[5]);
     print_network();
+    print_aps();
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
         poll_cmds();
-        led_update(!my_ssid[0]);           // no network chosen yet: yellow
+        led_update(!my_ssid[0] && !aps.n); // no network chosen yet: yellow
 
         for (int n = node_count(&nodes); printed < n; printed++) {
             const uint8_t *m = nodes.mac[printed];
@@ -859,6 +929,7 @@ static void control_task(void *arg) {
 #endif
             print_devices();
             print_network();
+            print_aps();
             print_sound();                   // so the PC sees a change it missed (e.g. a restart)
             if (sens_x100) print_sens();
             printf("STATS,%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
@@ -880,7 +951,7 @@ static void control_task(void *arg) {
             net_scan();
             continue;
         }
-        if (!my_ssid[0]) continue;         // nothing to look for until USE,<name>
+        if (!my_ssid[0] && !aps.n) continue;   // nothing to look for until USE or APS
 
         now = now_ms();                    // the prints above can block
         if (need_scan || older_than(now, last_seen_ms, LOST_MS)) {  // silent hop
@@ -1032,6 +1103,7 @@ void app_main(void) {
     ssid_load();
 
     gate_init(&gate);
+    gate.keep_far = aps.n > 0;             // chosen one by one: never skipped as "far"
     buzzer_init();                           // never fatal
     buzzer_play(&TUNE_HELLO);                // power-on chirp: shows the wiring works
     print_sound();

@@ -63,6 +63,7 @@ class Recorder:
         self.last_ts = None                       # last board timestamp seen (us)
         self.ctl_ts = None                        # same, from control lines only (restart check)
         self.network = None                       # (how, name) the board last reported
+        self.aps = None                           # how many access points were chosen one by one
         self.scanning = False                     # inside the board's network scan (NET lines)
         self.chan_recal = None                    # now() of the last 'router changed channel'
         self.last_line = None                     # now() of the last line from the board
@@ -124,6 +125,17 @@ class Recorder:
                     " (it recalibrates afterwards)"))
             if line.startswith('NETS,'):
                 self.scanning = False
+            return
+        if line.startswith('APS,'):
+            p = line.strip().split(',')
+            if p[1:2] == ['saved']:
+                self.say("Access points chosen from the PC: the board restarts")
+            elif p[1:2] and p[1].isdigit():
+                n = int(p[1])
+                if self.aps is not None and n != self.aps:
+                    self.say(f"The board watches {n} chosen access point{'s' if n != 1 else ''} now"
+                             if n else "The board watches every access point of the network now")
+                self.aps = n
             return
         if line.startswith('NETWORK,'):
             p = line.strip().split(',', 2)

@@ -123,6 +123,7 @@ class State:
         self.nets, self.nets_state = [], 'idle'          # SCAN results: [(name, ch, rssi)]
         self.net_aps = {}                                # name -> [(bssid, ch, rssi)]
         self.net_confirmed = None                        # last network the board reported watching
+        self.ap_list = None                              # access points chosen one by one (APS): [bssid]
         # Board settings the PC keeps applied (the board reports them every 5 s)
         self.sound = None                                # board's buzzer: dict(mode, vol, hz, buzzer)
         self.kept_sound = Kept(self, lambda w: 'SOUND,%s,%d,%d' % w, 'SOUND,default')
@@ -148,6 +149,16 @@ class State:
 
     def _network_line(self, line):
         tag, _, rest = line.partition(',')
+        if tag == 'APS':                                 # APS,<n>[,<mac>...] / APS,saved,<n>
+            p = rest.split(',')
+            if p[0] == 'saved':
+                self.network = ('switching', self.network[1] if self.network else '')
+            elif p[0].isdigit() and len(p) == int(p[0]) + 1:
+                macs = [m.lower() for m in p[1:]]
+                if self.ap_list is not None and macs != self.ap_list:
+                    self.devices.forget_network()        # other APs: other devices
+                self.ap_list = macs
+            return
         if tag == 'NETWORK':
             how, _, name = rest.partition(',')
             if how in ('default', 'chosen', 'none'):
@@ -287,7 +298,7 @@ class State:
         if line.startswith('ME,'):
             self.me = line.strip()[3:]
             return
-        if line.startswith(('NETWORK,', 'NET,', 'NETAP,', 'NETS,')):
+        if line.startswith(('NETWORK,', 'NET,', 'NETAP,', 'NETS,', 'APS,')):
             self._network_line(line.rstrip('\r\n'))
             return
         if line.startswith('SOUND,'):

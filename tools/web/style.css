@@ -124,6 +124,10 @@ tr.dim td { color: var(--muted); }
 .aps { margin-top: 3px; font: 11.5px/1.5 var(--mono); color: var(--muted); font-weight: 400; }
 .aps div:first-child { font-family: var(--font); }
 .aps .used { color: var(--still); }
+.aps label { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 1px 0; }
+.aps input { accent-color: var(--accent); margin: 0; }
+.aps-bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 10px; }
+.aps-bar .warn { color: var(--brief); }
 td:first-child { white-space: normal; }
 .bars { font-family: var(--mono); letter-spacing: -1px; color: var(--accent); }
 .keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 0; }

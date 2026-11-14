@@ -300,6 +300,10 @@ SCAN            list nearby networks: NET,<ch>,<rssi>,<name> per name, NETAP,<bs
                 per access point with that name, then NETS,done,<n>; a SCAN during a scan is ignored
 USE,<name>      watch this network from now on (saved on the board, which restarts)
 USE_DEFAULT     forget that choice: back to MY_SSID from main/my_network.h
+APS,<mac>,...   watch these access points (1-8, any network names) instead of every one
+                named like the network; saved, the board restarts. It listens on the
+                channel with the most of them, so put those routers on one channel
+APS,clear       back to every access point of the network by name (USE also clears it)
 BEEP[,<ms>[,<hz>[,<vol>]]]  test beep (1-3000 ms, default 300; pitch 100-10000 Hz; volume 1-100 %)
 GLIDE,<ms>,<hz>,<hz2>[,<vol>]  test a smooth pitch glide from hz to hz2
 SOUND           report the buzzer settings: SOUND,<off|beep|alarm>,<vol>,<hz>[,no-buzzer]
