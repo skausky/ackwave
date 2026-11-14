@@ -186,7 +186,8 @@ static bool buzzer_ok;
 static QueueHandle_t tune_q;
 
 typedef struct { uint16_t hz, ms, hz2; } note_t;  // hz 0 = rest; hz2 set = glide hz -> hz2
-typedef struct { note_t n[4]; uint8_t vol; } tune_t;  // ends at the first ms == 0; vol % (0 = BUZZER_VOL)
+#define TUNE_NOTES 8
+typedef struct { note_t n[TUNE_NOTES]; uint8_t vol; } tune_t;  // ends at the first ms == 0; vol % (0 = BUZZER_VOL)
 static int buzz_vol = BUZZER_VOL;            // volume of the tune playing (buzzer task only)
 // Settings the PC can change with SOUND (until the next restart)
 static volatile int snd_mode = MOTION_ALARM ? SND_ALARM : SND_BEEP;
@@ -207,10 +208,22 @@ static const tune_t TUNE_READY  = {{{BUZZER_SOFT_HZ, 50, 0}, {0, 80, 0}, {BUZZER
 // Every sound stays near snd_hz: a piezo is only loud close to its resonance
 // (one OSEPP buzzer: 3800-4500 Hz), so a wide sweep or a big interval is quiet.
 #define SND_HI(hz) ((hz) * 9 / 8)               // a whole tone up
-// Motion: bi-ding, rising = started; ding-bi, falling = ended
+// Motion started and ended must be easy to tell apart by ear, but the pitch
+// can barely move, so they differ in rhythm and shape instead:
+//   started: "di-di-DIIING", two quick taps, then a long high note
+//   ended:   "dooooo", one smooth slide down, no taps
 static tune_t tune_motion(bool start) {
     uint16_t lo = (uint16_t)snd_hz, hi = (uint16_t)SND_HI(snd_hz);
-    tune_t t = {{{start ? lo : hi, 180, 0}, {0, 50, 0}, {start ? hi : lo, 300, 0}}, 0};
+    tune_t up = {{{lo, 60, 0}, {0, 60, 0}, {lo, 60, 0}, {0, 60, 0}, {hi, 400, 0}}, 0};
+    tune_t down = {{{hi, 650, lo}}, 0};
+    return start ? up : down;
+}
+
+// SOUND,test in beep mode: started, a pause, then ended, to hear both
+static tune_t tune_motion_test(void) {
+    tune_t t = tune_motion(true), end = tune_motion(false);
+    t.n[5] = (note_t){0, 700, 0};
+    t.n[6] = end.n[0];
     return t;
 }
 
@@ -249,7 +262,7 @@ static void buzzer_task(void *arg) {
     for (;;) {
         bool cut = false;
         buzz_vol = t.vol ? t.vol : snd_vol;
-        for (int i = 0; i < 4 && t.n[i].ms && !cut; i++) {
+        for (int i = 0; i < TUNE_NOTES && t.n[i].ms && !cut; i++) {
             note_t n = t.n[i];
             if (n.hz) buzzer_pitch(n.hz);
             buzzer_set(n.hz != 0);
@@ -632,7 +645,7 @@ static void run_cmd(const char *line) {
             if (shz > 0) snd_hz = shz;
         }
         if (snd == SOUND_TEST) {         // the current mode's sound
-            tune_t t = snd_mode == SND_ALARM ? tune_siren() : tune_motion(true);
+            tune_t t = snd_mode == SND_ALARM ? tune_siren() : tune_motion_test();
             buzzer_play(&t);             // even when off: asked for
         } else if (snd != SOUND_QUERY && snd_mode == SND_OFF) {
             buzzer_stop();               // cut whatever is playing

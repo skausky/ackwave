@@ -218,8 +218,8 @@ High and loud = something is happening, soft and falling = settling down, low = 
 | rising chirp | powered on |
 | one soft tick | recalibrate button / PC command received: step away |
 | two soft blips | calibrated, watching for motion |
-| rising chime (bi-ding) | motion that has lasted 2 s (brief blips stay silent; at most one per 30 s; none while the link is weak) |
-| falling chime (ding-bi) | that motion ended |
+| "di-di-DIIING" (two quick taps, then a long high note) | motion that has lasted 2 s (brief blips stay silent; at most one per 30 s; none while the link is weak) |
+| "dooooo" (one smooth slide down) | that motion ended |
 | low three-step fall | lost the router (once per loss) |
 | soft rising pair (doo-dee) | found the router again | Serial output just goes nowhere.
 
@@ -295,7 +295,7 @@ SOUND           report the buzzer settings: SOUND,<off|beep|alarm>,<vol>,<hz>[,n
 SOUND,<off|beep|alarm>[,<vol>[,<hz>]]  change them until the next restart (vol 1-50 %, hz 500-6000);
                 off silences every automatic sound (BEEP and SOUND,test still play)
 SOUND,default   back to the build's BUZZER_VOL, BUZZER_HZ and MOTION_ALARM
-SOUND,test      play the current mode's sound (the siren in alarm mode)
+SOUND,test      play the current mode's sound: started, then ended (the siren in alarm mode)
 SENS            report the slow (4 s) window's motion threshold: SENS,<x100> (140 = x1.4)
 SENS,<110-300>  change it until the next restart (the web dashboard's Sensitivity setting)
 SENS,default    back to the build's
