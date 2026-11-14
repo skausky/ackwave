@@ -4,7 +4,7 @@
 
 The detector runs **on the board itself**, so it works from a phone charger with an LED and optional sounds. A live GUI shows the details when it's plugged into a PC.
 
-![The web dashboard on demo data: motion in progress, per-link scores against the thresholds, Doppler, breathing and the session timeline](docs/dashboard.png)
+![The web dashboard's Home page on demo data: the board's verdict in plain words, activity against the motion threshold, today's totals, the live signal with its thresholds, recent motion and the session strip](docs/dashboard.png)
 
 ## What makes it different
 
@@ -50,7 +50,18 @@ Sessions from both `gui` and `record` are saved to `sessions/` in the project fo
 
 ### Web dashboard
 
-`./csi web` opens the live view in your browser at `http://localhost:8765`: status, link health, breathing, Doppler and quiet-level cards, the motion score with its thresholds, the Doppler and breathing charts and the whole session, plus **Recalibrate**, **Network** (choose the router) and **Devices** (extra links). Keys: space pauses, 1/2/3 pick 30 s / 2 min / 10 min, c recalibrates, n opens the network picker, ? shows help. Move the mouse or a finger over any chart to read the time and values there. It works on phone-sized screens too.
+`./csi web` opens the live view in your browser at `http://localhost:8765`. It has one page per job, all sharing one live connection (a sidebar on a computer, tabs along the bottom on a phone):
+
+| Page | What it shows |
+|---|---|
+| **Home** | The board's verdict in plain words ("Strong motion in the sensing zone · for 12 s", "All quiet for 3 min"), how close the room is to the motion threshold right now, today's motion, link health, **Recalibrate**, the live signal, recent motion and the session strip |
+| **Graphs** | The motion score with its thresholds, Doppler, breathing rate and the whole session |
+| **Stats** | Activity by day and hour across all recorded sessions, by hour of day, how long motion lasts, and every session's totals |
+| **Links** | Per-link analysis (experimental), packets per link, the board's poke gating, and the devices to poke |
+| **Debug** | Router ACK shape jumps and gaps, calibration history, commands sent and refused, board counters and the board's latest lines |
+| **Settings** | The network to watch, sensitivity and the thresholds, the buzzer |
+
+Every chart says what it shows, in which units, and where its thresholds are; move the mouse or a finger over it to read the time and values there. The live charts scroll smoothly between updates. Keys: h g s l d switch pages, space pauses the graphs, 1/2/3 pick 30 s / 2 min / 10 min, c recalibrates, ? shows help. Today's totals and the Stats page read `sessions/events-*.log`, so they cover every recorded session, not just this one. The desktop GUI (`./csi gui`) stays as it is, the classic view.
 
 The server listens on this PC only (`127.0.0.1`), so nothing else on your network can reach it. To use it from your phone, forward the port over SSH, for example with Termux or any SSH app that supports local forwarding:
 
@@ -60,7 +71,7 @@ ssh -L 8765:localhost:8765 you@your-pc     # then open http://localhost:8765 on 
 
 Commands from the page need a header that other websites can't send, and the server refuses requests addressed to any other host name, so a web page you visit can't control the board through it. `--host 0.0.0.0` opens it to your whole LAN instead; only do that on a network you trust.
 
-**Settings (⚙): per-link analysis (experimental, off by default).** Analyses every link on its own (the router, and each device being poked): its activity against its own quiet level, its breathing and its Doppler, side by side. Click a link to point the breathing and Doppler charts at it. It is display only: the board's verdict still comes from the router link. A link needs about 20 ACKs a second for a verdict of its own; below 15 it is shown as a weak link and not judged (a few ACKs a second read as motion that isn't there). With it on, the dashboard also says where a motion was: Recent motion names the device links that saw each one (`router + Espressif`), lists periods of 2 s or more that only a device link saw (`Espressif only`), and the header names the links seeing motion right now. Saved in `sessions/dashboard.json`.
+**Links page: per-link analysis (experimental, off by default).** Analyses every link on its own (the router, and each device being poked): its activity against its own quiet level, its breathing and its Doppler, side by side. Click a link to point the breathing and Doppler charts at it. It is display only: the board's verdict still comes from the router link. A link needs about 20 ACKs a second for a verdict of its own; below 15 it is shown as a weak link and not judged (a few ACKs a second read as motion that isn't there). With it on, the dashboard also says where a motion was: Recent motion names the device links that saw each one (`router + Espressif`), lists periods of 2 s or more that only a device link saw (`Espressif only`), and the header names the links seeing motion right now. Saved in `sessions/dashboard.json`.
 
 **First-time setup** (already done on this PC): `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`.
 
@@ -236,7 +247,7 @@ Wire a **passive piezo** between a free GPIO (GPIO 4 is a good choice; avoid str
 
 A piezo can't be detected electrically, so the buzzer is opt-in. If the pin can't be set up, the board prints `BUZZER,error,...` and carries on sensing.
 
-**Changing it without reflashing:** the web dashboard's settings (⚙) have a Buzzer section: off, beeps or alarm, volume, pitch and a test button. The choice is saved on the PC (`sessions/dashboard.json`) and re-applied whenever the dashboard or GUI is connected, also after the board restarts. The board doesn't store it, so on its own (a charger or power bank) it uses the settings it was built with. Typical use: buzzer off at the desk, beeping when it's out on its own.
+**Changing it without reflashing:** the web dashboard's Settings page has a Buzzer section: off, beeps or alarm, volume, pitch and a test button. The choice is saved on the PC (`sessions/dashboard.json`) and re-applied whenever the dashboard or GUI is connected, also after the board restarts. The board doesn't store it, so on its own (a charger or power bank) it uses the settings it was built with. Typical use: buzzer off at the desk, beeping when it's out on its own.
 
 ### Bring-up: probe mode
 

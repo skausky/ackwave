@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>ackwave</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M3 20c4 0 4-8 8-8s4 8 8 8 4-12 10-12' fill='none' stroke='%235fd4d0' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
@@ -22,94 +22,280 @@
   <div class="top-right">
     <span id="link" class="pill" title="Link that decides motion"><i></i><b>link</b><span></span></span>
     <span id="net" class="pill net" title="Network the board watches"></span>
-    <nav class="actions">
-      <button id="btn-cal" title="Measure the quiet level again (step away for 5 s)">Recalibrate</button>
-      <button id="btn-net" title="Choose which router to watch">Network</button>
-      <button id="btn-dev" title="Devices to poke as extra links">Devices</button>
-      <button id="btn-set" class="icon" title="Settings" aria-label="Settings">⚙</button>
-      <button id="btn-help" class="icon" title="Help" aria-label="Help">?</button>
-    </nav>
+    <button id="btn-help" class="icon" title="Help (?)" aria-label="Help">?</button>
   </div>
 </header>
 
+<nav class="nav" id="nav" aria-label="Pages">
+  <a href="#/home" data-route="home"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg><span>Home</span></a>
+  <a href="#/graphs" data-route="graphs"><svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 4 4-7 5 6"/><path d="M3 21h18"/></svg><span>Graphs</span></a>
+  <a href="#/stats" data-route="stats"><svg viewBox="0 0 24 24"><path d="M5 21V11M10 21V5M15 21v-7M20 21V9"/></svg><span>Stats</span></a>
+  <a href="#/links" data-route="links"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M7.3 11l9.4-4M7.3 13l9.4 4"/></svg><span>Links</span></a>
+  <a href="#/debug" data-route="debug"><svg viewBox="0 0 24 24"><path d="M8 6l-5 6 5 6M16 6l5 6-5 6M14 4l-4 16"/></svg><span>Debug</span></a>
+  <a href="#/train" data-route="train"><svg viewBox="0 0 24 24"><path d="M7 11V5a2 2 0 0 1 4 0v5M11 10V4a2 2 0 0 1 4 0v6M15 10V6a2 2 0 0 1 4 0v8a7 7 0 0 1-7 7h-1a7 7 0 0 1-6-3.5L3 13a2 2 0 0 1 3.4-2L7 12"/></svg><span>Train</span></a>
+  <a href="#/ai" data-route="ai"><svg viewBox="0 0 24 24"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/><path d="M19 15l1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1z"/></svg><span>AI</span></a>
+  <a href="#/settings" data-route="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg><span>Settings</span></a>
+</nav>
+
 <main>
-  <section class="tiles">
-    <article class="card tile" id="tile-breathing">
-      <h3>Breathing <span class="which-tile"></span></h3><div class="value">…</div><div class="detail muted"></div>
-    </article>
-    <article class="card tile" id="tile-doppler">
-      <h3>Doppler <span class="which-tile"></span></h3><div class="value">…</div><div class="detail muted"></div>
-    </article>
-    <article class="card tile" id="tile-quiet">
-      <h3>Quiet level</h3><div class="value">…</div><div class="detail muted"></div>
-    </article>
-    <article class="card recent">
-      <h3>Recent motion</h3>
-      <ol id="recent"><li class="muted">none yet</li></ol>
-    </article>
-  </section>
-
-  <section class="card chart-card">
-    <div class="card-head">
-      <h2>Motion score <span class="muted small">× quiet level</span> <span id="score-state" class="chip warn" hidden></span></h2>
-      <div class="tools">
-        <div class="seg" id="win">
-          <button data-w="30" class="on">30 s</button><button data-w="120">2 min</button><button data-w="600">10 min</button>
+  <!-- ======================= HOME ======================= -->
+  <section class="page" data-page="home" hidden>
+    <div class="home-grid">
+      <article class="card hero" id="hero">
+        <div class="hero-top"><span class="state-dot" id="home-dot"></span><span class="hero-word" id="home-word">WAITING</span></div>
+        <div class="hero-head" id="home-head">waiting for data…</div>
+        <div class="hero-sub" id="home-since"></div>
+        <div class="meter" id="meter" title="How close the room is to the motion threshold right now">
+          <div class="meter-label"><span>Activity now</span><b id="meter-word">–</b></div>
+          <div class="meter-track"><div class="meter-fill" id="meter-fill"></div><div class="meter-mark"></div></div>
+          <div class="meter-scale muted"><span>quiet</span><span class="mark-label">motion threshold</span><span>2×</span></div>
+          <div class="meter-val muted" id="meter-val"></div>
         </div>
-        <button id="btn-pause" class="ghost">Pause</button>
+        <div class="stats3">
+          <div class="stat"><b id="home-n">–</b><span>motion periods today</span></div>
+          <div class="stat"><b id="home-min">–</b><span>minutes of motion</span></div>
+          <div class="stat"><b id="home-blips">–</b><span>brief blips</span></div>
+        </div>
+        <div class="hero-row bottom">
+          <span class="health" id="home-link" title="Link health"><i></i><span></span></span>
+          <button id="btn-cal" class="primary" title="Measure the quiet level again (step away for 5 s)">Recalibrate</button>
+        </div>
+        <p class="hero-extra" id="home-gesture" hidden></p>
+        <p class="hero-extra" id="home-ai" hidden></p>
+      </article>
+      <article class="card chart-card live-card">
+        <div class="card-head"><h2>Live signal <span class="muted small">× quiet level · <span id="home-live-win">last 30 s</span></span></h2><span class="live-tag"><i></i>live</span></div>
+        <p class="cap">How much the Wi-Fi signal between the board and the router is changing; 1 = a quiet room. Motion starts when a coloured line crosses the red dotted line (×2.8), or the white one crosses its own (×1.4).</p>
+        <div class="chart" id="home-live"><canvas></canvas><div class="overlay" id="home-live-msg"></div></div>
+      </article>
+    </div>
+    <div class="row2">
+      <article class="card recent">
+        <div class="card-head"><h2>Recent motion</h2><span class="muted small">newest first</span></div>
+        <ol id="recent"><li class="muted">none yet</li></ol>
+      </article>
+      <article class="card chart-card">
+        <div class="card-head"><h2>This session</h2><div class="chips" id="home-counts"></div></div>
+        <p class="cap">Red = motion, orange ticks = brief blips (often noise), grey = calibrating.</p>
+        <div class="chart strip" id="home-tl"><canvas></canvas></div>
+      </article>
+    </div>
+  </section>
+
+  <!-- ======================= GRAPHS ======================= -->
+  <section class="page" data-page="graphs" hidden>
+    <section class="tiles">
+      <article class="card tile" id="tile-breathing">
+        <h3>Breathing <span class="which-tile"></span></h3><div class="value">…</div><div class="detail muted"></div>
+      </article>
+      <article class="card tile" id="tile-doppler">
+        <h3>Doppler <span class="which-tile"></span></h3><div class="value">…</div><div class="detail muted"></div>
+      </article>
+      <article class="card tile" id="tile-quiet">
+        <h3>Quiet level</h3><div class="value">…</div><div class="detail muted"></div>
+      </article>
+    </section>
+
+    <section class="card chart-card">
+      <div class="card-head">
+        <h2>Motion score <span class="muted small">× quiet level (1 = quiet room)</span> <span id="score-state" class="chip warn" hidden></span></h2>
+        <div class="tools">
+          <div class="seg" id="win">
+            <button data-w="30" class="on">30 s</button><button data-w="120">2 min</button><button data-w="600">10 min</button>
+          </div>
+          <button id="btn-pause" class="ghost">Pause</button>
+        </div>
       </div>
-    </div>
-    <div class="chart" id="score"><canvas></canvas><div class="overlay" id="score-msg"></div></div>
-    <div class="legend" id="score-legend"></div>
+      <p class="cap">How much each link's signal is changing. Thin lines: the fast window (0.5 s), one per link; motion starts when one crosses ×2.8 while the slow window is over ×1.2. Thick white line: the slow window (4 s); motion starts when it crosses ×1.4. Red shading: motion. Ticks at the bottom: the board's own verdict.</p>
+      <div class="chart" id="score"><canvas></canvas><div class="overlay" id="score-msg"></div></div>
+      <div class="legend" id="score-legend"></div>
+    </section>
+
+    <section class="row2">
+      <article class="card chart-card">
+        <div class="card-head"><h2>Doppler <span class="muted small"><span class="which">router</span> ACKs · Hz · colour = dB over the quiet room</span></h2></div>
+        <p class="cap">How fast things move. Walking lights up the bottom band for as long as it lasts, with streaks reaching higher the faster you move. A router scan is a short blob under 3 Hz (dotted line).</p>
+        <div class="chart short" id="doppler"><canvas></canvas><div class="overlay" id="doppler-msg"></div></div>
+      </article>
+      <article class="card chart-card">
+        <div class="card-head"><h2>Breathing rate <span class="muted small"><span class="which">router</span> link · breaths a minute</span></h2></div>
+        <p class="cap">A rhythm found in the last 40 s. Green band: a typical resting rate (12–20). Filled dot = clear, ring = possible. Needs someone still, close to the link.</p>
+        <div class="chart short" id="breath"><canvas></canvas></div>
+      </article>
+    </section>
+
+    <section class="card chart-card">
+      <div class="card-head">
+        <h2>Session <span class="muted small">× quiet level · since the dashboard started</span></h2>
+        <div class="chips" id="counts"></div>
+      </div>
+      <p class="cap">The whole session at a glance: each second's highest fast (blue) and slow (white) score, with their thresholds dotted.</p>
+      <div class="chart short" id="timeline"><canvas></canvas></div>
+      <div class="legend static">
+        <span><i style="background:var(--motion)"></i>motion</span>
+        <span><i style="background:var(--brief)"></i>brief blip</span>
+        <span><i style="background:var(--scan)"></i>router scan (ignored)</span>
+        <span><i style="background:var(--cal)"></i>calibrating</span>
+        <span><i class="line" style="background:var(--long)"></i>long window</span>
+        <span><i class="line" style="background:var(--blue)"></i>short window</span>
+      </div>
+    </section>
   </section>
 
-  <section class="card" id="links-card" hidden>
-    <div class="card-head">
-      <h2>Links <span class="chip warn">experimental</span></h2>
-      <span class="hint" title="Each link is judged on its own, against its own quiet level. Display only: the board's verdict comes from the router link. A link with too few ACKs a second gets no verdict. Click a link to show its breathing and Doppler below.">ⓘ</span>
-    </div>
-    <div class="lanes" id="lanes"><canvas></canvas></div>
-    <div class="legend static lanes-legend">
-      <span><i style="background:var(--motion)"></i>the board's verdict</span>
-      <span><i style="background:var(--brief)"></i>motion on that link (display only)</span>
-      <span><i class="dash" style="color:var(--muted)"></i>too weak to judge</span>
-    </div>
-    <div class="links" id="links"></div>
+  <!-- ======================= STATS ======================= -->
+  <section class="page" data-page="stats" hidden>
+    <section class="card">
+      <div class="card-head"><h2>Activity by day and hour <span class="muted small">minutes of motion in each hour</span></h2>
+        <span id="stats-state" class="muted small"></span></div>
+      <p class="cap">One row per day, one square per hour; darker red = more motion (the board's verdict, from every recorded session). Striped = nothing was recording.</p>
+      <div class="chart heat" id="heat"><canvas></canvas><div class="overlay" id="heat-msg"></div></div>
+      <div class="legend static" id="heat-legend"></div>
+    </section>
+    <section class="row2">
+      <article class="card chart-card">
+        <div class="card-head"><h2>By hour of day <span class="muted small">min of motion per hour recorded</span></h2></div>
+        <p class="cap">When the room is busiest, across all sessions. Hours never recorded are striped.</p>
+        <div class="chart short" id="hours"><canvas></canvas></div>
+      </article>
+      <article class="card chart-card">
+        <div class="card-head"><h2>How long motion lasts <span class="muted small">number of periods</span></h2></div>
+        <p class="cap">Most real movement lasts 5–60 s. Under 2 s is a brief blip, often noise.</p>
+        <div class="chart short" id="durs"><canvas></canvas></div>
+      </article>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>Sessions</h2></div>
+      <div class="table-wrap"><table><thead><tr><th>Started</th><th>Length</th><th>Motion periods</th><th>Motion</th><th>Blips</th><th>File</th></tr></thead><tbody id="sess-list"></tbody></table></div>
+    </section>
   </section>
 
-  <section class="row2">
-    <article class="card chart-card">
-      <div class="card-head"><h2>Doppler <span class="muted small"><span class="which">router</span> ACKs · dB over the quiet room</span></h2>
-        <span class="hint" title="Movement shows as a lasting low band with streaks upward. A router scan is a short blob under 3 Hz.">ⓘ</span></div>
-      <div class="chart short" id="doppler"><canvas></canvas><div class="overlay" id="doppler-msg"></div></div>
-    </article>
-    <article class="card chart-card">
-      <div class="card-head"><h2>Breathing rate <span class="muted small"><span class="which">router</span> link · per minute · last 40 s each</span></h2>
-        <span class="hint" title="Needs someone still close to a link (board to router or to a poked device). Filled = clear, ring = possible.">ⓘ</span></div>
-      <div class="chart short" id="breath"><canvas></canvas></div>
-    </article>
+  <!-- ======================= LINKS ======================= -->
+  <section class="page" data-page="links" hidden>
+    <section class="card" id="links-card">
+      <div class="card-head">
+        <h2>Per-link analysis <span class="chip warn">experimental</span></h2>
+        <label class="switch inline"><input type="checkbox" id="set-per-link"><span class="track"><span class="knob"></span></span><span class="small">on</span></label>
+      </div>
+      <p class="muted small" id="links-off">Off. Switch it on to judge every link (router and each poked device) on its own, against its own quiet level. Display only: the board's verdict still comes from the router link.</p>
+      <p class="cap" id="lanes-cap" hidden>Each lane is one link, judged on its own against its own quiet level. Top lane: the board's verdict. If only a device lane lights up, the movement was near that device rather than between the board and the router.</p>
+      <div class="lanes" id="lanes" hidden><canvas></canvas></div>
+      <div class="legend static lanes-legend" id="lanes-legend" hidden>
+        <span><i style="background:var(--motion)"></i>the board's verdict</span>
+        <span><i style="background:var(--brief)"></i>motion on that link (display only)</span>
+        <span><i class="dash" style="color:var(--muted)"></i>too weak to judge</span>
+      </div>
+      <div class="links" id="links"></div>
+    </section>
+    <section class="row2">
+      <article class="card">
+        <div class="card-head"><h2>Packets by link</h2></div>
+        <div class="table-wrap"><table><thead><tr><th>Stream</th><th>Rate</th><th>Signal</th></tr></thead><tbody id="rates"></tbody></table></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h2>Poke gating</h2>
+          <span class="hint" title="The board stops spending pokes on a link that doesn't answer (silent), answers too rarely (weak), or is far weaker than the best access point (far).">ⓘ</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Node</th><th>Signal</th><th>Answered</th><th>Pokes</th><th>State</th></tr></thead><tbody id="gates"></tbody></table></div>
+      </article>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>Devices on your network</h2>
+        <div class="dlg-tools"><div class="seg" id="dev-mode"></div><span id="dev-state" class="muted"></span></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Poke</th><th>Device</th><th>Signal</th><th>Frames/min</th><th>Heard</th><th>Looks</th><th>Link</th></tr></thead><tbody id="dev-list"></tbody></table></div>
+      <p class="muted small">Only devices talking to your own network are listed (2.4 GHz only). Each poked device adds a sensing link and shares the device budget (about 93 answers a second in all), so two devices answer about 47/s each and three about 31/s. Auto pokes up to 4 stationary ones; tick a device to choose yourself.</p>
+    </section>
   </section>
 
-  <section class="card chart-card">
-    <div class="card-head">
-      <h2>Session</h2>
-      <div class="chips" id="counts"></div>
-    </div>
-    <div class="chart short" id="timeline"><canvas></canvas></div>
-    <div class="legend static">
-      <span><i style="background:var(--motion)"></i>motion</span>
-      <span><i style="background:var(--brief)"></i>brief blip</span>
-      <span><i style="background:var(--scan)"></i>router scan (ignored)</span>
-      <span><i style="background:var(--cal)"></i>calibrating</span>
-      <span><i class="line" style="background:var(--long)"></i>long window</span>
-      <span><i class="line" style="background:var(--blue)"></i>short window</span>
-    </div>
+  <!-- ======================= DEBUG ======================= -->
+  <section class="page" data-page="debug" hidden>
+    <section class="card chart-card">
+      <div class="card-head"><h2>Router ACKs: shape jump <span class="muted small">mean change per subcarrier (0–1)</span></h2></div>
+      <p class="cap">How far each packet's shape is from the running reference. Over the glitch limit (red) a packet is ignored unless the new shape lasts 5 s; near a router scan the stricter limit (orange) applies.</p>
+      <div class="chart short" id="jump"><canvas></canvas><div class="overlay" id="jump-msg"></div></div>
+    </section>
+    <section class="card chart-card">
+      <div class="card-head"><h2>Router ACKs: gap before each packet <span class="muted small">milliseconds</span></h2></div>
+      <p class="cap">Time since the previous ACK on that link. Over 100 ms (and 4× the usual) marks a router scan. Gaps of 60 ms or more also make brief blips much likelier.</p>
+      <div class="chart short" id="gap"><canvas></canvas><div class="overlay" id="gap-msg"></div></div>
+    </section>
+    <section class="row2">
+      <article class="card">
+        <div class="card-head"><h2>Calibration history</h2></div>
+        <div class="table-wrap short"><table><thead><tr><th>Time</th><th>Phase</th><th>Why</th><th>Quiet level</th></tr></thead><tbody id="calibs"></tbody></table></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h2>Commands</h2></div>
+        <div class="table-wrap short"><table><thead><tr><th>Time</th><th>Sent to the board</th></tr></thead><tbody id="sent"></tbody></table></div>
+        <h3 class="sub">Refused by the board</h3>
+        <div class="table-wrap short"><table><thead><tr><th>Time</th><th>Reply</th><th>Last command sent</th></tr></thead><tbody id="refused"></tbody></table></div>
+      </article>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>Board counters</h2></div>
+      <pre id="raw-text" class="mono">waiting…</pre>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>Board lines <span class="muted small">newest last, CSI left out</span></h2>
+        <div class="seg" id="tail-filter"><button data-f="" class="on">All</button><button data-f="GATE,DEV,POKING,UNPOKED,LEARNED">GATE / DEV</button><button data-f="CALIB,STATE">CALIB / STATE</button><button data-f="REFUSED,BUTTON,NET">Other</button></div></div>
+      <pre id="tail" class="mono tail">waiting…</pre>
+    </section>
   </section>
 
-  <details class="card raw" id="raw">
-    <summary>Board details</summary>
-    <pre id="raw-text">waiting…</pre>
-  </details>
+  <!-- ======================= TRAIN / AI ======================= -->
+  <section class="page" data-page="train" hidden>
+    <section class="card empty">
+      <h2>Training</h2>
+      <p class="muted">Not set up yet. This page will record a few examples of movements (wave, walk across the room, sit down…) so new motion can get a label like "probably: wave". It never changes the board's MOTION / STILL verdict.</p>
+    </section>
+  </section>
+  <section class="page" data-page="ai" hidden>
+    <section class="card empty">
+      <h2>AI summaries</h2>
+      <p class="muted">Not set up yet. A local model could write a short plain-English summary of the day's activity. It would never decide motion.</p>
+    </section>
+  </section>
+
+  <!-- ======================= SETTINGS ======================= -->
+  <section class="page" data-page="settings" hidden>
+    <section class="card">
+      <div class="card-head"><h2>Network</h2>
+        <div class="dlg-tools"><button type="button" id="net-scan">Scan</button><button type="button" id="net-default" class="ghost">Back to default</button></div></div>
+      <p id="net-now" class="now"></p>
+      <p id="net-state" class="muted small"></p>
+      <div class="table-wrap"><table><thead><tr><th>Network</th><th>Ch</th><th>Signal</th><th></th></tr></thead><tbody id="net-list"></tbody></table></div>
+      <p class="muted small">Pick your own router. The board only listens and never joins, so no password is needed. It is 2.4 GHz only. The choice is saved on the board, which restarts and recalibrates (about 15 s).</p>
+    </section>
+    <section class="row2">
+      <article class="card">
+        <div class="card-head"><h2>Detection</h2><span id="sens-state" class="muted small"></span></div>
+        <div class="seg" id="sens-level">
+          <button type="button" data-x="140">High · ×1.4</button><button type="button" data-x="160">Medium · ×1.6</button><button type="button" data-x="180">Low · ×1.8</button>
+        </div>
+        <div class="dlg-tools gap"><button type="button" id="sens-default">Use the firmware's</button></div>
+        <p class="muted small">Sensitivity is the one threshold the board lets you change (the slow, 4 s window). The rest are shown for reference; changing them needs new firmware.</p>
+        <table class="kv"><tbody id="thresholds"></tbody></table>
+      </article>
+      <article class="card snd">
+        <div class="snd-head"><h2>Buzzer</h2><span id="snd-state" class="muted small"></span></div>
+        <div class="seg" id="snd-mode">
+          <button type="button" data-m="off">Off</button><button type="button" data-m="beep">Beeps</button><button type="button" data-m="alarm">Alarm</button>
+        </div>
+        <label class="slider"><span>Volume</span><input type="range" id="snd-vol" min="1" max="50" step="1"><output id="snd-vol-out"></output></label>
+        <label class="slider"><span>Pitch</span><input type="range" id="snd-hz" min="500" max="6000" step="100"><output id="snd-hz-out"></output></label>
+        <div class="dlg-tools"><button type="button" id="snd-test">Test sounds</button><button type="button" id="snd-default">Use the firmware's settings</button></div>
+        <p class="muted small">Beeps: "di-di-DIIING" once motion has lasted 2 s (at most every 30 s), a sliding "dooooo" when it ends. Alarm: a siren while motion lasts (always loud). While this dashboard runs it keeps the board at these settings, even after a restart.</p>
+      </article>
+    </section>
+    <section class="row2">
+      <article class="card empty">
+        <h2>Training</h2>
+        <p class="muted small">Gesture labels are not set up yet.</p>
+      </article>
+      <article class="card empty">
+        <h2>AI</h2>
+        <p class="muted small">AI summaries are not set up yet.</p>
+      </article>
+    </section>
+  </section>
 </main>
 
 <footer class="foot muted">
@@ -118,70 +304,18 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<dialog id="dlg-net">
-  <form method="dialog" class="dlg">
-    <header><h2>Network to watch</h2><button class="icon" value="close" aria-label="Close">✕</button></header>
-    <p id="net-now" class="now"></p>
-    <div class="dlg-tools"><button type="button" id="net-scan">Scan</button><button type="button" id="net-default" class="ghost">Back to default</button><span id="net-state" class="muted"></span></div>
-    <div class="table-wrap"><table><thead><tr><th>Network</th><th>Ch</th><th>Signal</th><th></th></tr></thead><tbody id="net-list"></tbody></table></div>
-    <p class="muted small">Pick your own router. The board only listens and never joins, so no password is needed. It is 2.4 GHz only. Choosing a name uses every access point with that name on the board's channel (mesh nodes on other channels need a second board). The choice is saved on the board, which restarts and recalibrates (about 15 s).</p>
-  </form>
-</dialog>
-
-<dialog id="dlg-dev">
-  <form method="dialog" class="dlg wide">
-    <header><h2>Devices on your network</h2><button class="icon" value="close" aria-label="Close">✕</button></header>
-    <div class="dlg-tools"><div class="seg" id="dev-mode"></div><span id="dev-state" class="muted"></span></div>
-    <div class="table-wrap"><table><thead><tr><th>Poke</th><th>Device</th><th>Signal</th><th>Frames/min</th><th>Heard</th><th>Looks</th><th>Link</th></tr></thead><tbody id="dev-list"></tbody></table></div>
-    <p class="muted small">Only devices talking to your own network are listed (2.4 GHz only). Each poked device adds a sensing link. Auto pokes up to 4 stationary ones; tick a device to choose yourself.</p>
-  </form>
-</dialog>
-
-<dialog id="dlg-set">
-  <form method="dialog" class="dlg">
-    <header><h2>Settings</h2><button class="icon" value="close" aria-label="Close">✕</button></header>
-    <label class="switch">
-      <input type="checkbox" id="set-per-link">
-      <span class="track"><span class="knob"></span></span>
-      <span><b>Per-link analysis</b> <span class="chip warn">experimental</span><br>
-      <span class="muted small">Analyse every link separately (router, and each device being poked): its own activity level, breathing and Doppler, side by side. Display only: the board's motion verdict still comes from the router link. Saved for next time.</span></span>
-    </label>
-    <hr>
-    <section class="snd" id="sens">
-      <div class="snd-head"><b>Sensitivity</b><span id="sens-state" class="muted small"></span></div>
-      <div class="seg" id="sens-level">
-        <button type="button" data-x="140">High · ×1.4</button><button type="button" data-x="160">Medium · ×1.6</button><button type="button" data-x="180">Low · ×1.8</button>
-      </div>
-      <p class="muted small">How far the slow (4 s) score must rise above the quiet level to count as motion. Lower sensitivity ignores faint, steady changes (someone asleep or breathing near the link, a curtain in a draft); clear movement is still caught by the fast (0.5 s) score. Kept on the board while this dashboard runs, like the buzzer.</p>
-      <div class="dlg-tools"><button type="button" id="sens-default">Use the firmware's</button></div>
-    </section>
-    <hr>
-    <section class="snd">
-      <div class="snd-head"><b>Buzzer</b><span id="snd-state" class="muted small"></span></div>
-      <div class="seg" id="snd-mode">
-        <button type="button" data-m="off">Off</button><button type="button" data-m="beep">Beeps</button><button type="button" data-m="alarm">Alarm</button>
-      </div>
-      <label class="slider"><span>Volume</span><input type="range" id="snd-vol" min="1" max="50" step="1"><output id="snd-vol-out"></output></label>
-      <label class="slider"><span>Pitch</span><input type="range" id="snd-hz" min="500" max="6000" step="100"><output id="snd-hz-out"></output></label>
-      <div class="dlg-tools"><button type="button" id="snd-test">Test sound</button><button type="button" id="snd-default">Use the firmware's settings</button></div>
-      <p class="muted small">Beeps: a rising chime once motion has lasted 2 s (at most every 30 s), a falling one when it ends. Alarm: a siren for as long as motion lasts (always loud). Off: no automatic sounds. While this dashboard runs it keeps the board at these settings, even after a restart. The board itself doesn't save them: on its own (a power bank) it uses the firmware's settings.</p>
-    </section>
-  </form>
-</dialog>
-
 <dialog id="dlg-help">
   <form method="dialog" class="dlg">
     <header><h2>Help</h2><button class="icon" value="close" aria-label="Close">✕</button></header>
     <dl class="keys">
+      <dt>h g s l d</dt><dd>Home, Graphs, Stats, Links, Debug</dd>
       <dt>space</dt><dd>pause / live (logging never stops)</dd>
       <dt>1 2 3</dt><dd>show 30 s / 2 min / 10 min</dd>
       <dt>c</dt><dd>recalibrate (step away for 5 s)</dd>
-      <dt>n</dt><dd>choose the network</dd>
-      <dt>v</dt><dd>devices</dd>
       <dt>?</dt><dd>this help</dd>
     </dl>
     <p class="muted small">Move the mouse (or a finger) over any chart to read the time and values there.</p>
-    <p class="muted small">The motion score is each link's movement energy as a multiple of the room's quiet level. Motion starts when the short (0.5 s) score crosses its threshold while the long (4 s) one is up too, or when the long one crosses its own. Shaded red: motion. Grey bands: router background scans, which the board ignores. Ticks along the bottom: the board's own verdict changing.</p>
+    <p class="muted small">The motion score is each link's movement energy as a multiple of the room's quiet level. Motion starts when the short (0.5 s) score crosses its threshold while the long (4 s) one is up too, or when the long one crosses its own. The verdict, the counts and "last motion" are the board's own.</p>
   </form>
 </dialog>
 

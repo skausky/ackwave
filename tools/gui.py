@@ -265,6 +265,9 @@ class State:
         self.arrivals = defaultdict(deque)        # (src, kind) -> deque[t] (rates)
         self.rssi = {}
         self.wf = defaultdict(deque)              # (src, kind) -> deque[(t, vec)]
+        # Debug trace of the router ACK streams, read from the detector before
+        # each packet (display only): (t, node, shape jump, gap since last ACK ms)
+        self.trace = deque()
         self.dop = Doppler(keep_s=self.window_s)  # router-ACK Doppler spectra
         self.br = Breathing()                     # router-ACK breathing rate
         self.br_hist = deque()                    # (t, reading) for the breathing strip
@@ -351,6 +354,12 @@ class State:
             self.channel = (d['ch'], '')
         self.arrivals[key].append(t)
         self.rssi[key] = d['rssi']
+        if d['kind'] == 1 and d['src'] < MAX_APS:
+            st = self.det.streams.get(key)
+            a = d['amp'][VALID]
+            if st is not None and st.n > 0 and st.ref is not None and a.mean() > 0:
+                self.trace.append((t, d['src'], float(np.abs(a / a.mean() - st.ref).mean()),
+                                   (d['ts'] - st.t_heard) / 1e3))
         s = self.det.on_csi(d)
         self.dop.feed(d, t)
         r = self.br.feed(d, t)
@@ -531,6 +540,8 @@ class State:
         for dq in self.wf.values():
             while dq and dq[0][0] < self.now - self.waterfall_s:
                 dq.popleft()
+        while self.trace and self.trace[0][0] < t0:
+            self.trace.popleft()
         while self.board_states and self.board_states[0][0] < t0:
             self.board_states.popleft()
         self.motion_spans = [s for s in self.motion_spans if s[1] is None or s[1] >= t0]
@@ -1278,6 +1289,10 @@ class NetworkPanel:
 def reader(lines, q, log=None):
     try:
         for line in lines:
+            if not line:                         # a read timed out: no data this second
+                if log:
+                    log.idle()                   # says so after a while (data stopped)
+                continue
             if log:
                 try:
                     log.feed(line)               # in this thread: never waits for drawing

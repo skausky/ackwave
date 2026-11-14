@@ -1,28 +1,81 @@
 'use strict';
-// ackwave dashboard: live data from /events (Server-Sent Events), commands to /cmd.
+// ackwave dashboard: one page with hash routes (#/home, #/graphs, …) sharing a
+// single live connection: /events (Server-Sent Events: fast, slow and debug
+// payloads), commands to /cmd, history from /api/stats. Switching pages only
+// shows and hides sections, so no data is dropped.
 // Charts are drawn on canvas by hand: labels live in the margins, never on the data.
+// Everything from the board or the network (names, networks, labels) is put on
+// the page as text (textContent), never as HTML.
 
 const $ = (s) => document.querySelector(s);
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const C = {
   grid: css('--grid'), line: css('--line'), muted: css('--muted'), fg: css('--fg'),
   motion: css('--motion'), still: css('--still'), brief: css('--brief'), scan: css('--scan'),
-  cal: css('--cal'), long: css('--long'), blue: css('--blue'), card: css('--card'),
+  cal: css('--cal'), long: css('--long'), blue: css('--blue'), card: css('--card'), card2: css('--card2'),
 };
 const FONT = '11px ui-sans-serif, system-ui, sans-serif';
+const ROUTES = ['home', 'graphs', 'stats', 'links', 'debug', 'train', 'ai', 'settings'];
 
 let win = 30, paused = false, es = null;
 let link = null;                         // per-link focus for breathing / Doppler (null = router)
-let fast = null, slow = null;            // latest payloads
-let netDlgShown = false;
+let fast = null, slow = null, dbg = null, stats = null;   // latest payloads
+let page = 'home';
+// Charts glide between updates on a display clock that follows the newest data
+// time smoothly: it never runs backwards, never passes the newest data, and
+// stands still while the server's window does (the first seconds, before the
+// window has filled). A big jump (board restart, clock correction) resets it.
+const LAG = 0.35;                         // s behind the newest data: the right edge stays filled
+const sync = { off: null, goal: 0, last: -Infinity, at: 0 };
+function syncClock() {
+  const now = performance.now() / 1000, goal = fast.window[1] - now + LAG;
+  if (sync.off === null || Math.abs(goal - sync.off) > 2) {   // first data, or a jump: start over
+    Object.assign(sync, { off: goal, goal, last: -Infinity, at: now });
+  } else sync.goal = goal;
+}
+function liveWindow() {
+  const [w0, w1] = fast.window;
+  if (fast.filling) sync.off = null;                   // standing still: start over once it moves
+  if (paused || sync.off === null) return [w0, w1];
+  const now = performance.now() / 1000;
+  sync.off += (sync.goal - sync.off) * Math.min(1, (now - sync.at) / 2);   // corrections spread over ~2 s
+  sync.at = now;
+  let t1 = Math.min(now + sync.off - LAG, w1 + 0.5);   // never far past the newest data
+  t1 = Math.max(t1, sync.last);                        // never backwards
+  sync.last = t1;
+  return [t1 - (w1 - w0), t1];
+}
+let netScanned = false, statsTimer = null, tailFilter = '';
+
+// ---------------------------------------------------------------- small DOM helpers
+function el(tag, props = {}, ...kids) {
+  const e = Object.assign(document.createElement(tag), props);
+  for (const k of kids) if (k !== null && k !== undefined) e.append(k);
+  return e;
+}
+// Fill a <tbody> with rows of plain-text cells
+function fillRows(tbody, rows, empty) {
+  tbody.replaceChildren();
+  if (!rows.length && empty) {
+    const td = el('td', { textContent: empty, className: 'muted' });
+    td.colSpan = tbody.closest('table').querySelectorAll('th').length || 1;
+    tbody.append(el('tr', {}, td));
+  }
+  for (const r of rows) {
+    const tr = el('tr', r.cls ? { className: r.cls } : {});
+    for (const c of r.cells || r) tr.append(c instanceof Node ? el('td', {}, c) : el('td', { textContent: String(c) }));
+    tbody.append(tr);
+  }
+}
 
 // ---------------------------------------------------------------- data link
 function connect() {
   if (es) es.close();
   es = new EventSource(`/events?win=${win}${link !== null ? `&link=${link}` : ''}`);
   setLive('connecting');
-  es.addEventListener('fast', (e) => { fast = JSON.parse(e.data); setLive(paused ? 'paused' : 'live'); if (!paused) renderFast(); });
+  es.addEventListener('fast', (e) => { fast = JSON.parse(e.data); syncClock(); setLive(paused ? 'paused' : 'live'); renderFast(); });
   es.addEventListener('slow', (e) => { slow = JSON.parse(e.data); renderSlow(); });
+  es.addEventListener('debug', (e) => { dbg = JSON.parse(e.data); if (page === 'debug' && !paused) renderDebug(); });
   es.onerror = () => {
     setLive('offline');
     setBadge({ word: 'OFFLINE', color: C.motion, sub: 'lost the dashboard server: retrying…' });
@@ -44,10 +97,22 @@ async function cmd(body) {
   }
 }
 
+async function loadStats() {
+  try {
+    const r = await fetch('/api/stats', { headers: { 'X-Ackwave': '1' } });
+    if (!r.ok) throw new Error(r.status);
+    stats = await r.json();
+    $('#stats-state').textContent = `${stats.n_sessions} sessions · updated ${clock(Date.now() / 1000, true)}`;
+  } catch (e) {
+    $('#stats-state').textContent = 'could not load the sessions';
+  }
+  if (page === 'stats') renderStats();
+}
+
 function setLive(state) {
-  const el = $('#live');
-  el.className = 'live ' + ({ live: 'on', paused: 'paused', offline: 'off' }[state] || '');
-  el.querySelector('span').textContent = state;
+  const e = $('#live');
+  e.className = 'live ' + ({ live: 'on', paused: 'paused', offline: 'off' }[state] || '');
+  e.querySelector('span').textContent = state;
 }
 
 let toastTimer = null;
@@ -60,52 +125,103 @@ function toast(text, err = false) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 4500);
 }
 
-// ---------------------------------------------------------------- header
+// ---------------------------------------------------------------- header + home
 function setBadge(b) {
-  const el = $('#badge');
-  el.textContent = b.word;
-  el.style.color = b.color;
-  el.classList.toggle('long', b.word.length > 8);
-  $('#badge-sub').textContent = b.sub || '';
-  document.title = `${b.word} · ackwave`;
+  const e = $('#badge');
+  e.textContent = b.word;
+  e.style.color = b.color;
+  e.classList.toggle('long', b.word.length > 8);
+  $('#badge-sub').textContent = [b.head, b.sub].filter(Boolean).join(' · ');
+  document.title = `${b.head || b.word} · ackwave`;
+  const w = $('#home-word');
+  w.textContent = b.word;
+  w.style.color = b.color;
+  w.classList.toggle('long', b.word.length > 8);
+  $('#home-dot').style.setProperty('--c', b.color);
+  $('#hero').dataset.state = b.word.toLowerCase();
+  $('#home-head').textContent = b.head || b.sub || '';
+  $('#home-since').textContent = b.head ? b.sub || '' : '';
+}
+
+// Activity now, against the motion threshold: the bar's middle is the threshold
+function renderMeter(a) {
+  const fill = $('#meter-fill');
+  $('#meter').classList.toggle('off', !a);
+  if (!a) { fill.style.width = '0%'; $('#meter-word').textContent = 'waiting for a quiet level'; $('#meter-val').textContent = ''; return; }
+  fill.style.width = `${Math.min(a.pct, 200) / 2}%`;
+  fill.style.background = a.pct >= 100 ? C.motion : a.pct >= 50 ? C.brief : C.still;
+  $('#meter-word').textContent = a.word;
+  $('#meter-val').textContent = `${a.pct}% of the way to the threshold, on ${a.by}`;
+  $('#meter').title = `fast (0.5 s) window ×${a.short.toFixed(1)} of the quiet level (threshold ×${a.on_s}); ` +
+    `slow (4 s) window ×${a.long.toFixed(1)} (threshold ×${a.on_l})`;
 }
 
 function renderHeader(h) {
   setBadge(h.badge);
-  const link = $('#link');
-  link.querySelector('i').style.background = h.link.color;
-  link.querySelector('b').textContent = `link ${h.link.word}`;
-  link.querySelector('span').textContent = h.link.detail;
+  renderMeter(h.activity);
+  const lk = $('#link');
+  lk.querySelector('i').style.background = h.link.color;
+  lk.querySelector('b').textContent = `link ${h.link.word}`;
+  lk.querySelector('span').textContent = h.link.detail;
+  const hl = $('#home-link');
+  hl.querySelector('i').style.background = h.link.color;
+  hl.querySelector('span').textContent = `${{ GOOD: 'Signal good', WEAK: 'Signal weak', POOR: 'Signal poor' }[h.link.word] || h.link.word} · ${h.link.detail}`;
   for (const [k, id] of [['breathing', '#tile-breathing'], ['doppler', '#tile-doppler'], ['quiet', '#tile-quiet']]) {
-    const t = h.tiles[k], el = $(id);
-    el.querySelector('.value').textContent = t.value;
-    el.querySelector('.value').style.color = t.color;
-    el.querySelector('.detail').textContent = t.detail;
+    const t = h.tiles[k], e = $(id);
+    e.querySelector('.value').textContent = t.value;
+    e.querySelector('.value').style.color = t.color;
+    e.querySelector('.detail').textContent = t.detail;
   }
-  const ol = $('#recent');
-  ol.replaceChildren();
-  if (!h.recent.length) {
-    const li = document.createElement('li'); li.className = 'muted'; li.textContent = 'none yet'; ol.append(li);
-  }
-  for (const r of h.recent) {
-    const li = document.createElement('li');
-    li.className = r.only ? 'only' : r.going ? 'going' : r.brief ? 'brief' : '';
-    if (r.only) li.title = "Seen by a device link only: the board's own verdict stayed still";
-    for (const [txt, cls] of [[r.at, ''], [r.dur, ''], [r.where || '', 'where'], [r.peak === null ? '' : `×${r.peak.toFixed(1)}`, 'peak']]) {
-      const s = document.createElement('span'); s.textContent = txt; if (cls) s.className = cls; li.append(s);
-    }
-    ol.append(li);
-  }
-  const counts = $('#counts');
-  counts.replaceChildren();
-  for (const [n, label] of [[h.counts.motion, 'motion'], [h.counts.brief, 'brief'], [h.counts.scans, 'scans ignored']]) {
-    const c = document.createElement('span'); c.className = 'chip';
-    const b = document.createElement('b'); b.textContent = n; c.append(b, ` ${label}`); counts.append(c);
+  renderRecent(h.recent);
+  for (const id of ['#counts', '#home-counts']) {
+    const counts = $(id);
+    counts.replaceChildren();
+    for (const [n, label] of [[h.counts.motion, 'motion'], [h.counts.brief, 'brief'], [h.counts.scans, 'scans ignored']])
+      counts.append(el('span', { className: 'chip' }, el('b', { textContent: n }), ` ${label}`));
   }
   $('#foot-board').textContent = `board says ${h.board}`;
   $('#foot-dev').textContent = h.devices;
   $('#foot-log').textContent = h.log ? `logging to ${h.log}` : '';
-  for (const id of ['#btn-cal', '#btn-net', '#btn-dev']) $(id).disabled = !h.board_connected;
+  for (const id of ['#btn-cal', '#net-scan', '#net-default']) $(id).disabled = !h.board_connected;
+}
+
+// Recent motion as short sentences: when, what, how long, where
+function renderRecent(rows) {
+  const ol = $('#recent');
+  ol.replaceChildren();
+  if (!rows.length) ol.append(el('li', { className: 'muted empty', textContent: 'No motion yet. Walk between the board and the router to see it appear here.' }));
+  for (const r of rows) {
+    const cls = r.only ? 'only' : r.going ? 'going' : r.brief ? 'brief' : '';
+    const li = el('li', { className: cls });
+    li.dataset.strength = r.strength || (r.brief ? 'blip' : '');
+    const ago = Math.max(0, (fast ? (fast.header.now || Date.now() / 1000) : Date.now() / 1000) - r.t);
+    const what = r.going ? `${r.what}, still going` : r.what;
+    const dur = r.going ? r.dur.replace('now ', '') : r.brief ? '' : r.dur;
+    li.append(el('span', { className: 'when', textContent: r.at.slice(0, 5) }),
+      el('span', { className: 'pip' }),
+      el('span', { className: 'what' }, el('b', { textContent: what }),
+        el('span', { className: 'muted', textContent: [dur, r.where && r.where !== 'router' ? r.where : ''].filter(Boolean).join(' · ') })),
+      el('span', { className: 'ago muted', textContent: r.going ? 'now' : `${fmtAgo(ago)} ago` }));
+    if (r.peak !== null) li.title = `peak ×${r.peak.toFixed(1)} of the quiet level (motion threshold ×2.8)`;
+    if (r.only) li.title = "Seen by a device link only: the board's own verdict stayed still";
+    ol.append(li);
+  }
+}
+function fmtAgo(s) {
+  s = Math.round(s);
+  return s < 60 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`;
+}
+
+function renderHome() {
+  const t = slow && slow.today;
+  $('#home-n').textContent = t ? t.periods : '–';
+  $('#home-min').textContent = t ? (t.motion_s / 60).toFixed(t.motion_s < 600 ? 1 : 0) : '–';
+  $('#home-blips').textContent = t ? t.blips : '–';
+  const g = slow && slow.gesture, a = slow && slow.ai;   // later features; hidden until enabled
+  $('#home-gesture').hidden = !g;
+  if (g) $('#home-gesture').textContent = g.text;
+  $('#home-ai').hidden = !a;
+  if (a) $('#home-ai').textContent = a.text;
 }
 
 // ---------------------------------------------------------------- canvas helpers
@@ -254,11 +370,11 @@ function niceTicks(max, n = 4) {
 }
 
 // ---------------------------------------------------------------- charts
-function drawScore() {
-  const { ctx, w, h } = canvasFor('#score');
-  const msg = $('#score-msg');
+function drawScore(id = '#score', compact = false) {
+  const { ctx, w, h } = canvasFor(id);
+  const msg = $(`${id}-msg`);
   if (!fast || !fast.score) { msg.textContent = 'waiting for data…'; return; }
-  const s = fast.score, [t0, t1] = fast.window;
+  const s = fast.score, [t0, t1] = liveWindow();
   let ymax = s.on_s * 1.6;
   for (const se of s.series) for (const v of se.v) ymax = Math.max(ymax, v * 1.12);
   if (s.long) for (const v of s.long.v) ymax = Math.max(ymax, v * 1.12);
@@ -296,24 +412,27 @@ function drawScore() {
   }
   ctx.restore();
   marginLabels(ctx, f, [
-    { v: s.on_s, text: `short ×${s.on_s.toFixed(1)}`, color: C.motion },
-    { v: s.on_l, text: `long ×${s.on_l.toFixed(1)}`, color: C.long },
+    { v: s.on_s, text: `fast ×${s.on_s.toFixed(1)}`, color: C.motion },
+    { v: s.on_l, text: `slow ×${s.on_l.toFixed(1)}`, color: C.long },
     { v: 1, text: 'quiet', color: C.muted },
   ]);
-  msg.textContent = '';
-  const st = $('#score-state');                    // status lives in the header, never on the data
-  st.hidden = !s.calibrating;
-  st.textContent = 'calibrating · keep still';
-  renderLegend(s);
-  hoverable('#score', f, (t) => {
+  msg.textContent = s.calibrating && compact ? 'calibrating: keep still' : '';
+  if (!compact) {
+    const st = $('#score-state');                  // status lives in the header, never on the data
+    st.hidden = !s.calibrating;
+    st.textContent = 'calibrating · keep still';
+    renderLegend(s);
+  }
+  hoverable(id, f, (t) => {
     const tol = Math.max(s.gap, (t1 - t0) / 150), out = [];
     for (const se of s.series) {
       const i = nearest(t, se.t, tol);
       if (i >= 0) out.push(`${se.label} ×${se.v[i].toFixed(1)}`);
     }
     const i = s.long ? nearest(t, s.long.t, tol) : -1;
-    if (i >= 0) out.push(`long window ×${s.long.v[i].toFixed(1)}`);
+    if (i >= 0) out.push(`slow window ×${s.long.v[i].toFixed(1)}`);
     if (!out.length) out.push('no data');
+    else out.push(`(motion at ×${s.on_s.toFixed(1)} fast or ×${s.on_l.toFixed(1)} slow)`);
     out.push(inSpan(s.motion, t) && 'motion', inSpan(s.scans, t) && 'router scan (ignored)', inSpan(s.cal, t) && 'calibrating');
     return out;
   });
@@ -322,7 +441,7 @@ function drawScore() {
 let legendKey = '';
 function renderLegend(s) {
   const items = s.series.map((se) => [se.label, se.color, se.dash]);
-  items.push(['long window (4 s)', C.long, 'solid-thick']);
+  items.push(['slow window (4 s)', C.long, 'solid-thick']);
   if (s.scans.length) items.push(['router scan (ignored)', C.scan, 'band']);
   if (s.hops.length) items.push(['channel hop ▼', C.fg, 'none']);
   items.push(['board verdict ▮', C.still, 'none']);
@@ -357,7 +476,7 @@ function drawDoppler() {
   const { ctx, w, h } = canvasFor('#doppler');
   const msg = $('#doppler-msg');
   if (!fast || !fast.window) { msg.textContent = 'waiting for data…'; return; }
-  const [t0, t1] = fast.window, d = slow && slow.doppler;
+  const [t0, t1] = liveWindow(), d = slow && slow.doppler;
   const fmax = d ? d.fmax : 50;
   const f = frame(ctx, w, h, { t0, t1, y0: 0, y1: fmax, yticks: [0, 10, 20, 30, 40, 50].filter((v) => v <= fmax), left: 34, right: 12 });
   if (!d) { msg.textContent = 'collecting (needs the router\'s ACKs)'; return; }
@@ -390,7 +509,7 @@ function drawDoppler() {
 function drawBreath() {
   const { ctx, w, h } = canvasFor('#breath');
   if (!fast || !fast.window) return;
-  const [t0, t1] = fast.window;
+  const [t0, t1] = liveWindow();
   const f = frame(ctx, w, h, { t0, t1, y0: 0, y1: 36, yticks: [0, 12, 24, 36], left: 34, right: 12 });
   ctx.fillStyle = C.still; ctx.globalAlpha = .07;
   ctx.fillRect(f.r.l, f.Y(20), f.r.r - f.r.l, f.Y(12) - f.Y(20));
@@ -415,12 +534,12 @@ function drawBreath() {
   });
 }
 
-function drawTimeline() {
-  const { ctx, w, h } = canvasFor('#timeline');
+function drawTimeline(id = '#timeline', compact = false) {
+  const { ctx, w, h } = canvasFor(id);
   const tl = slow && slow.timeline;
   if (!tl) return;
   const ymax = tl.on_s * 1.8;
-  const f = frame(ctx, w, h, { t0: tl.start, t1: tl.end, y0: 0, y1: ymax, yticks: niceTicks(ymax, 3), left: 34, right: 12 });
+  const f = frame(ctx, w, h, { t0: tl.start, t1: tl.end, y0: 0, y1: ymax, yticks: compact ? [] : niceTicks(ymax, 3), left: compact ? 8 : 34, right: compact ? 8 : 12 });
   ctx.save();
   ctx.beginPath(); ctx.rect(f.r.l, f.r.t, f.r.r - f.r.l, f.r.b - f.r.t); ctx.clip();
   for (const [a, b] of tl.cal) band(ctx, f, a, b, C.cal, .2);
@@ -436,7 +555,7 @@ function drawTimeline() {
     ctx.beginPath(); ctx.moveTo(f.r.l, f.Y(v)); ctx.lineTo(f.r.r, f.Y(v)); ctx.stroke();
   }
   ctx.globalAlpha = 1; ctx.setLineDash([]);
-  if (tl.t) {
+  if (tl.t && !compact) {
     const gap = Math.max(5, (tl.end - tl.start) / 300);
     ctx.strokeStyle = C.blue; ctx.lineWidth = .9; ctx.globalAlpha = .85;
     polyline(ctx, f, tl.t, tl.s, gap, ymax * .98);
@@ -444,38 +563,63 @@ function drawTimeline() {
     polyline(ctx, f, tl.t, tl.l, gap, ymax * .98);
   }
   ctx.restore();
-  hoverable('#timeline', f, (t) => {
+  hoverable(id, f, (t) => {
     const i = tl.t ? nearest(t, tl.t, Math.max(3, (tl.end - tl.start) / 200)) : -1;
     const m = tl.motion.find(([a, b]) => a - 1 <= t && t <= b + 1);
-    return [i >= 0 ? `short ×${tl.s[i].toFixed(1)} · long ×${tl.l[i].toFixed(1)}` : 'no data',
+    return [i >= 0 ? `fast ×${tl.s[i].toFixed(1)} · slow ×${tl.l[i].toFixed(1)}` : 'no data',
       m && (m[2] ? 'brief blip' : 'motion'), inSpan(tl.cal, t) && 'calibrating'];
   });
 }
 
 // ---------------------------------------------------------------- render loops
+// Only the page on screen is drawn (hidden canvases have no size); switching
+// pages draws the new one from the latest data at once.
 function renderFast() {
   if (!fast) return;
   renderHeader(fast.header);
-  drawScore(); drawBreath(); drawDoppler();
+  if (!paused) drawLive(true);
+}
+
+// The moving charts, about 30 times a second while their page is on screen
+let lastFrame = 0, lastDop = 0;
+function drawLive(force = false) {
+  if (!fast || document.hidden) return;
+  const now = performance.now();
+  if (!force && now - lastFrame < 33) return;
+  lastFrame = now;
+  if (page === 'home') drawScore('#home-live', true);
+  else if (page === 'graphs') {
+    drawScore(); drawBreath();
+    if (force || now - lastDop > 100) { drawDoppler(); lastDop = now; }   // the heavy one: 10 a second
+  } else if (page === 'links' && slow && slow.links) drawLanes();
+}
+function frameLoop() {
+  if (!paused) drawLive();
+  requestAnimationFrame(frameLoop);
 }
 
 function renderSlow() {
   if (!slow) return;
-  drawTimeline();
-  renderLinks();
-  if (!paused) drawDoppler();
-  renderRaw();
-  if ($('#dlg-net').open) renderNet();
-  if ($('#dlg-dev').open) renderDev();
-  if ($('#dlg-set').open) { renderSound(); renderSens(); }
   const n = slow.network;
   $('#net').textContent = n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
+  if (page === 'home') { renderHome(); drawTimeline('#home-tl', true); }
+  else if (page === 'graphs') drawTimeline();
+  else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderDev(); }
+  else if (page === 'debug') renderRaw();
+  else if (page === 'settings') { renderNet(); renderSound(); renderSens(); renderThresholds(); }
+  if (page !== 'links') syncLinkFocus();
+}
+
+function renderPage() {
+  renderFast();
+  renderSlow();
+  if (page === 'debug') renderDebug();
+  if (page === 'stats') renderStats();
 }
 
 function renderRaw() {
   const d = slow.details, lines = [];
   if (d.channel) lines.push(`channel ${d.channel[0]} (${d.channel[1] || 'start'})   calibration ${d.phase} (${d.why})   quiet ${d.floor ? d.floor.toFixed(4) : '–'}`);
-  for (const s of d.streams) lines.push(`${s.label.padEnd(26)} ${s.rate.toFixed(0).padStart(4)}/s  ${s.rssi} dBm`);
   if (d.stats) {
     const st = d.stats, ratio = st.poke ? Math.round(100 * st.ack / st.poke) : 0;
     lines.push(`pokes ${st.poke}   ACK CSI ${st.ack} (${ratio}%)   tx errors ${st.tx_err}   queue drops ${st.qfull}   lines lost on USB ${st.lost ?? 0}   router replies ${st.reply ?? 0}`);
@@ -483,7 +627,7 @@ function renderRaw() {
   $('#raw-text').textContent = lines.join('\n') || 'waiting…';
 }
 
-// ---------------------------------------------------------------- buzzer
+// ---------------------------------------------------------------- buzzer / detection
 // Shows what this dashboard keeps the board at (or, if nothing, what the
 // board reported); sliders aren't touched while being dragged.
 function renderSound() {
@@ -507,6 +651,19 @@ function renderSens() {
     : `×${(board / 100).toFixed(1)} on the board · ${want ? 'kept by this dashboard' : "the firmware's"}`;
   for (const b of $('#sens-level').children) b.classList.toggle('on', +b.dataset.x === cur);
 }
+function renderThresholds() {
+  const t = slow && slow.thresholds;
+  if (!t) return;
+  const rows = [
+    ['Fast window (0.5 s) starts motion at', `×${t.on_short.toFixed(1)}`, 'firmware'],
+    ['…and ends it under', `×${t.off_short.toFixed(1)}`, 'firmware'],
+    ['…but only while the slow window is over', `×${t.short_gate.toFixed(1)}`, 'firmware'],
+    ['Slow window (4 s) starts motion at', `×${t.on_long.toFixed(1)}`, 'Sensitivity above'],
+    ['…and ends it under', `×${t.off_long.toFixed(1)}`, 'follows Sensitivity'],
+    ['Quiet level now', t.floor > 0 ? `${t.floor.toFixed(4)} (${t.phase})` : 'measuring', 'measured'],
+  ];
+  fillRows($('#thresholds'), rows.map(([k, v, how]) => ({ cells: [k, v, how] })));
+}
 function showSoundValues() {
   $('#snd-vol-out').textContent = `${$('#snd-vol').value * 2}%`;
   $('#snd-hz-out').textContent = `${$('#snd-hz').value} Hz`;
@@ -516,37 +673,46 @@ function setSound(mode) {
   cmd({ cmd: 'sound', mode: mode || (on ? on.dataset.m : 'beep'), vol: +$('#snd-vol').value, hz: +$('#snd-hz').value });
 }
 
-// ---------------------------------------------------------------- links (experimental)
+// ---------------------------------------------------------------- links
+function syncLinkFocus() {
+  const on = !!(slow && slow.settings && slow.settings.per_link);
+  if (!on && link !== null) { link = null; connect(); }
+  const rows = on ? (slow.links || []) : [];
+  const cur = rows.find((r) => r.src === link);
+  for (const e of document.querySelectorAll('.which')) e.textContent = cur ? cur.label : 'router';
+  for (const e of document.querySelectorAll('.which-tile')) e.textContent = cur ? `· ${cur.label}` : '';
+}
+
+function linkCard(src) {
+  const name = el('div', { className: 'name' }, el('span'), el('small'));
+  const top = el('div', {}, el('span', { className: 'act' }), el('span', { className: 'state' }));
+  const spark = el('div', { className: 'spark' }, el('canvas'));
+  const meta = el('div', { className: 'meta' }, el('span', { className: 'br' }), el('span', { className: 'dop' }));
+  const b = el('button', { type: 'button', className: 'link' }, name, top, spark, meta);
+  b.dataset.src = src;
+  b.onclick = () => { link = link === src ? null : src; connect(); renderLinks(); };
+  return b;
+}
+
 function renderLinks() {
   const on = !!(slow.settings && slow.settings.per_link);
-  $('#links-card').hidden = !on;
   $('#set-per-link').checked = on;
-  const rows = on ? slow.links || [] : [];
-  if (!on && link !== null) { link = null; connect(); }
-  const cur = rows.find((r) => r.src === link);
-  for (const el of document.querySelectorAll('.which')) el.textContent = cur ? cur.label : 'router';
-  for (const el of document.querySelectorAll('.which-tile')) el.textContent = cur ? `· ${cur.label}` : '';
-  if (!on) return;
+  $('#links-off').hidden = on;
+  syncLinkFocus();
   const box = $('#links');
-  // keep elements (and their canvases) between updates, keyed by node
+  const rows = on ? slow.links || [] : [];
+  if (!on) { box.replaceChildren(); $('#lanes').hidden = $('#lanes-legend').hidden = true; return; }
   const seen = new Set();
-  for (const r of rows) {
+  for (const r of rows) {                        // elements (and canvases) kept between updates
     seen.add(String(r.src));
-    let el = box.querySelector(`[data-src="${r.src}"]`);
-    if (!el) {
-      el = document.createElement('button');
-      el.type = 'button'; el.className = 'link'; el.dataset.src = r.src;
-      el.innerHTML = '<div class="name"><span></span><small></small></div><div><span class="act"></span><span class="state"></span></div>' +
-        '<div class="spark"><canvas></canvas></div><div class="meta"><span class="br"></span><span class="dop"></span></div>';
-      el.onclick = () => { link = link === r.src ? null : r.src; connect(); renderLinks(); };
-      box.append(el);
-    }
-    el.classList.toggle('sel', link === r.src);
-    el.querySelector('.name span').textContent = r.label + (r.ap ? '' : ' · device');
-    el.querySelector('.name small').textContent = `${r.rate}/s ${r.rssi} dBm`;
-    const act = el.querySelector('.act'), st = el.querySelector('.state');
+    let e = box.querySelector(`[data-src="${r.src}"]`);
+    if (!e) { e = linkCard(r.src); box.append(e); }
+    e.classList.toggle('sel', link === r.src);
+    e.querySelector('.name span').textContent = r.label + (r.ap ? '' : ' · device');
+    e.querySelector('.name small').textContent = `${r.rate}/s ${r.rssi} dBm`;
+    const act = e.querySelector('.act'), st = e.querySelector('.state');
     const judged = r.state === 'motion' || r.state === 'still';
-    el.classList.toggle('dim', r.state === 'weak' || r.state === 'silent');
+    e.classList.toggle('dim', r.state === 'weak' || r.state === 'silent');
     act.textContent = judged ? `×${r.activity.toFixed(1)}` : '—';
     act.title = r.long === null ? '' : `fast (0.5 s) ×${r.activity.toFixed(2)} · slow (4 s) ×${r.long.toFixed(2)} of its quiet level`;
     act.style.color = r.moving ? C.motion : judged && r.activity > 1.6 ? C.brief : judged ? C.fg : C.muted;
@@ -554,22 +720,34 @@ function renderLinks() {
     st.title = { weak: 'Too few ACKs a second to judge motion on this link (it needs about 20)', silent: 'Nothing from this device for over 2 s' }[r.state] || '';
     st.className = 'state' + (r.state === 'motion' ? ' motion' : judged ? '' : ' cal');
     const b = r.breathing, d = r.doppler;
-    el.querySelector('.br').textContent = 'breathing ' + (!b ? '…' : b.level === 'none' ? '—' : `${b.rate.toFixed(0)}/min (${b.level})`);
-    el.querySelector('.dop').textContent = 'Doppler ' + (d === null || d === undefined ? '…' : !Object.keys(d).length ? '—' : d.scan ? 'scan' : `${d.f.toFixed(1)} Hz`);
-    drawSpark(el.querySelector('.spark'), r);
+    e.querySelector('.br').textContent = 'breathing ' + (!b ? '…' : b.level === 'none' ? '—' : `${b.rate.toFixed(0)}/min (${b.level})`);
+    e.querySelector('.dop').textContent = 'Doppler ' + (d === null || d === undefined ? '…' : !Object.keys(d).length ? '—' : d.scan ? 'scan' : `${d.f.toFixed(1)} Hz`);
+    drawSpark(e.querySelector('.spark'), r);
   }
   for (const n of [...box.childNodes]) if (!n.dataset || !seen.has(n.dataset.src)) n.remove();
   if (!rows.length) box.textContent = 'collecting: each link needs about a minute of data';
   drawLanes();
 }
 
+function renderRates() {
+  const d = slow.details;
+  fillRows($('#rates'), (d.streams || []).map((s) => [s.label, `${s.rate.toFixed(0)}/s`, `${s.rssi} dBm`]), 'nothing heard yet');
+}
+function renderGates() {
+  const why = { ok: 'poked', weak: 'weak: answers rarely', silent: 'silent: no answers', far: 'far: much weaker than the best' };
+  fillRows($('#gates'), (slow.gates || []).map((g) => ({
+    cls: g.state === 'ok' ? '' : 'dim',
+    cells: [`${g.label}${g.ap ? '' : ' · device'}`, `${g.rssi} dBm`, g.answered < 0 ? '–' : `${g.answered}%`, g.sent, why[g.state] || g.state],
+  })), 'no GATE lines yet (the board sends them every few seconds)');
+}
+
 // Motion by link: one lane per link (plus the board's own verdict) over the
-// window shown above. Names sit in a left gutter, never over the lanes.
+// window shown on Graphs. Names sit in a left gutter, never over the lanes.
 function drawLanes() {
   const box = $('#lanes');
   const rows = (slow && slow.links) || [];
-  const win = fast && fast.window;
-  box.hidden = !rows.length || !win;
+  const w0 = fast && fast.window && liveWindow();
+  box.hidden = $('#lanes-legend').hidden = !rows.length || !w0;
   if (box.hidden) return;
   const lanes = [{ label: 'board verdict', spans: slow.board_spans || [], board: true }]
     .concat(rows.map((r) => ({ label: r.label + (r.ap ? '' : ' · device'), spans: r.spans, weak: r.weak, state: r.state })));
@@ -581,7 +759,7 @@ function drawLanes() {
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  const [t0, t1] = win, X = (t) => G + (t - t0) / (t1 - t0) * (w - G);
+  const [t0, t1] = w0, X = (t) => G + (t - t0) / (t1 - t0) * (w - G);
   ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
   ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
   lanes.forEach((ln, i) => {
@@ -638,7 +816,206 @@ function drawSpark(box, r) {
   ctx.stroke();
 }
 
-// ---------------------------------------------------------------- dialogs
+// ---------------------------------------------------------------- stats
+const DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function dayLabel(iso) {
+  const d = new Date(`${iso}T12:00:00`);
+  return `${DAY[d.getDay()]} ${d.getDate()}`;
+}
+function fmtMin(s) { return s < 60 ? `${Math.round(s)} s` : `${(s / 60).toFixed(s < 600 ? 1 : 0)} min`; }
+function fmtLen(s) {
+  s = Math.round(s);
+  return s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${String(Math.floor(s % 3600 / 60)).padStart(2, '0')} min`;
+}
+// Sequential scale: one hue (the motion red), from the card colour up
+function rgb(hex) { const n = parseInt(hex.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+function seq(x) {
+  const a = rgb(C.card2), b = rgb(C.motion), f = Math.pow(Math.max(0, Math.min(1, x)), 0.6);
+  return `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * f)).join(',')})`;
+}
+function hatch(ctx, x, y, w, h) {
+  ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+  for (let k = -h; k < w; k += 5) { ctx.beginPath(); ctx.moveTo(x + k, y + h); ctx.lineTo(x + k + h, y); ctx.stroke(); }
+  ctx.restore();
+}
+// A bar with a 4px rounded data end, anchored to the baseline
+function bar(ctx, x, y, w, h) {
+  if (h <= 0) return;
+  const r = Math.min(4, w / 2, h);
+  ctx.beginPath();
+  ctx.moveTo(x, y + h); ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r); ctx.lineTo(x + w, y + h);
+  ctx.closePath(); ctx.fill();
+}
+
+function renderStats() {
+  drawHeat(); drawHours(); drawDurs();
+  if (!stats) return;
+  fillRows($('#sess-list'), stats.sessions.map((s) => ({
+    cls: s.live ? 'cur' : '',
+    cells: [`${DAY[new Date(s.start * 1000).getDay()]} ${new Date(s.start * 1000).getDate()} ${clock(s.start)}`, fmtLen(s.end - s.start),
+      s.periods, fmtMin(s.motion_s), s.blips,
+      s.live ? 'this session' : s.data_stopped ? `${s.name} · data stopped ${clock(s.data_stopped)}` : s.name],
+  })), 'no sessions yet');
+}
+
+function drawHeat() {
+  const { ctx, w } = canvasFor('#heat');
+  const msg = $('#heat-msg');
+  if (!stats) { msg.textContent = 'loading…'; return; }
+  const hm = stats.heatmap, n = hm.days.length;
+  if (!n) { msg.textContent = 'no sessions recorded yet'; return; }
+  msg.textContent = '';
+  const box = $('#heat'), CH = Math.max(14, Math.min(22, 320 / n)), G = 54, T = 4, B = 18;
+  box.style.height = `${T + n * CH + B}px`;
+  const again = canvasFor('#heat');                // resized: draw on the new size
+  const c2 = again.ctx, cw = (again.w - G - 4) / 24;
+  let max = 60;
+  for (const row of hm.motion_s) for (const v of row) max = Math.max(max, v);
+  const cells = [];
+  hm.days.forEach((d, i) => {
+    const y = T + i * CH;
+    c2.fillStyle = C.muted; c2.font = FONT; c2.textAlign = 'right'; c2.textBaseline = 'middle';
+    c2.fillText(dayLabel(d), G - 8, y + CH / 2);
+    for (let hr = 0; hr < 24; hr++) {
+      const x = G + hr * cw, rec = hm.recorded[i][hr], mot = hm.motion_s[i][hr];
+      if (rec < 60) hatch(c2, x + 1, y + 1, cw - 2, CH - 2);
+      else { c2.fillStyle = seq(mot / max); c2.fillRect(x + 1, y + 1, cw - 2, CH - 2); }
+      cells.push({ x, y, d, hr, rec, mot });
+    }
+  });
+  c2.fillStyle = C.muted; c2.textAlign = 'center'; c2.textBaseline = 'top';
+  for (let hr = 0; hr < 24; hr += (cw < 22 ? 3 : 2)) c2.fillText(String(hr).padStart(2, '0'), G + (hr + .5) * cw, T + n * CH + 4);
+  const lg = $('#heat-legend');
+  lg.replaceChildren();
+  for (const [x, label] of [[0, '0'], [.5, fmtMin(max / 2)], [1, fmtMin(max)]]) {
+    const i = el('i'); i.style.background = seq(x); lg.append(el('span', {}, i, label));
+  }
+  const ih = el('i', { className: 'hatched' }); lg.append(el('span', {}, ih, 'not recorded'));
+  heatHover(cells, cw, CH, G, T, n);
+}
+function heatHover(cells, cw, CH, G, T, n) {
+  const box = $('#heat');
+  let tip = box.querySelector('.tip');
+  if (!tip) { tip = el('div', { className: 'tip', hidden: true }); box.append(tip); }
+  box.onpointermove = (e) => {
+    const b = box.getBoundingClientRect(), x = e.clientX - b.left, y = e.clientY - b.top;
+    const c = cells.find((k) => x >= k.x && x < k.x + cw && y >= k.y && y < k.y + CH);
+    tip.hidden = !c;
+    if (!c) return;
+    tip.replaceChildren(el('b', { textContent: `${dayLabel(c.d)} · ${String(c.hr).padStart(2, '0')}:00–${String((c.hr + 1) % 24).padStart(2, '0')}:00` }),
+      el('div', { textContent: c.rec < 60 ? 'not recorded' : `${fmtMin(c.mot)} of motion` }),
+      c.rec >= 60 ? el('div', { textContent: `${fmtMin(c.rec)} recorded` }) : null);
+    const left = x < b.width / 2;
+    tip.style.cssText = `top:${Math.max(0, y - 10)}px;` + (left ? `left:${x + 14}px` : `right:${b.width - x + 14}px`);
+  };
+  box.onpointerleave = () => { tip.hidden = true; };
+}
+
+// Bars over categories (hours, duration buckets), one series: no legend box
+function barChart(id, labels, values, tipFor, opts = {}) {
+  const { ctx, w, h } = canvasFor(id);
+  const L = 34, R = 8, T = 8, B = 20;
+  const max = Math.max(opts.min || 1, ...values.map((v) => v || 0)) * 1.1;
+  const ticks = niceTicks(max, 3);
+  const Y = (v) => h - B - v / max * (h - B - T);
+  ctx.strokeStyle = C.grid; ctx.fillStyle = C.muted; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (const v of ticks) {
+    const y = Math.round(Y(v)) + .5;
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke();
+    ctx.fillText(opts.fmt ? opts.fmt(v) : String(v), L - 6, y);
+  }
+  const bw = (w - L - R) / labels.length;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const every = Math.ceil(labels.length / Math.max(1, Math.floor((w - L - R) / 34)));
+  labels.forEach((lab, i) => {
+    const x = L + i * bw;
+    if (values[i] === null) hatch(ctx, x + 1, T, bw - 2, h - B - T);
+    else { ctx.fillStyle = opts.color || C.motion; bar(ctx, x + 1, Y(values[i]), bw - 2, h - B - Y(values[i])); }
+    if (i % every === 0) { ctx.fillStyle = C.muted; ctx.fillText(lab, x + bw / 2, h - B + 5); }
+  });
+  const box = $(id);
+  let tip = box.querySelector('.tip');
+  if (!tip) { tip = el('div', { className: 'tip', hidden: true }); box.append(tip); }
+  box.onpointermove = (e) => {
+    const b = box.getBoundingClientRect(), x = e.clientX - b.left, i = Math.floor((x - L) / bw);
+    tip.hidden = i < 0 || i >= labels.length;
+    if (tip.hidden) return;
+    tip.replaceChildren(...tipFor(i).filter(Boolean).map((t, k) => el(k ? 'div' : 'b', { textContent: t })));
+    const left = x < b.width / 2;
+    tip.style.cssText = `top:${T}px;` + (left ? `left:${x + 12}px` : `right:${b.width - x + 12}px`);
+  };
+  box.onpointerleave = () => { tip.hidden = true; };
+}
+
+function drawHours() {
+  if (!stats) { canvasFor('#hours'); return; }
+  const hrs = stats.by_hour;
+  barChart('#hours', hrs.map((r) => String(r.hour).padStart(2, '0')),
+    hrs.map((r) => (r.per_hour_s === null ? null : r.per_hour_s / 60)),
+    (i) => {
+      const r = hrs[i];
+      return [`${String(r.hour).padStart(2, '0')}:00–${String((r.hour + 1) % 24).padStart(2, '0')}:00`,
+        r.per_hour_s === null ? 'not recorded' : `${(r.per_hour_s / 60).toFixed(1)} min of motion per hour`,
+        r.per_hour_s === null ? null : `${r.recorded_h.toFixed(1)} h recorded · ${fmtMin(r.motion_s)} in all`];
+    }, { min: 0.5, fmt: (v) => (v > 0 && v < 2 ? v.toFixed(1) : v.toFixed(0)) });
+}
+
+function drawDurs() {
+  if (!stats) { canvasFor('#durs'); return; }
+  const d = stats.durations;
+  barChart('#durs', d.map((b) => b.label), d.map((b) => b.n),
+    (i) => [d[i].label, `${d[i].n} period${d[i].n === 1 ? '' : 's'}`, i === 0 ? 'brief blips: often noise' : null],
+    { color: C.blue, min: 1 });
+}
+
+// ---------------------------------------------------------------- debug
+function renderDebug() {
+  if (!dbg) return;
+  drawTrace('#jump', 'jump', [[dbg.glitch, 'glitch limit', C.motion], [dbg.scan_shape, 'near a scan', C.brief]], 0.5, (v) => v.toFixed(2));
+  drawTrace('#gap', 'gap', [[dbg.scan_gap_ms, 'scan gap', C.scan], [60, 'blips likelier', C.brief]], 150, (v) => `${v.toFixed(0)} ms`);
+  fillRows($('#calibs'), [...dbg.calibs].reverse().map((c) => [clock(c.t, true), c.phase, c.why, c.floor > 0 ? c.floor.toFixed(4) : '–']), 'nothing yet');
+  fillRows($('#sent'), [...dbg.sent].reverse().map(([t, c]) => [clock(t, true), c]), 'nothing sent yet');
+  fillRows($('#refused'), [...dbg.refused].reverse().map(([t, line, last]) => [clock(t, true), line, last || '–']), 'none refused');
+  const pre = $('#tail'), keep = tailFilter ? tailFilter.split(',') : null;
+  const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  pre.textContent = dbg.tail.filter(([, line]) => !keep || keep.some((k) => line.startsWith(k)))
+    .map(([t, line]) => `${clock(t, true)}  ${line}`).join('\n') || 'nothing yet';
+  if (atEnd) pre.scrollTop = pre.scrollHeight;
+}
+
+function drawTrace(id, key, refs, ymin, fmt) {
+  const { ctx, w, h } = canvasFor(id);
+  const msg = $(`${id}-msg`);
+  if (!dbg.window || !dbg.traces || !dbg.traces.length) { msg.textContent = 'waiting for router ACKs…'; return; }
+  msg.textContent = '';
+  const [t0, t1] = dbg.window;
+  let ymax = ymin;
+  for (const tr of dbg.traces) for (const v of tr[key]) ymax = Math.max(ymax, v * 1.1);
+  ymax = Math.min(ymax, key === 'gap' ? 2000 : 3);
+  const f = frame(ctx, w, h, { t0, t1, y0: 0, y1: ymax, yticks: niceTicks(ymax, 3), left: 40, right: 96 });
+  ctx.save(); ctx.beginPath(); ctx.rect(f.r.l, f.r.t, f.r.r - f.r.l, f.r.b - f.r.t); ctx.clip();
+  ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+  for (const [v, , col] of refs) { ctx.strokeStyle = col; ctx.globalAlpha = .7; ctx.beginPath(); ctx.moveTo(f.r.l, f.Y(v)); ctx.lineTo(f.r.r, f.Y(v)); ctx.stroke(); }
+  ctx.setLineDash([]); ctx.globalAlpha = 1;
+  for (const tr of dbg.traces) {
+    ctx.fillStyle = tr.color;
+    for (let i = 0; i < tr.t.length; i++) ctx.fillRect(f.X(tr.t[i]) - 1, f.Y(Math.min(tr[key][i], ymax)) - 1, 2, 2);
+  }
+  ctx.restore();
+  marginLabels(ctx, f, refs.map(([v, text, color]) => ({ v, text, color })));
+  hoverable(id, f, (t) => {
+    const out = [];
+    for (const tr of dbg.traces) {
+      const i = nearest(t, tr.t, Math.max(0.3, (t1 - t0) / 200));
+      if (i >= 0) out.push(`${tr.label}: ${fmt(tr[key][i])}`);
+    }
+    return out.length ? out : ['no packets'];
+  });
+}
+
+// ---------------------------------------------------------------- settings: network, devices
 function bars(rssi) {
   const n = rssi > -55 ? 4 : rssi > -65 ? 3 : rssi > -75 ? 2 : 1;
   return '▮'.repeat(n) + '▯'.repeat(4 - n);
@@ -652,43 +1029,36 @@ function renderNet() {
     : n.how === '?' ? 'Waiting for the board…'
     : `Watching "${n.name}"${n.how === 'default' ? ' (default)' : ' (chosen here)'}`;
   $('#net-state').textContent = n.state === 'scanning' ? 'scanning all channels (about 4 s)…'
-    : n.state === 'done' ? `${n.nets.length} networks nearby` : '';
+    : n.state === 'done' ? `${n.nets.length} networks nearby` : 'press Scan to list the networks nearby';
   const body = $('#net-list');
   body.replaceChildren();
   for (const net of n.nets) {
-    const tr = document.createElement('tr');
-    if (net.name === n.name) tr.className = 'cur';
-    const cells = [net.name, net.ch, `${net.rssi} dBm`];
-    cells.forEach((c, i) => { const td = document.createElement('td'); td.textContent = c; tr.append(td); });
+    const tr = el('tr', net.name === n.name ? { className: 'cur' } : {});
+    const name = el('td', { textContent: net.name });
     const aps = net.aps || [];
     if (aps.length) {                                // its access points (mesh nodes, extenders)
       const boardCh = slow.details && slow.details.channel ? slow.details.channel[0] : null;
-      const box = document.createElement('div');
-      box.className = 'aps';
-      const head = document.createElement('div');
-      head.textContent = aps.length === 1 ? '1 access point' : `${aps.length} access points`;
-      box.append(head);
+      const box = el('div', { className: 'aps' }, el('div', { textContent: aps.length === 1 ? '1 access point' : `${aps.length} access points` }));
       for (const a of aps) {
-        const row = document.createElement('div');
         const used = net.name === n.name && a.ch === boardCh;
-        row.textContent = `${a.bssid} · ch ${a.ch} · ${a.rssi} dBm` +
-          (net.name === n.name ? (used ? ' · in use' : ' · other channel') : '');
-        if (used) row.className = 'used';
-        box.append(row);
+        box.append(el('div', {
+          className: used ? 'used' : '',
+          textContent: `${a.bssid} · ch ${a.ch} · ${a.rssi} dBm` + (net.name === n.name ? (used ? ' · in use' : ' · other channel') : ''),
+        }));
       }
-      tr.children[0].append(box);
+      name.append(box);
     }
-    tr.children[2].prepend(Object.assign(document.createElement('span'), { className: 'bars', textContent: bars(net.rssi) + ' ' }));
-    const td = document.createElement('td');
+    const sig = el('td', {}, el('span', { className: 'bars', textContent: bars(net.rssi) + ' ' }), `${net.rssi} dBm`);
+    const td = el('td');
     if (net.name !== n.name) {
-      const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Watch';
+      const b = el('button', { type: 'button', textContent: 'Watch' });
       b.onclick = () => {
         if (confirm(`Watch "${net.name}" from now on?\n\nThe board restarts and recalibrates (about 15 s). Only pick your own network.`))
           cmd({ cmd: 'use', name: net.name });
       };
       td.append(b);
     } else td.textContent = 'watching';
-    tr.append(td);
+    tr.append(name, el('td', { textContent: net.ch }), sig, td);
     body.append(tr);
   }
 }
@@ -700,7 +1070,8 @@ function renderDev() {
   if (!seg.childElementCount) {
     const names = { auto: 'Auto', all: 'All active', manual: 'Manual', off: 'Off' };
     for (const m of d.modes) {
-      const b = document.createElement('button'); b.type = 'button'; b.dataset.m = m; b.textContent = names[m] || m;
+      const b = el('button', { type: 'button', textContent: names[m] || m });
+      b.dataset.m = m;
       b.onclick = () => cmd({ cmd: 'mode', mode: m });
       seg.append(b);
     }
@@ -712,29 +1083,39 @@ function renderDev() {
   const body = $('#dev-list');
   body.replaceChildren();
   for (const r of d.rows) {
-    const tr = document.createElement('tr');
-    tr.className = r.poked ? 'poked' : ['gone', 'quiet', 'random'].includes(r.status) ? 'dim' : '';
-    const td0 = document.createElement('td');
-    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = r.poked || r.picked;
-    cb.title = 'poke this device'; cb.onchange = () => cmd({ cmd: 'toggle', mac: r.mac });
-    td0.append(cb); tr.append(td0);
-    const vals = [`${r.name}  ${r.mac}`, r.rssi ? `${r.rssi} dBm` : '–', r.rate, r.heard, r.why, r.link];
-    vals.forEach((v, i) => { const td = document.createElement('td'); td.textContent = v; if (i === 4) td.className = 'why'; tr.append(td); });
+    const tr = el('tr', { className: r.poked ? 'poked' : ['gone', 'quiet', 'random'].includes(r.status) ? 'dim' : '' });
+    const cb = el('input', { type: 'checkbox', checked: r.poked || r.picked, title: 'poke this device' });
+    cb.onchange = () => cmd({ cmd: 'toggle', mac: r.mac });
+    tr.append(el('td', {}, cb));
+    [`${r.name}  ${r.mac}`, r.rssi ? `${r.rssi} dBm` : '–', r.rate, r.heard, r.why, r.link]
+      .forEach((v, i) => tr.append(el('td', { textContent: v, className: i === 4 ? 'why' : '' })));
     body.append(tr);
   }
 }
 
-function openNet() {
-  $('#dlg-net').showModal();
-  renderNet();
-  if (!netDlgShown || (slow && slow.network.state === 'idle')) cmd({ cmd: 'scan' });
-  netDlgShown = true;
+// ---------------------------------------------------------------- pages
+function route() {
+  const name = (location.hash.match(/^#\/(\w+)/) || [])[1];
+  page = ROUTES.includes(name) ? name : 'home';
+  for (const s of document.querySelectorAll('.page')) s.hidden = s.dataset.page !== page;
+  for (const a of document.querySelectorAll('#nav a')) {
+    const on = a.dataset.route === page;
+    a.classList.toggle('on', on);
+    if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  }
+  document.body.dataset.page = page;
+  clearInterval(statsTimer);
+  if (page === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 60000); }
+  if (page === 'settings' && !netScanned && fast && fast.header.board_connected &&
+      slow && slow.network && slow.network.state === 'idle') { netScanned = true; cmd({ cmd: 'scan' }); }
+  renderPage();
 }
-function openDev() { $('#dlg-dev').showModal(); renderDev(); }
+function go(name) { location.hash = `#/${name}`; }
 
 // ---------------------------------------------------------------- controls
 function setWinButtons(w) {
   win = w;
+  $('#home-live-win').textContent = w < 60 ? `last ${w} s` : `last ${w / 60} min`;
   for (const b of $('#win').children) b.classList.toggle('on', +b.dataset.w === w);
 }
 function setWin(w) { setWinButtons(w); connect(); }
@@ -743,69 +1124,83 @@ function togglePause() {
   $('#btn-pause').textContent = paused ? 'Live' : 'Pause';
   $('#btn-pause').classList.toggle('on', paused);
   setLive(paused ? 'paused' : 'live');
-  if (!paused) renderFast();
+  if (!paused) renderPage();
 }
 
 $('#win').addEventListener('click', (e) => { if (e.target.dataset.w) setWin(+e.target.dataset.w); });
 $('#btn-pause').onclick = togglePause;
 $('#btn-cal').onclick = () => cmd({ cmd: 'cal' });
-$('#btn-net').onclick = openNet;
-$('#btn-dev').onclick = openDev;
 $('#btn-help').onclick = () => $('#dlg-help').showModal();
-$('#btn-set').onclick = () => { $('#dlg-set').showModal(); renderSound(); renderSens(); };
 for (const b of $('#sens-level').children) b.onclick = () => cmd({ cmd: 'sens', x100: +b.dataset.x });
 $('#sens-default').onclick = () => cmd({ cmd: 'sens', x100: 'default' });
 for (const b of $('#snd-mode').children) b.onclick = () => setSound(b.dataset.m);
 for (const id of ['#snd-vol', '#snd-hz']) {
-  const el = $(id);
-  el.oninput = () => { el.dataset.drag = '1'; showSoundValues(); };
-  el.onchange = () => { delete el.dataset.drag; setSound(); };
+  const e = $(id);
+  e.oninput = () => { e.dataset.drag = '1'; showSoundValues(); };
+  e.onchange = () => { delete e.dataset.drag; setSound(); };
 }
 $('#snd-test').onclick = () => cmd({ cmd: 'sound', test: true });
 $('#snd-default').onclick = () => cmd({ cmd: 'sound', mode: 'default' });
 $('#set-per-link').onchange = (e) => cmd({ cmd: 'settings', per_link: e.target.checked });
-$('#net-scan').onclick = () => cmd({ cmd: 'scan' });
+$('#net-scan').onclick = () => { netScanned = true; cmd({ cmd: 'scan' }); };
 $('#net-default').onclick = () => {
   if (confirm('Go back to the network built into the firmware (main/my_network.h)?\n\nThe board restarts (about 15 s).'))
     cmd({ cmd: 'use_default' });
 };
+$('#tail-filter').addEventListener('click', (e) => {
+  if (e.target.dataset.f === undefined) return;
+  tailFilter = e.target.dataset.f;
+  for (const b of $('#tail-filter').children) b.classList.toggle('on', b === e.target);
+  if (dbg) renderDebug();
+});
 document.addEventListener('keydown', (e) => {
   if (e.target.closest('input, textarea') || document.querySelector('dialog[open]') || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;
-  if (k === ' ') { e.preventDefault(); togglePause(); }
+  const pages = { h: 'home', g: 'graphs', s: 'stats', l: 'links', d: 'debug' };
+  if (k === ' ' && page === 'graphs') { e.preventDefault(); togglePause(); }
   else if (k === '1' || k === '2' || k === '3') setWin([30, 120, 600][+k - 1]);
   else if (k === 'c') $('#btn-cal').click();
-  else if (k === 'n') $('#btn-net').click();
-  else if (k === 'v') $('#btn-dev').click();
-  else if (k === '?' || k === 'h') $('#dlg-help').showModal();
+  else if (pages[k]) go(pages[k]);
+  else if (k === '?') $('#dlg-help').showModal();
 });
 let resizeTimer = null;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { renderFast(); drawTimeline(); drawLanes(); }, 80);
+  resizeTimer = setTimeout(renderPage, 80);
 });
+window.addEventListener('hashchange', route);
 
-// ?shot: render one snapshot synchronously (headless screenshots); ?dlg=net|dev|help opens one,
-// &hover=<0..1> shows the readout that far across every chart
+// ?shot: render one snapshot synchronously (headless screenshots), on the
+// page in the hash; &hover=<0..1> shows the readout that far across every chart
 const params = new URLSearchParams(location.search);
 if (params.has('shot')) {
   document.body.classList.add('shot');
   setLive('snapshot');
-  const x = new XMLHttpRequest();
-  x.open('GET', `/snapshot?win=${+params.get('win') || 30}${params.get('link') ? `&link=${+params.get('link')}` : ''}`, false);
-  x.send();
-  ({ fast, slow } = JSON.parse(x.responseText));
+  const get = (url) => {
+    const x = new XMLHttpRequest();
+    x.open('GET', url, false);
+    x.setRequestHeader('X-Ackwave', '1');
+    x.send();
+    return JSON.parse(x.responseText);
+  };
+  ({ fast, slow, debug: dbg } = get(`/snapshot?win=${+params.get('win') || 30}${params.get('link') ? `&link=${+params.get('link')}` : ''}`));
+  if (location.hash.startsWith('#/stats')) stats = get('/api/stats');
   if (params.get('win')) setWinButtons(+params.get('win'));
   if (params.get('link')) link = +params.get('link');
-  renderFast(); renderSlow();
-  const dlg = { net: '#dlg-net', dev: '#dlg-dev', help: '#dlg-help', set: '#dlg-set' }[params.get('dlg')];
-  if (dlg) { $(dlg).showModal(); renderNet(); renderDev(); renderSound(); renderSens(); }
-  if (params.get('hover')) {                       // &hover=0.6: the readout at 60% across every chart
+  const name = (location.hash.match(/^#\/(\w+)/) || [])[1];
+  page = ROUTES.includes(name) ? name : 'home';
+  for (const s of document.querySelectorAll('.page')) s.hidden = s.dataset.page !== page;
+  for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('on', a.dataset.route === page);
+  document.body.dataset.page = page;
+  renderPage();
+  if (params.get('hover')) {
     for (const [id, h] of Object.entries(hov)) {
       h.x = h.f.r.l + (h.f.r.r - h.f.r.l) * +params.get('hover'); h.y = (h.f.r.t + h.f.r.b) / 2;
       showHover(id);
     }
   }
 } else {
+  route();
   window.addEventListener('load', connect);
+  requestAnimationFrame(frameLoop);
 }

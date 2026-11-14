@@ -74,7 +74,46 @@ def main():
     calibration_notes()
     network_lines()
     replay_raw_log()
+    data_stops()
     print("RECORD TESTS PASSED")
+
+
+def data_stops():
+    # A board whose data stops (USB stall, freeze) mid-motion: after SILENT_S
+    # without a line the log says so and the motion ends where the data stopped
+    with tempfile.TemporaryDirectory() as tmp:
+        clk = [1_800_000_000.0]
+        log = SessionLog(tmp, raw=False, echo=False, now=lambda: clk[0])
+        log.feed("CALIB,1000000,track,boot,25000,70000,35000")
+        clk[0] += 5
+        log.feed("STATE,6000000,motion,99,40")
+        clk[0] += 3
+        log.feed("CSI,9000000,0,1,6,-50,0,0,104,AAAA")
+        for _ in range(9):                        # 9 s of empty reads: not yet
+            clk[0] += 1
+            log.idle()
+        assert log.rec.motion_since is not None
+        clk[0] += 1
+        log.idle()
+        log.idle()                                # said once
+        clk[0] += 50
+        log.feed("STATS,60000000,1,0,1,0,0,0")
+        log.close()
+        ev = open(log.ev_path).read()
+    assert "still again after 3 s (the board's data stopped)" in ev, ev
+    assert ev.count("No data from the board since") == 1
+    assert "Data from the board again (after 1 min 00 s)" in ev, ev
+    # replay finds the same gap from the clock markers
+    lines = ["#T,1800000000.000,", "CALIB,1000000,track,boot,25000,70000,35000",
+             "STATE,6000000,motion,99,40", "#T,1800000060.000,60000000", "STATS,60000000,1,0,1,0,0,0"]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'raw.log')
+        open(path, 'w').write('\n'.join(lines) + '\n')
+        out = []
+        rec = replay(path, out.append)
+    text = '\n'.join(out)
+    assert "(the board's data stopped)" in text and "No data from the board" in text, text
+    assert rec.periods == [(1_800_000_005.0, 1_800_000_005.0)], rec.periods
 
 
 def drive(feed, t0=1_800_000_000.0):

@@ -25,6 +25,8 @@ import time
 from analyze import parse_line, skip_backlog
 
 BRIEF_S = 2.0       # motion shorter than this is listed apart: often noise or a twitch
+SILENT_S = 10.0     # no line from the board for this long: its data stopped (a still room
+                    # still sends ~100 lines a second)
 
 
 def find_port():
@@ -63,15 +65,18 @@ class Recorder:
         self.network = None                       # (how, name) the board last reported
         self.scanning = False                     # inside the board's network scan (NET lines)
         self.chan_recal = None                    # now() of the last 'router changed channel'
+        self.last_line = None                     # now() of the last line from the board
+        self.silent = False                       # its data stopped (no_data() said so)
 
     def say(self, text):
         self.write(f"{clock(self.now())}  {text}")
 
-    def _end_motion(self, why=''):
-        """Close an open motion period now (the board went still, restarted or recalibrates)."""
+    def _end_motion(self, why='', t=None):
+        """Close an open motion period (the board went still, restarted or recalibrates,
+        or its data stopped): now, or at t."""
         if self.motion_since is None:
             return
-        t = self.now()
+        t = self.now() if t is None else max(t, self.motion_since)
         self.periods.append((self.motion_since, t))
         brief = " (brief)" if t - self.motion_since < BRIEF_S else ""
         self.say(f"still again after {duration(t - self.motion_since)}{brief}{why}")
@@ -85,7 +90,21 @@ class Recorder:
         self.calibrated, self.floor, self.first_floor, self.tracking = False, 0.0, None, False
         self.ctl_ts = None
 
+    def no_data(self):
+        """Nothing from the board for SILENT_S: say so once, and end an open motion
+        where the data stopped (whatever happened after is unknown)."""
+        if self.silent or self.last_line is None:
+            return
+        self.silent = True
+        self._end_motion(" (the board's data stopped)", t=self.last_line)
+        self.say(f"No data from the board since {clock(self.last_line)[11:]} "
+                 "(unplugged, frozen or the USB link stalled)")
+
     def feed(self, line):
+        if self.silent:
+            self.say(f"Data from the board again (after {duration(self.now() - self.last_line)})")
+            self.silent = False
+        self.last_line = self.now()
         if line.startswith('CSI,'):               # most lines: only the time matters here
             try:
                 self.last_ts = int(line.split(',', 2)[1])
@@ -231,6 +250,11 @@ def replay(path, write):
                             t[0] = mark[0] + dt / 1e6
                     except (ValueError, IndexError):
                         pass
+                if rec.last_line is not None and t[0] - rec.last_line >= SILENT_S:
+                    t0_ = t[0]                    # the data stopped in between: say so then
+                    t[0] = rec.last_line + SILENT_S
+                    rec.no_data()
+                    t[0] = t0_
                 rec.feed(line)
         except EOFError:
             pass                                  # copied while still recording
@@ -298,6 +322,13 @@ class SessionLog:
                 self.raw.write(line if line.endswith('\n') else line + '\n')
             self.rec.feed(line)
 
+    def idle(self):
+        """Call while no line arrives: after SILENT_S, the log says the data stopped."""
+        with self.lock:
+            last = self.rec.last_line
+            if not self.closed and last is not None and self.now() - last >= SILENT_S:
+                self.rec.no_data()
+
     def close(self):
         with self.lock:
             if self.closed:
@@ -362,6 +393,8 @@ def main():
                 continue
             if b:
                 log.feed(b.decode('utf-8', 'replace'))
+            else:
+                log.idle()                        # 1 s without a line
     except KeyboardInterrupt:
         pass
     finally:

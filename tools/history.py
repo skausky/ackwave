@@ -43,21 +43,29 @@ def parse(path):
                 # durations are logged rounded; the text has the exact length
                 s['motion'].append((on, max(t, on)))
                 on = None
-            elif text.startswith('Recalibrating'):
-                cal = t
+            elif text.startswith(('Recalibrating', 'Board restarted')):
+                if on is not None:               # logs from before 2026-11-14 left a motion
+                    s['motion'].append((on, t))  # open across a restart: it ended here
+                    on = None
+                if text.startswith('Recalibrating'):
+                    cal = t
                 s['notes'].append((t, text))
             elif text.startswith('Calibrated'):
                 s['cal'].append((cal if cal is not None else s['start'], t))
                 cal = None
-            elif text.startswith('Board not available'):
+            elif text.startswith(('Board not available', 'No data from the board')):
+                if on is not None:               # whatever happened after is unknown
+                    s['motion'].append((on, t))
+                    on = None
                 gap = t
                 s['notes'].append((t, text))
-            elif text.startswith('Board reconnected') and gap is not None:
+            elif text.startswith(('Board reconnected', 'Data from the board again')) and gap is not None:
                 s['gaps'].append((gap, t))
                 gap = None
             elif text.startswith('Recording stopped'):
                 break
     end = last if last is not None else s['start']
+    s['open_end'] = on is not None               # still in motion when the log ends
     if on is not None:
         s['motion'].append((on, end))
     if gap is not None:

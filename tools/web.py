@@ -33,6 +33,7 @@ from collections import deque
 from analyze import MAX_APS, MotionDetector, open_port
 from breathing import Breathing
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
+from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LONG_C, MOTION_C, SCAN_C, STILL_C,
                  SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
@@ -41,7 +42,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
           '/style.css': ('style.css', 'text/css; charset=utf-8')}
-FAST_S, SLOW_S = 0.25, 1.0                  # update periods of the two event types
+FAST_S, SLOW_S, DEBUG_S = 0.25, 1.0, 2.0     # update periods of the three event types
+TAIL_N = 250                                # board lines kept for the Debug page (not CSI)
+TODAY_S = 10.0                              # today's totals: recomputed this often
 SETTINGS = {'per_link': False}              # dashboard settings (sessions/dashboard.json)
 
 
@@ -134,6 +137,15 @@ class LinkDetector:
         return 'motion' if self.motion else 'still'
 
 
+def strength(peak, on_short):
+    """A motion period's strength in a word, from its peak short-window score
+    (× quiet level) against the short window's threshold."""
+    if peak is None or not on_short:
+        return ''
+    r = peak / on_short
+    return 'gentle' if r < 1 else 'moderate' if r < 1.8 else 'strong'
+
+
 def r2(x):
     return None if x is None else round(float(x), 2)
 
@@ -141,8 +153,17 @@ def r2(x):
 class Dashboard:
     """Owns the State; turns it into JSON for the page and runs its commands."""
 
-    def __init__(self, state, send=None, log_name=None, prefs=None, settings=None):
+    def __init__(self, state, send=None, log_name=None, prefs=None, settings=None, sessions_dir=None):
         self.s, self.send, self.log_name, self.prefs = state, send, log_name, prefs
+        self.sessions = Sessions(sessions_dir) if sessions_dir else None
+        self.started = time.time()
+        self._today = (0.0, None)                # (when, today's totals)
+        # For the Debug page: recent board lines (not CSI), commands sent,
+        # commands the board refused, and the calibration history
+        self.tail = deque(maxlen=TAIL_N)         # (wall, line)
+        self.sent_cmds = deque(maxlen=50)        # (wall, command)
+        self.refused = deque(maxlen=50)          # (wall, board line, last command sent before it)
+        self.calibs = deque(maxlen=100)          # dict(t, phase, why, floor) at each phase change
         self.lock = threading.Lock()
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
@@ -264,14 +285,64 @@ class Dashboard:
                                  where=' + '.join(sorted(e['names'])) + ' only'))
         rows.sort(key=lambda r: -r['a'])
         out = []
+        on_s = s.det.c['on_short']
         for r in rows[:n]:
             dur = r['b'] - r['a']
-            out.append(dict(at=time.strftime('%H:%M:%S', time.localtime(r['a'])),
+            brief = not r['going'] and dur < BRIEF_S
+            word = strength(r['peak'], on_s)
+            what = ('brief blip (often noise)' if brief else
+                    f"{word} motion".strip().capitalize() if not r['only'] else 'Motion on a device link only')
+            out.append(dict(at=time.strftime('%H:%M:%S', time.localtime(r['a'])), t=r2(r['a']),
                             dur=('now ' + fmt_age(dur)) if r['going']
                             else ('brief' if dur < BRIEF_S else fmt_age(dur)),
+                            secs=r2(dur), strength=word, what=what,
                             peak=r2(r['peak']), going=r['going'], only=r['only'], where=r['where'],
-                            brief=not r['going'] and dur < BRIEF_S))
+                            brief=brief))
         return out
+
+    def _meaning(self):
+        """The verdict in plain words: (headline, detail) for the header and Home."""
+        s, det = self.s, self.s.det
+        now = s.last_wall or time.time()
+        on_s = det.c['on_short']
+        where = 'in the sensing zone'
+        near = self._where_now() if self.cfg['per_link'] else []
+        if det.motion and s.hist_motion and s.hist_motion[-1][1] is None:
+            a = s.hist_motion[-1][0]
+            word = strength(s.hist_peak[-1] if s.hist_peak else None, on_s)
+            head = f"{word.capitalize() + ' m' if word else 'M'}otion {where}"
+            detail = f"for {fmt_age(now - a)}"
+            if self.cfg['per_link']:
+                detail += ' · seen by ' + ' + '.join(['router'] + near)
+            return head, detail
+        only = (f" · only the {' + '.join(near)} link{'s see' if len(near) > 1 else ' sees'} motion now"
+                if near else '')
+        last = [(a, b, pk) for (a, b), pk in zip(s.hist_motion, s.hist_peak)
+                if b is not None and b - a >= BRIEF_S]
+        if not last:
+            return 'All quiet', 'no motion yet this session' + only
+        a, b, pk = last[-1]
+        word = strength(pk, on_s)
+        detail = f"last: {word + ' ' if word else ''}motion for {fmt_age(b - a)}, " \
+                 f"{time.strftime('%H:%M', time.localtime(a))}"
+        return f"All quiet for {fmt_age(now - b)}", detail + only
+
+    def _activity(self):
+        """How close the room is to the motion threshold right now (100 = at it)."""
+        det = self.s.det
+        f = det.floor
+        if f <= 0:
+            return None
+        ms, ml = det.max_scores(int(self.s.now * 1e6))
+        if ms is None:
+            return None
+        rs, rl = ms / (det.c['on_short'] * f), ml / (det.c['on_long'] * f)
+        pct = 100 * max(rs, rl)
+        word = ('calm' if pct < 50 else 'some movement, under the threshold' if pct < 100
+                else 'over the motion threshold')
+        return dict(pct=round(min(pct, 400)), word=word, short=r2(ms / f), long=r2(ml / f),
+                    on_s=r2(det.c['on_short']), on_l=r2(det.c['on_long']),
+                    by='the fast (0.5 s) window' if rs >= rl else 'the slow (4 s) window')
 
     def _where_now(self):
         """Names of the device links that see motion right now."""
@@ -282,12 +353,30 @@ class Dashboard:
         with self.lock:
             self.s.feed(line)
             self.version += 1
+            if not line.startswith('CSI,'):
+                self._debug_line(line.rstrip('\r\n'))
             self._flush()
+
+    def _now(self):
+        return self.s.last_wall or time.time()
+
+    def _debug_line(self, line):
+        t = self._now()
+        self.tail.append((t, line[:300]))
+        if line.startswith('REFUSED'):
+            last = self.sent_cmds[-1][1] if self.sent_cmds else ''
+            self.refused.append((t, line[:120], last))
+        elif line.startswith('CALIB,'):
+            c = self.s.board_calib
+            if c and line.startswith('CALIB,') and (
+                    not self.calibs or (self.calibs[-1]['phase'], self.calibs[-1]['why']) != (c['phase'], c['why'])):
+                self.calibs.append(dict(t=r2(t), phase=c['phase'], why=c['why'], floor=c['floor']))
 
     def _flush(self):
         for cmd in self.s.outbox:
             if self.send:
                 self.send(cmd)
+                self.sent_cmds.append((self._now(), cmd))
         self.s.outbox.clear()
 
     # ---------- commands from the page ----------
@@ -426,6 +515,7 @@ class Dashboard:
             out['breathing'] = [[r2(s.wall(t)), r2(r['rate']), r['level']]
                                 for t, r in hist if t >= t0]
             out['window'] = [r2(s.wall(t0)), r2(s.wall(t1))]
+            out['filling'] = s.now < win           # the window stands still until it has filled
             return out
 
     def slow(self, win, link=None):
@@ -433,7 +523,9 @@ class Dashboard:
         with self.lock:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
-                       settings=self.cfg, sound=s.sound, sens=s.sens)
+                       settings=self.cfg, sound=s.sound, sens=s.sens, gates=self._gates(),
+                       thresholds=self._thresholds(), today=self._today_totals(),
+                       gesture=None, ai=None)    # filled in by later features
             if s.wall_off is None:
                 return out
             t1 = max(s.now, win)
@@ -444,6 +536,76 @@ class Dashboard:
                 out['board_spans'] = self._board_spans(t1 - win, t1)
             return out
 
+    def debug(self, win):
+        """The Debug page: router ACK traces, calibration history, board lines,
+        commands sent and refused (every 2 s)."""
+        with self.lock:
+            s = self.s
+            out = dict(calibs=list(self.calibs),
+                       tail=[[r2(t), line] for t, line in self.tail],
+                       sent=[[r2(t), c] for t, c in self.sent_cmds],
+                       refused=[[r2(t), line, last] for t, line, last in self.refused])
+            if s.wall_off is None:
+                return out
+            t1 = max(s.now, win)
+            t0 = t1 - win
+            pts = [p for p in s.trace if p[0] >= t0]
+            traces = []
+            for node in sorted({p[1] for p in pts}):
+                mine = [p for p in pts if p[1] == node]
+                t = np.array([p[0] for p in mine])
+                bins = np.floor((t - t0) / max(win / 600, 0.05)).astype(int)
+                rows = {}
+                for b, (_t, _n, j, g) in zip(bins, mine):   # each bin's largest jump and gap
+                    r = rows.setdefault(b, [_t, j, g])
+                    r[1], r[2] = max(r[1], j), max(r[2], g)
+                rows = [rows[k] for k in sorted(rows)]
+                traces.append(dict(node=int(node), label=s.devices.link_label(int(node)),
+                                   color=COLORS[(int(node) * 2 + 1) % len(COLORS)],
+                                   t=[r2(s.wall(r[0])) for r in rows], jump=[round(r[1], 3) for r in rows],
+                                   gap=[round(r[2], 1) for r in rows]))
+            c = s.det.c
+            out.update(window=[r2(s.wall(t0)), r2(s.wall(t1))], traces=traces,
+                       glitch=c['glitch_shape'], scan_shape=c['scan_shape'],
+                       scan_gap_ms=c['scan_gap_us'] / 1e3)
+            return out
+
+    def stats(self):
+        """The Stats page: past sessions (sessions/events-*.log) plus this one."""
+        with self.lock:
+            live = self._live_session()
+        past = self.sessions.load(exclude=self.log_name) if self.sessions else []
+        return summarize(past, live)
+
+    def _live_session(self):
+        s = self.s
+        end = s.last_wall or time.time()
+        start = min([self.started] + [a for a, _b in s.hist_motion])
+        return dict(start=start, end=end, path=self.log_name or 'live session',
+                    motion=[(a, b if b is not None else end) for a, b in s.hist_motion])
+
+    def _today_totals(self):
+        when, val = self._today
+        if val is None or time.time() - when >= TODAY_S:
+            past = self.sessions.load(exclude=self.log_name) if self.sessions else []
+            val = summarize(past, self._live_session())['today']
+            self._today = (time.time(), val)
+        return val
+
+    def _gates(self):
+        """Each poked link's gating state from the board's GATE lines."""
+        dv = self.s.devices
+        return [dict(node=i, label=dv.link_label(i), ap=i < MAX_APS, rssi=g['rssi'],
+                     answered=g['yield_pct'], sent=g['sent'], state=g['state'])
+                for i, g in sorted(dv.gate.items())]
+
+    def _thresholds(self):
+        c, det = self.s.det.c, self.s.det
+        return dict(on_short=r2(c['on_short']), off_short=r2(c['off_short']),
+                    on_long=r2(c['on_long']), off_long=r2(c['off_long']),
+                    short_gate=r2(c['short_gate']), floor=det.floor, phase=det.phase,
+                    sens=self.s.sens, sens_range=list(SENS_RANGE))
+
     def _header(self, br=None, dop=None):
         s, det = self.s, self.s.det
         status = s.source_status()
@@ -453,12 +615,8 @@ class Dashboard:
         elif det.floor <= 0:
             badge = dict(word='CALIBRATING', color=CAL_C, sub='measuring the quiet level: keep still')
         else:
-            sub, near = s.last_motion(), self._where_now() if self.cfg['per_link'] else []
-            if det.motion and self.cfg['per_link']:
-                sub += ' · seen by ' + ' + '.join(['router'] + near)
-            elif near:                           # the verdict stays the board's
-                sub += f" · only the {' + '.join(near)} link{'s see' if len(near) > 1 else ' sees'} motion now"
-            badge = dict(word='MOTION' if det.motion else 'STILL',
+            head, sub = self._meaning()          # the verdict stays the board's
+            badge = dict(word='MOTION' if det.motion else 'STILL', head=head,
                          color=MOTION_C if det.motion else STILL_C, sub=sub)
         hw, hc, hd = s.link_health()
         tiles = {}
@@ -490,7 +648,8 @@ class Dashboard:
         recent = self._recent()
         n_long, n_brief = s.session_counts()
         dv = s.devices
-        return dict(badge=badge, stale=bool(status),
+        return dict(badge=badge, stale=bool(status), activity=None if status else self._activity(),
+                    now=r2(s.last_wall or time.time()),
                     link=dict(word=hw, color=hc, detail=hd),
                     tiles={k: dict(value=v, color=c, detail=t) for k, (v, c, t) in tiles.items()},
                     recent=recent, board={None: 'n/a', True: 'motion', False: 'still'}[s.board_motion],
@@ -691,10 +850,17 @@ def make_handler(dash, allowed_hosts):
                     return self._reply(200, f.read(), ctype)
             if u.path == '/events':
                 return self._events(parse_qs(u.query))
+            if u.path.startswith('/api/'):          # data endpoints: same rules as commands
+                if self.headers.get('X-Ackwave') != '1':
+                    return self._reply(403, {'error': 'missing X-Ackwave header'})
+                if u.path == '/api/stats':
+                    return self._reply(200, dash.stats())
+                return self._reply(404, {'error': 'not found'})
             if u.path == '/snapshot':                # one-off (screenshots, debugging)
                 q = parse_qs(u.query)
                 win, link = self._win(q), self._link(q)
-                return self._reply(200, {'fast': dash.fast(win, link), 'slow': dash.slow(win, link)})
+                return self._reply(200, {'fast': dash.fast(win, link), 'slow': dash.slow(win, link),
+                                         'debug': dash.debug(win)})
             self._reply(404, {'error': 'not found'})
 
         @staticmethod
@@ -720,7 +886,7 @@ def make_handler(dash, allowed_hosts):
             self.send_header('Connection', 'close')
             self.end_headers()
             self.close_connection = True
-            next_slow = 0.0
+            next_slow = next_debug = 0.0
             try:
                 while True:
                     now = time.monotonic()
@@ -728,6 +894,9 @@ def make_handler(dash, allowed_hosts):
                     if now >= next_slow:
                         msgs.append(('slow', dash.slow(win, link)))
                         next_slow = now + SLOW_S
+                    if now >= next_debug:
+                        msgs.append(('debug', dash.debug(win)))
+                        next_debug = now + DEBUG_S
                     for ev, data in msgs:
                         self.wfile.write(f"event: {ev}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n".encode())
                     self.wfile.flush()
@@ -821,7 +990,7 @@ def main():
     lines, send = open_port(a.source, a.baud)
     state.live = send is not None
     dash = Dashboard(state, send, os.path.basename(log.ev_path) if log else None, prefs,
-                     os.path.join(a.out, 'dashboard.json'))
+                     os.path.join(a.out, 'dashboard.json'), sessions_dir=a.out)
     q = queue.Queue()
     threading.Thread(target=reader, args=(lines, q, log), daemon=True).start()
     srv = serve(dash, a.host, a.port)

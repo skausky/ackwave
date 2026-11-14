@@ -248,7 +248,18 @@ def main():
         st, body = request(port, 'GET', '/')
         assert st == 200 and b'ackwave' in body
         st, body = request(port, 'GET', '/snapshot?win=120')
-        assert st == 200 and set(json.loads(body)) == {'fast', 'slow'}
+        assert st == 200 and set(json.loads(body)) == {'fast', 'slow', 'debug'}
+        # Data endpoints: the dashboard header and an allowed Host, like commands
+        st, _ = request(port, 'GET', '/api/stats')
+        assert st == 403, "stats without the dashboard header refused"
+        st, _ = request(port, 'GET', '/api/stats', headers={'X-Ackwave': '1', 'Host': 'evil.example'})
+        assert st == 403, "stats for a foreign Host refused"
+        st, body = request(port, 'GET', '/api/stats', headers={'X-Ackwave': '1'})
+        got = json.loads(body)
+        assert st == 200 and {'sessions', 'by_hour', 'heatmap', 'durations', 'today'} <= set(got)
+        assert len(got['by_hour']) == 24 and got['sessions'][0]['live']
+        st, _ = request(port, 'GET', '/api/nope', headers={'X-Ackwave': '1'})
+        assert st == 404
         st, _ = request(port, 'GET', '/', headers={'Host': 'evil.example:80'})
         assert st == 403, "DNS-rebinding host refused"
         ok = {'X-Ackwave': '1', 'Content-Type': 'application/json'}
@@ -265,7 +276,50 @@ def main():
         assert st == 404, "only the three static files are served"
     finally:
         srv.shutdown()
+    pages_and_debug(tmp)
     print("WEB TESTS PASSED")
+
+
+def pages_and_debug(tmp):
+    """The multi-page front end and the data behind its new pages."""
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
+    js = open(os.path.join(here, 'app.js')).read()
+    html = open(os.path.join(here, 'index.html')).read()
+    # Names from the network (devices, networks, labels) only ever go in as text
+    for bad in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval('):
+        assert bad not in js, bad
+    routes = ['home', 'graphs', 'stats', 'links', 'debug', 'train', 'ai', 'settings']
+    for r in routes:
+        assert f'data-page="{r}"' in html and f'href="#/{r}"' in html, r
+    assert "const ROUTES = ['home', 'graphs', 'stats', 'links', 'debug', 'train', 'ai', 'settings'];" in js
+    assert js.count('new EventSource(') == 1, "one live connection for every page"
+    assert "'X-Ackwave': '1'" in js and "fetch('/api/stats'" in js
+
+    # Debug, gating, thresholds, today: from a feed with a refused command
+    sent = []
+    s = State(600)
+    d = Dashboard(s, send=sent.append, sessions_dir=tmp)
+    for line, *_ in generate(seed=3):
+        d.feed(line)
+    d.feed('GATE,0,-49,98,2900,ok\n')
+    d.feed('GATE,1,-82,-1,0,far\n')
+    assert d.command({'cmd': 'cal'})[0]
+    d.feed('REFUSED,bad-command\n')
+    dbg = d.debug(30)
+    assert dbg['refused'][-1][1] == 'REFUSED,bad-command' and dbg['refused'][-1][2] == 'CAL', dbg['refused']
+    assert dbg['sent'][-1][1] == 'CAL'
+    assert dbg['traces'] and all(len(t['t']) == len(t['jump']) == len(t['gap']) <= 602 for t in dbg['traces'])
+    assert all(j >= 0 for t in dbg['traces'] for j in t['jump']) and dbg['glitch'] == 0.4
+    assert [c['phase'] for c in dbg['calibs']][:2] == ['wait', 'collect'], dbg['calibs']
+    assert all(not line.startswith('CSI,') for _t, line in dbg['tail']) and len(dbg['tail']) <= 250
+    assert len(json.dumps(dbg)) < 120_000
+    sl = d.slow(30)
+    assert [(g['node'], g['state']) for g in sl['gates']] == [(0, 'ok'), (1, 'far')]
+    assert sl['thresholds']['on_short'] == 2.8 and sl['thresholds']['short_gate'] == 1.2
+    assert set(sl['today']) == {'periods', 'blips', 'motion_s'}
+    assert sl['gesture'] is None and sl['ai'] is None, "later features stay off"
+    st = d.stats()
+    assert st['sessions'][0]['live'] and st['sessions'][0]['periods'] == d.s.session_counts()[0]
 
 
 if __name__ == '__main__':

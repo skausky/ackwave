@@ -43,6 +43,30 @@ def main():
         print(txt)
         assert "2 motion period(s)" in txt and "1 brief blip(s)" in txt and "Board not available" in txt
         draw(s, plt).savefig(os.path.join(tmp, 'h.png'))
+        # An old log (before 2026-11-14) where a motion stayed open across a
+        # board restart: it ends at the restart, the next 'still' closes nothing
+        old = os.path.join(tmp, 'events-2026-11-13_1143.log')
+        open(old, 'w').write(
+            "2026-11-13 14:25:21  MOTION started (short x2.8, long x1.4)\n"
+            "2026-11-13 14:25:36  Recalibrating (board restarted), keep still\n"
+            "2026-11-13 14:26:00  Calibrated (quiet level 0.0251), watching for motion\n"
+            "2026-11-13 14:34:33  still again after 9 min 12 s\n"
+            "2026-11-13 14:40:00  MOTION started (short x2.0, long x1.4)\n"
+            "2026-11-13 14:40:10  still again after 10 s\n")
+        o = parse(old)
+        assert [b - a for a, b in o['motion']] == [15, 10], o['motion']
+        assert not o['open_end']
+        # The board's data stopped mid-motion: the period ends there, a gap follows
+        gap = os.path.join(tmp, 'events-2026-11-15_0100.log')
+        open(gap, 'w').write(
+            "2026-11-15 01:00:00  MOTION started (short x2.0, long x1.4)\n"
+            "2026-11-15 01:00:08  still again after 3 s (the board's data stopped)\n"
+            "2026-11-15 01:00:08  No data from the board since 01:00:03 (unplugged, frozen or the USB link stalled)\n"
+            "2026-11-15 02:00:00  Data from the board again (after 59 min 52 s)\n"
+            "2026-11-15 02:00:05  MOTION started (short x2.0, long x1.4)\n")
+        g = parse(gap)
+        assert len(g['gaps']) == 1 and g['gaps'][0][1] - g['gaps'][0][0] == 3592, g['gaps']
+        assert g['open_end'] and len(g['motion']) == 2
     print("HISTORY TESTS PASSED")
 
 
