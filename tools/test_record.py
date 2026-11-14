@@ -167,7 +167,9 @@ def replay_raw_log():
     # replay(): clock from the #T markers plus board time; a gzip cut off
     # mid-recording is read up to where it ends
     lines = ["#T,1800000000.000,",
-             "CALIB,14000000,fast,boot,25000,70000,35000",
+             "CALIB,4000000,fast,boot,25000,70000,35000",
+             "STATE,9000000,motion,99,40",      # 5 s after the first line, before marker 2
+             "STATE,9500000,still,30,30",
              "#T,1800000010.000,14000000",
              "STATE,16500000,motion,99,40",
              "STATE,19000000,still,30,30",
@@ -184,8 +186,9 @@ def replay_raw_log():
     text = '\n'.join(out)
     assert f"{clock(1_800_000_012.5)}  MOTION started" in text, text
     assert f"{clock(1_800_000_015.0)}  still again after 2 s" in text, text
-    assert len(rec.periods) == 1 and rec.periods[0] == (1_800_000_012.5, 1_800_000_015.0)
-    assert "1 motion period(s)" in text and "Summary" in text
+    assert rec.periods[0] == (1_800_000_005.0, 1_800_000_005.5), rec.periods   # first marker
+    assert len(rec.periods) == 2 and rec.periods[1] == (1_800_000_012.5, 1_800_000_015.0)
+    assert "1 motion period(s)" in text and "1 brief blip" in text
 
 
 if __name__ == '__main__':

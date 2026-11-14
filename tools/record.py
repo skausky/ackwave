@@ -221,9 +221,12 @@ def replay(path, write):
                 if rec is None:
                     continue                      # nothing to put on a clock yet
                 t[0] = mark[0]
-                if mark[1] is not None and line.startswith(TS_LINES):
+                if line.startswith(TS_LINES):
                     try:
-                        dt = int(line.split(',', 2)[1]) - mark[1]
+                        ts = int(line.split(',', 2)[1])
+                        if mark[1] is None:       # a marker before any board time (the
+                            mark = (mark[0], ts)  # first one) was written with this line
+                        dt = ts - mark[1]
                         if 0 <= dt < 30_000_000:  # same boot, before the next marker
                             t[0] = mark[0] + dt / 1e6
                     except (ValueError, IndexError):
