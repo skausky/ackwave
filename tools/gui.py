@@ -133,6 +133,11 @@ class State:
         self.hist_t, self.hist_s, self.hist_l = [], [], []
         self.hist_motion, self.hist_cal = [], []     # [wall0, wall1 or None]
         self.hist_peak = []                          # peak short score per hist_motion entry
+        # The session's motion periods follow the board's verdict (STATE lines),
+        # as the events log does; the PC's own detector only stands in for a
+        # source that never sends STATE (its floor arrives 5 s late, so near
+        # the thresholds it can differ a little from the board)
+        self.board_verdict = False                   # a STATE line has been seen
         self.hist_scans = []                         # [wall0, wall1]: router scans ignored
         self.wall_off, self.last_wall = None, None
         self.live = False                            # a board, not a file: arrival time ~ now
@@ -334,6 +339,8 @@ class State:
         elif kind == 'state':
             self.board_states.append((self.now, d['motion']))
             self.board_motion = d['motion']
+            self.board_verdict = True
+            self._hist_change(d['motion'])
         elif kind == 'csi':
             self._csi(d)
         self._trim()
@@ -384,12 +391,10 @@ class State:
                     self.hist_l.append(ml / f)
         if change > 0:
             self.motion_spans.append([t, None])
-            self.hist_motion.append([w, None])
-            self.hist_peak.append(0.0)
         elif change < 0 and self.motion_spans:
             self.motion_spans[-1][1] = t
-            if self.hist_motion and self.hist_motion[-1][1] is None:
-                self.hist_motion[-1][1] = w
+        if change and not self.board_verdict:
+            self._hist_change(change > 0)
         if ms is not None and self.hist_motion and self.hist_motion[-1][1] is None:
             self.hist_peak[-1] = max(self.hist_peak[-1], ms / f)
 
@@ -408,6 +413,15 @@ class State:
         else:
             self.scan_spans.append([t, end])
             self.hist_scans.append([w, self.wall(end)])
+
+    def _hist_change(self, motion):
+        """Open or close the session's current motion period (wall clock)."""
+        is_open = bool(self.hist_motion) and self.hist_motion[-1][1] is None
+        if motion and not is_open:
+            self.hist_motion.append([self.wall(), None])
+            self.hist_peak.append(0.0)
+        elif not motion and is_open:
+            self.hist_motion[-1][1] = self.wall()
 
     def _close_spans(self):
         """End open session spans (before a reboot / loop resets the board time)."""
@@ -432,14 +446,16 @@ class State:
         return out[::-1]
 
     def last_motion(self):
-        """'MOTION for 12 s', 'last motion 3 min ago', or 'no motion yet'."""
-        if not self.hist_motion:
-            return 'no motion yet'
-        a, b = self.hist_motion[-1]
-        now = self.last_wall or a
-        if b is None:
-            return f"motion for {fmt_age(now - a)}"
-        return f"last motion {fmt_age(now - b)} ago"
+        """'MOTION for 12 s', 'last motion 3 min ago', or 'no motion yet'.
+        Brief blips (under BRIEF_S, often noise) don't count as the last motion."""
+        now = self.last_wall or 0
+        if self.hist_motion and self.hist_motion[-1][1] is None:
+            a = self.hist_motion[-1][0]
+            return f"motion for {fmt_age(max(0, now - a))}"
+        for a, b in reversed(self.hist_motion):
+            if b - a >= BRIEF_S:
+                return f"last motion {fmt_age(max(0, now - b))} ago"
+        return 'no motion yet'
 
     def doppler_reading(self, dop=None):
         """The last second's Doppler (of `dop`, default the router's): None (no

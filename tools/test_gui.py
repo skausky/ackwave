@@ -141,7 +141,54 @@ def main():
     assert s.last_wall > w_end and len(s.hist_motion) == 2, "session history kept, clock monotonic"
     assert all(t <= 3 for dq in s.scores.values() for t, _ in dq)
     view.draw()
+    board_verdict_history()
     print("GUI TESTS PASSED")
+
+
+def board_verdict_history():
+    """The session's motion periods follow the board's STATE lines (as the events
+    log does), not the PC detector; a restart mid-motion ends the period; brief
+    blips don't count as the last motion."""
+    import base64
+    clock = [5000.0]
+    s = State(window_s=60, clock=lambda: clock[0])
+    zeros = base64.b64encode(bytes(104)).decode()
+    csi = lambda ts: f"CSI,{ts},0,1,6,-50,0,0,104,{zeros}"
+
+    def at(sec, line):
+        clock[0] = 5000.0 + sec
+        s.feed(line)
+
+    at(0, "CALIB,1000000,track,boot,25000,70000,35000")
+    s.det.evaluate = lambda ts: 1               # the PC detector disagrees: says motion
+    at(1, csi(2_000_000))
+    assert len(s.hist_motion) == 1, "no STATE yet: the PC detector stands in"
+    s.det.evaluate = lambda ts: -1
+    at(4, csi(5_000_000))
+    assert s.hist_motion[-1][1] is not None
+    at(5, "STATE,6000000,motion,99,40")            # from here the board decides
+    s.det.evaluate = lambda ts: -1
+    at(6, csi(7_000_000))
+    assert s.hist_motion[-1][1] is None, "PC detector ended a period the board still has"
+    at(15, "STATE,16000000,still,30,30")
+    assert s.session_counts() == (2, 0) and s.hist_motion[-1][1] - s.hist_motion[-1][0] == 10
+    s.det.evaluate = lambda ts: 1
+    at(14, csi(15_000_000))
+    assert len(s.hist_motion) == 2 and s.board_verdict, "PC motion ignored once STATE is seen"
+    s.det.evaluate = lambda ts: 0
+    # a brief blip doesn't count as 'last motion'
+    at(20, "STATE,21000000,motion,95,35")
+    at(20.5, "STATE,21500000,still,30,30")
+    at(40, csi(41_000_000))
+    assert s.session_counts() == (2, 1)
+    assert s.last_motion() == 'last motion 25 s ago', s.last_motion()
+    # the board restarts mid-motion: the period ends at the restart, the
+    # verdict stays the board's
+    at(50, "STATE,51000000,motion,99,40")
+    at(60, csi(61_000_000))
+    at(61, "CALIB,1062260,wait,boot,0,0,0")
+    assert s.hist_motion[-1][1] is not None and 9 <= s.hist_motion[-1][1] - s.hist_motion[-1][0] <= 11
+    assert s.board_verdict and s.last_motion().startswith('last motion')
 
 
 if __name__ == '__main__':
