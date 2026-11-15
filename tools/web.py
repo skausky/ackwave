@@ -507,8 +507,9 @@ class Dashboard:
                     return False, str(e) if isinstance(e, ValueError) else 'bad light setting'
                 self._save_settings()
                 cf = self.light.cfg
-                msg = (f"Light on motion: on, off after {fmt_age(cf['off_after'])} of stillness"
-                       if cf['enabled'] else 'Light on motion: off')
+                msg = ('Light on motion: off' if not cf['enabled'] else
+                       'Light on motion: on, off as soon as the room is still' if not cf['off_after'] else
+                       f"Light on motion: on, off after {fmt_age(cf['off_after'])} of stillness")
             elif what == 'light_test':
                 if c.get('what') not in ('on', 'off'):
                     return False, 'bad test'

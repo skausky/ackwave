@@ -19,7 +19,7 @@ import urllib.request
 from urllib.parse import urlparse
 
 DEFAULTS = {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120}
-OFF_AFTER = (10, 3600)          # allowed seconds of stillness before "off"
+OFF_AFTER = (0, 3600)           # allowed seconds of stillness before "off" (0 = as soon as still)
 RETRY_S = 30.0                  # a failed call is tried again at most this often
 TIMEOUT_S = 10.0
 MAX_URL = 2000
@@ -99,7 +99,7 @@ class Light:
                 raise ValueError('bad delay')
             s = int(off_after)
             if not OFF_AFTER[0] <= s <= OFF_AFTER[1]:
-                raise ValueError(f'the delay must be {OFF_AFTER[0]} s to {OFF_AFTER[1] // 60} min')
+                raise ValueError(f'the delay must be 0 s (right away) to {OFF_AFTER[1] // 60} min')
             new['off_after'] = s
         if enabled is not None:
             new['enabled'] = bool(enabled)

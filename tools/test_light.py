@@ -101,6 +101,13 @@ def main():
     clock.t += 100
     assert lt.update(False) is None and lt.view()['state'] == 'unknown' and calls == [OFF]
 
+    # No delay: on the moment motion starts, off the moment it stops
+    lt, clock, calls, _ = make(off_after=0)
+    assert lt.update(True) == 'on'
+    clock.t += 0.2
+    assert lt.update(False) == 'off' and calls == [ON, OFF]
+    assert lt.update(True) == 'on' and calls == [ON, OFF, ON], "and on again at once"
+
     # No off URL: the routine handles off; the next motion turns it on again
     lt, clock, calls, _ = make(off_url='')
     lt.update(True)
@@ -123,7 +130,7 @@ def main():
 
     # Settings: validated; disabling forgets the state
     lt, *_ = make()
-    for bad in (dict(on_url='ftp://x'), dict(off_after=5), dict(off_after=99999), dict(off_after=True),
+    for bad in (dict(on_url='ftp://x'), dict(off_after=-1), dict(off_after=99999), dict(off_after=True),
                 dict(off_after='x')):
         try:
             lt.set(**bad)

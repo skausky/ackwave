@@ -97,7 +97,7 @@ def main():
                    light_run=lambda f: f())
     on, off = 'https://example.com/on?token=SECRET', 'https://example.com/off?token=SECRET'
     assert not dl.command({'cmd': 'light', 'enabled': True})[0], "needs an on URL first"
-    for bad in ({'on_url': 'file:///etc/passwd'}, {'on_url': 'https://x/\nCAL'}, {'off_after': 1},
+    for bad in ({'on_url': 'file:///etc/passwd'}, {'on_url': 'https://x/\nCAL'}, {'off_after': -1},
                 {'off_after': [5]}, {'on_url': 7}):
         assert not dl.command(dict(cmd='light', **bad))[0], bad
     assert dl.command({'cmd': 'light', 'enabled': True, 'on_url': on, 'off_url': off, 'off_after': 30})[0]
