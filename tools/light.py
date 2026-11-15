@@ -10,6 +10,7 @@ failed call is retried at most every RETRY_S while the state still wants it.
 URLs carry secret tokens, so they are never shown, logged or put in messages:
 the page only sees which host each one goes to.
 """
+import http.client
 import json
 import threading
 import time
@@ -25,10 +26,11 @@ MAX_URL = 2000
 
 
 def url_ok(u):
-    """'' (none) or an http(s) URL with a host and no whitespace."""
+    """'' (none) or an http(s) URL with a host, no whitespace and no control
+    characters (the HTTP library's error for those would quote the URL)."""
     if u == '':
         return True
-    if not isinstance(u, str) or len(u) > MAX_URL or any(c.isspace() for c in u):
+    if not isinstance(u, str) or len(u) > MAX_URL or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7f for c in u):
         return False
     p = urlparse(u)
     return p.scheme in ('http', 'https') and bool(p.hostname)
@@ -37,20 +39,24 @@ def url_ok(u):
 def http_call(url):
     """GET the URL; (ok, short message). Understands Voice Monkey's JSON replies
     ({"success": false, "error": ...}) and never puts the URL in the message."""
-    req = urllib.request.Request(url, headers={'User-Agent': 'ackwave'})
     try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'ackwave'})
         with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
             code, body = r.status, r.read(4096)
     except urllib.error.HTTPError as e:
         code, body = e.code, e.read(4096) if e.fp else b''
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (ValueError, http.client.InvalidURL):  # its text can quote the URL (and the token)
+        return False, "no reply (bad URL)"
+    except http.client.HTTPException:            # a broken reply
+        return False, "no reply (bad answer)"
+    except (urllib.error.URLError, OSError) as e:
         why = getattr(e, 'reason', e)
         return False, f"no reply ({str(why)[:80]})"
     err = None
     try:
         j = json.loads(body or b'null')
         if isinstance(j, dict):
-            if j.get('success') is False or 'error' in j:
+            if j.get('success') is False or j.get('error'):   # "error": null is fine
                 err = str(j.get('error') or 'refused')[:80]
     except ValueError:
         pass
@@ -143,6 +149,7 @@ class Light:
             return None
         url = self.cfg['on_url' if what == 'on' else 'off_url']
         self.busy = True
+        before = self.on
         self.on = what == 'on'                   # assume it worked; undone on failure
 
         def go():
@@ -151,7 +158,9 @@ class Light:
                 self.busy = False
                 self.last = dict(t=self.clock(), what=what, ok=ok, msg=msg)
                 if not ok:
-                    self.on = None               # unknown: the rule tries again
+                    # "on" failed: unknown, the rule tries again while there is motion.
+                    # "off" failed: as it was, so a light we switched on is tried again
+                    self.on = None if what == 'on' else before
                     self.retry_at = self.clock() + RETRY_S
         self.run(go)
         return what

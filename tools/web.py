@@ -529,9 +529,11 @@ class Dashboard:
         if self.settings_path:
             try:
                 os.makedirs(os.path.dirname(self.settings_path), exist_ok=True)
-                with open(self.settings_path, 'w') as f:
+                # The light URLs hold secret tokens: owner-only from the start
+                fd = os.open(self.settings_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                os.fchmod(fd, 0o600)                 # an older file may have been readable
+                with os.fdopen(fd, 'w') as f:
                     json.dump(dict(self.cfg, light=self.light.config()), f)
-                os.chmod(self.settings_path, 0o600)  # the light URLs hold secret tokens
             except OSError:
                 pass
 

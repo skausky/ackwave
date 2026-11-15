@@ -82,6 +82,8 @@ def main():
     assert dl.command({'cmd': 'light', 'enabled': True, 'on_url': on, 'off_url': off, 'off_after': 30})[0]
     assert json.load(open(lpath))['light'] == {'enabled': True, 'on_url': on, 'off_url': off, 'off_after': 30}
     assert os.stat(lpath).st_mode & 0o077 == 0, "only the owner can read the tokens"
+    os.chmod(lpath, 0o644)                           # an older, readable file is tightened too
+    assert dl.command({'cmd': 'light', 'off_after': 30})[0] and os.stat(lpath).st_mode & 0o077 == 0
     assert 'SECRET' not in json.dumps(dl.fast(30)) + json.dumps(dl.slow(30))
     assert dl.fast(30)['header']['light']['on_host'] == 'example.com'
     assert not dl.command({'cmd': 'light_test', 'what': 'dim'})[0]

@@ -34,7 +34,8 @@ def make(ok=True, **cfg):
 def main():
     # URL checks
     assert url_ok('') and url_ok(ON) and url_ok('http://192.168.1.5:8123/api/webhook/x')
-    for bad in ('ftp://x/y', 'javascript:alert(1)', 'https://', 'https://a b', 'https://x/\nCAL', 5, None):
+    for bad in ('ftp://x/y', 'javascript:alert(1)', 'https://', 'https://a b', 'https://x/\nCAL', 5, None,
+                'https://x/\x01?token=SECRET', 'https://x/\x7f'):
         assert not url_ok(bad), bad
 
     # Edges only: one "on" while motion lasts, "off" after 60 s still
@@ -82,6 +83,24 @@ def main():
     lt.update(True)
     assert len(calls) == 2 and lt.view()['state'] == 'on'
 
+    # A failed "off" is tried again (at most every 30 s) while the light is ours
+    lt, clock, calls, res = make()
+    lt.update(True)
+    lt.update(False)
+    clock.t += 60
+    res['ok'] = False
+    assert lt.update(False) == 'off' and lt.view()['state'] == 'on' and not lt.view()['last']['ok']
+    clock.t += 10
+    assert lt.update(False) is None, "not before 30 s"
+    clock.t += 20
+    res['ok'] = True
+    assert lt.update(False) == 'off' and lt.view()['state'] == 'off' and calls == [ON, OFF, OFF]
+    # ...but a failed test "off" doesn't make a light it never switched on its own
+    lt, clock, calls, res = make(ok=False)
+    lt.test('off')
+    clock.t += 100
+    assert lt.update(False) is None and lt.view()['state'] == 'unknown' and calls == [OFF]
+
     # No off URL: the routine handles off; the next motion turns it on again
     lt, clock, calls, _ = make(off_url='')
     lt.update(True)
@@ -123,7 +142,8 @@ def main():
 
     # The real call against a local server, Voice Monkey style replies
     replies = {'/ok': (200, {'success': True, 'data': 'OK'}), '/bad': (401, {'error': 'INVALID_TOKEN'}),
-               '/soft': (200, {'success': False, 'error': 'DEVICE_NOT_FOUND'}), '/text': (204, None)}
+               '/soft': (200, {'success': False, 'error': 'DEVICE_NOT_FOUND'}), '/text': (204, None),
+               '/null': (200, {'success': True, 'error': None})}
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *_a):
@@ -143,9 +163,12 @@ def main():
     assert http_call(base + '/bad?token=SECRET') == (False, 'HTTP 401: INVALID_TOKEN')
     assert http_call(base + '/soft') == (False, 'HTTP 200: DEVICE_NOT_FOUND')
     assert http_call(base + '/text')[0]
+    assert http_call(base + '/null') == (True, 'HTTP 200'), '"error": null is a success'
     srv.shutdown()
     ok, msg = http_call('http://127.0.0.1:1/x?token=SECRET')
     assert not ok and 'SECRET' not in msg
+    ok, msg = http_call('http://127.0.0.1:1/x\x01?token=SECRET')     # the library's error quotes it
+    assert not ok and 'SECRET' not in msg, msg
 
     print('-' * 40)
     print('LIGHT TESTS PASSED')
