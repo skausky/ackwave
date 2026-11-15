@@ -360,7 +360,7 @@ class Dashboard:
         with self.lock:
             self.s.feed(line)
             self.version += 1
-            self.light.update(self._motion_now())
+            self._light_rule()
             if not line.startswith('CSI,'):
                 self._debug_line(line.rstrip('\r\n'))
             self._flush()
@@ -376,6 +376,12 @@ class Dashboard:
     def tick(self):
         """Once a second from a timer, so the light still goes off when no data comes."""
         with self.lock:
+            self._light_rule()
+
+    def _light_rule(self):
+        """Only a live board switches the light: demo or file input (no board to
+        send to) never does, or a demo's fake motion would switch a real plug."""
+        if self.send:
             self.light.update(self._motion_now())
 
     def _debug_line(self, line):
@@ -707,7 +713,8 @@ class Dashboard:
                     recent=recent, board={None: 'n/a', True: 'motion', False: 'still'}[s.board_motion],
                     counts=dict(motion=n_long, brief=n_brief, scans=len(s.hist_scans)),
                     devices=f"{len(dv.devs)} heard · poking {len(dv.poking)}/{MAX_DEVS} ({dv.mode})",
-                    log=self.log_name, board_connected=bool(self.send), light=self.light.view())
+                    log=self.log_name, board_connected=bool(self.send),
+                    light=dict(self.light.view(), live=bool(self.send)))
 
     def _score(self, t0, t1, win):
         s, det = self.s, self.s.det

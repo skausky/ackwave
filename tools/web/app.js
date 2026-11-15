@@ -198,7 +198,8 @@ function renderLight(l) {
   hl.hidden = !l.enabled;
   if (l.enabled) {
     const fail = l.last && !l.last.ok;
-    hl.textContent = `Light: ${l.busy ? 'switching…' : l.state}` + (fail ? ` · last call failed (${l.last.msg})` : '');
+    hl.textContent = l.live === false ? 'Light: waits for the board (no board, no switching)'
+      : `Light: ${l.busy ? 'switching…' : l.state}` + (fail ? ` · last call failed (${l.last.msg})` : '');
     hl.style.color = fail ? 'var(--motion)' : '';
   }
   if (page !== 'settings') return;
@@ -214,7 +215,8 @@ function renderLight(l) {
       sel.append(el('option', { value: l.off_after, textContent: `${l.off_after} s` }));
     sel.value = String(l.off_after);
   }
-  $('#light-state').textContent = l.enabled ? `· light is ${l.state}` : '';
+  $('#light-state').textContent = !l.enabled ? '' : l.live === false
+    ? '· acts only while the board is connected (tests still work)' : `· light is ${l.state}`;
   $('#light-test-on').disabled = !l.on_host;
   $('#light-test-off').disabled = !l.off_host;
   const last = $('#light-last');

@@ -89,10 +89,18 @@ def main():
     assert not dl.command({'cmd': 'light_test', 'what': 'dim'})[0]
     assert dl.command({'cmd': 'light_test', 'what': 'off'})[0] and calls == [off]
     calls.clear()
-    for line in lines:                               # the demo has motion in it
+    for line in lines:                               # the demo has motion in it...
         dl.feed(line)
+    dl.tick()
+    assert calls == [], "...but without a board (demo, file) the light is never switched"
+    assert dl.fast(30)['header']['light']['live'] is False
+    live = Dashboard(State(600), send=[].append, settings=lpath,
+                     light_call=lambda u: (calls.append(u), (True, 'HTTP 200'))[1], light_run=lambda f: f())
+    for line in lines:                               # a live board: switched on motion
+        live.feed(line)
     assert calls and calls[0] == on, calls
     assert all(a != b for a, b in zip(calls, calls[1:])), "on and off alternate: edges only"
+    assert live.fast(30)['header']['light']['live'] is True
     assert Dashboard(State(60), settings=lpath).light.cfg['on_url'] == on, "kept across restarts"
     assert dl.command({'cmd': 'light', 'enabled': False, 'on_url': '', 'off_url': ''})[0]
     assert json.load(open(lpath))['light']['on_url'] == ''
