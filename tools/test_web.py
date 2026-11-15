@@ -50,6 +50,27 @@ def main():
     assert not dash.command({'cmd': 'use', 'name': 'x' * 33})[0], "name too long"
     assert not dash.command({'cmd': 'use', 'name': 'a\nCAL'})[0], "no command injection"
     assert dash.command({'cmd': 'use_default'})[0] and sent[-1] == 'USE_DEFAULT'
+    # The board's LED: validated; the board's report is what the page shows
+    assert dash.command({'cmd': 'led', 'mode': 'motion', 'bright': 200, 'pattern': 'pulse', 'color': '#00FF80'})[0]
+    assert sent[-1] == 'LEDSET,motion,200,pulse,00ff80'
+    for bad in (dict(mode='disco', bright=40, pattern='steady', color='#ff0000'),
+                dict(mode='off', bright=0, pattern='steady', color='#ff0000'),
+                dict(mode='off', bright=256, pattern='steady', color='#ff0000'),
+                dict(mode='off', bright=True, pattern='steady', color='#ff0000'),
+                dict(mode='off', bright='40', pattern='steady', color='#ff0000'),
+                dict(mode='off', bright=40, pattern='wiggle', color='#ff0000'),
+                dict(mode='off', bright=40, pattern='steady', color='red'),
+                dict(mode='off', bright=40, pattern='steady', color='#ff0000\nCAL'), dict(mode='off')):
+        assert not dash.command(dict(cmd='led', **bad))[0], bad
+    assert sent[-1] == 'LEDSET,motion,200,pulse,00ff80', "nothing sent for a bad setting"
+    assert dash.command({'cmd': 'led', 'mode': 'default'})[0] and sent[-1] == 'LEDSET,default'
+    assert dash.slow(30)['led'] is None
+    dash.feed('LEDSET,off,25,blink,0000ff\n')
+    assert dash.slow(30)['led'] == dict(mode='off', bright=25, pattern='blink', color='#0000ff')
+    dash.feed('LEDSET,error,not-saved\n')              # not a report: kept as it was
+    assert dash.slow(30)['led']['mode'] == 'off'
+    assert not Dashboard(State(60)).command({'cmd': 'led', 'mode': 'default'})[0], "needs a board"
+
     # Access points chosen one by one (APS): validated, any network names
     mac = lambda last: ':'.join(f'{x:02x}' for x in (0x50, 2, 0x91, 0x1a, 0x2b, last))
     assert dash.command({'cmd': 'aps', 'macs': [mac(1), mac(2).upper()]})[0]

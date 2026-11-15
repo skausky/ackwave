@@ -187,7 +187,7 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    | `CAL_BUTTON_GPIO` | 0 | button that recalibrates (BOOT on most boards); -1 = none |
    | `CAL_DELAY_S` | 5 | after a press: time to step away before measuring |
    | `LED_GPIO` | 48 | on-board RGB LED (WS2812); 38 on DevKitC-1 v1.1; -1 = none |
-   | `LED_BRIGHT` | 40 | LED brightness for motion, 1-255 |
+   | `LED_BRIGHT` | 40 | LED brightness, 1-255 (the default; Settings → Board LED changes it on the board) |
    | `MD_ON_SHORT` / `MD_ON_LONG` | 2.8 / 1.4 | thresholds as multiples of the quiet level; lower = more sensitive |
 
    Any of these can also be set at build time without editing, for example `CSI_DEFS="CSI_PROBE=1" idf.py build`.
@@ -222,7 +222,7 @@ It finds the board, keeps the PC from sleeping while it runs, and reconnects if 
 
 ### Running unplugged
 
-The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion (brighter = stronger), **amber fading over 30 s** = motion just ended, a quick dim **purple** flicker = a blip too faint to count (sometimes far-away movement), slow dim **blue pulse** = calibrating, dim **yellow** = looking for the router, **off** = still. It flashes **white** for half a second at power-on. With a buzzer, each event has its own sound:
+The detector runs on the board, so it works from any USB charger or power bank. The on-board RGB LED shows its state: **red** = motion (brighter = stronger), **amber fading over 30 s** = motion just ended, a quick dim **purple** flicker = a blip too faint to count (sometimes far-away movement), slow dim **blue pulse** = calibrating, dim **yellow** = looking for the router, **off** = still. It flashes **white** for half a second at power-on. The web dashboard's **Settings → Board LED** changes it without reflashing: brightness, **motion only** (just motion, no other states) or **off**, how motion looks (brighter = stronger, steady, pulse or blink) and its colour. The board saves this, so it also holds on a power bank. With a buzzer, each event has its own sound:
 
 High and loud = something is happening, soft and falling = settling down, low = a problem.
 
@@ -288,6 +288,7 @@ SENS,<x100>   slow-window motion threshold: at boot and after each SENS command
 NETWORK,<default|chosen|none|saved>,<name>   the network being watched, at boot and every 5 s
 LINK,<ts>,<weak|ok>,<acks/s>,<rssi>   router link quality changed (weak = no motion beeps)
 LED,<off|gpioN|error,...>
+LEDSET,<status|motion|off>,<1-255>,<strength|steady|pulse|blink>,<rrggbb>   LED settings: at boot, every 5 s and after each LEDSET command
 BUTTON,<gpioN|error,gpioN|recalibrate|recalibrate,pc>
 PROBE,...                                        only with CSI_PROBE=1
 ```
@@ -316,6 +317,11 @@ SOUND,test      play the current mode's sound: started, then ended (the siren in
 SENS            report the slow (4 s) window's motion threshold: SENS,<x100> (140 = x1.4)
 SENS,<110-300>  change it until the next restart (the web dashboard's Sensitivity setting)
 SENS,default    back to the build's
+LEDSET          report the LED settings
+LEDSET,<mode>,<bright>,<pattern>,<rrggbb>   change them (saved on the board): mode status
+                (everything), motion (only motion) or off; brightness 1-255; how motion
+                looks: strength (brighter = stronger), steady, pulse or blink; its colour
+LEDSET,default  back to the build's (status, LED_BRIGHT, strength, red)
 ```
 
 ## Project layout

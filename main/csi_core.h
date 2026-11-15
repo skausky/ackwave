@@ -471,6 +471,113 @@ static inline int parse_sens(const char *line, int *x100) {
     return SENS_SET;
 }
 
+// ---------- The status LED (LEDSET) ----------
+// What the on-board LED shows. Modes: status = everything (motion, the fade
+// after it, faint blips, calibrating, looking for the router); motion = only
+// motion; off = never lit. The motion pattern: strength = brighter the
+// stronger, steady, pulse (a slow breath) or blink. bright scales every colour.
+enum { LED_MODE_STATUS = 0, LED_MODE_MOTION, LED_MODE_OFF };
+enum { LED_PAT_STRENGTH = 0, LED_PAT_STEADY, LED_PAT_PULSE, LED_PAT_BLINK };
+static const char *const LED_MODE_NAMES[] = {"status", "motion", "off"};
+static const char *const LED_PAT_NAMES[] = {"strength", "steady", "pulse", "blink"};
+typedef struct {
+    uint8_t mode, pattern, bright;   // bright 1-255
+    uint32_t rgb;                    // motion colour 0xRRGGBB
+} led_cfg_t;
+
+static inline led_cfg_t led_cfg_default(int bright) {
+    led_cfg_t c = { LED_MODE_STATUS, LED_PAT_STRENGTH, (uint8_t)(bright < 1 ? 1 : bright > 255 ? 255 : bright),
+                    0xff0000 };
+    return c;
+}
+
+static inline int led_name_index(const char *s, size_t n, const char *const *names, int count) {
+    for (int i = 0; i < count; i++)
+        if (strlen(names[i]) == n && strncmp(s, names[i], n) == 0) return i;
+    return -1;
+}
+
+// LEDSET, LEDSET,default or LEDSET,<mode>,<bright>,<pattern>,<rrggbb>:
+// returns LED_QUERY, LED_DEFAULT or LED_SET (filling *out), else LED_BAD
+enum { LED_BAD = -1, LED_QUERY = 0, LED_SET, LED_DEFAULT };
+static inline int parse_led(const char *line, led_cfg_t *out) {
+    if (!line || strncmp(line, "LEDSET", 6) != 0) return LED_BAD;
+    const char *s = line + 6;
+#define LED_END(c) ((c) == '\0' || (c) == '\r' || (c) == '\n')
+    if (LED_END(*s)) return LED_QUERY;
+    if (*s++ != ',') return LED_BAD;
+    if (strncmp(s, "default", 7) == 0 && LED_END(s[7])) return LED_DEFAULT;
+    led_cfg_t c;
+    size_t n = strcspn(s, ",\r\n");
+    int m = led_name_index(s, n, LED_MODE_NAMES, 3);
+    if (m < 0 || s[n] != ',') return LED_BAD;
+    s += n + 1;
+    int v = 0, digits = 0;
+    while (*s >= '0' && *s <= '9' && digits < 4) { v = v * 10 + (*s++ - '0'); digits++; }
+    if (!digits || v < 1 || v > 255 || *s++ != ',') return LED_BAD;
+    n = strcspn(s, ",\r\n");
+    int p = led_name_index(s, n, LED_PAT_NAMES, 4);
+    if (p < 0 || s[n] != ',') return LED_BAD;
+    s += n + 1;
+    uint32_t rgb = 0;
+    for (int i = 0; i < 6; i++) {
+        char ch = *s++;
+        int h = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10
+              : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1;
+        if (h < 0) return LED_BAD;
+        rgb = rgb << 4 | (uint32_t)h;
+    }
+    if (!LED_END(*s)) return LED_BAD;
+#undef LED_END
+    c.mode = (uint8_t)m; c.bright = (uint8_t)v; c.pattern = (uint8_t)p; c.rgb = rgb;
+    *out = c;
+    return LED_SET;
+}
+
+// The LED's colour now (0xRRGGBB). searching: looking for the router;
+// strength: motion score / threshold x10 (10 = at it); ended_ms / blip_ms: when
+// motion last ended / a too-faint blip was seen (0 = never); t_ms: now.
+#define LED_FADE_MS  30000                   // "recent motion" amber fade
+#define LED_BLIP_MS  150
+static inline uint32_t led_pick(const led_cfg_t *c, bool searching, bool cal, bool motion,
+                                int strength, uint32_t ended_ms, uint32_t blip_ms, uint32_t t_ms) {
+    const int B = c->bright, d = B / 5 ? B / 5 : 1;
+    int r = 0, g = 0, b = 0;
+    if (c->mode == LED_MODE_OFF) return 0;
+    bool status = c->mode == LED_MODE_STATUS;
+    if (status && searching) {
+        r = g = d;
+    } else if (status && cal) {               // 2 s triangle pulse, dim
+        uint32_t ph = t_ms % 2000, tri = ph < 1000 ? ph : 2000 - ph;
+        b = 1 + (int)((2 * d - 1) * tri / 1000);
+    } else if (motion) {
+        int lvl = B;                          // how bright the motion colour is, 0-255
+        if (c->pattern == LED_PAT_STRENGTH) {   // B/3 at the threshold .. B at 3x
+            int k = strength < 10 ? 10 : strength > 30 ? 30 : strength;
+            lvl = B / 3 + (B - B / 3) * (k - 10) / 20;
+        } else if (c->pattern == LED_PAT_PULSE) {        // a 1.6 s breath, never fully dark
+            uint32_t ph = t_ms % 1600, tri = ph < 800 ? ph : 1600 - ph;
+            lvl = B / 6 + (int)((B - B / 6) * tri / 800);
+        } else if (c->pattern == LED_PAT_BLINK) {        // 0.4 s on, 0.4 s off
+            lvl = (t_ms % 800) < 400 ? B : 0;
+        }
+        r = (int)((c->rgb >> 16) & 0xff) * lvl / 255;
+        g = (int)((c->rgb >> 8) & 0xff) * lvl / 255;
+        b = (int)(c->rgb & 0xff) * lvl / 255;
+        if (lvl && !r && !g && !b) {          // a very dim colour still shows
+            r = (c->rgb >> 16) & 0xff ? 1 : 0; g = (c->rgb >> 8) & 0xff ? 1 : 0; b = c->rgb & 0xff ? 1 : 0;
+        }
+    } else if (!status) {
+        return 0;                             // motion only: dark otherwise
+    } else if (ended_ms && t_ms - ended_ms < LED_FADE_MS) {
+        int a = (B / 3) * (int)(LED_FADE_MS - (t_ms - ended_ms)) / LED_FADE_MS;
+        if (a >= 2) { r = a; g = a / 2; }     // amber; below 2 it would turn red
+    }
+    if (status && !r && !g && !b && !searching && !cal && !motion && blip_ms && t_ms - blip_ms < LED_BLIP_MS)
+        r = b = d;                            // a blip too faint to count: quick purple
+    return (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+}
+
 // True if the MAC is locally administered: phones' private / random addresses
 static inline bool mac_is_random(const uint8_t *m) { return (m[0] & 0x02) != 0; }
 

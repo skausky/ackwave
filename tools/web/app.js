@@ -664,7 +664,7 @@ function renderSlow() {
   else if (page === 'graphs') drawTimeline();
   else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderDev(); }
   else if (page === 'debug') renderRaw();
-  else if (page === 'settings') { renderNet(); renderSound(); renderSens(); renderThresholds(); }
+  else if (page === 'settings') { renderNet(); renderSound(); renderSens(); renderThresholds(); renderLed(); }
   if (page !== 'links') syncLinkFocus();
 }
 
@@ -702,6 +702,28 @@ function renderSound() {
     if (document.activeElement !== $(id) || !$(id).dataset.drag) $(id).value = v;
   showSoundValues();
 }
+// The board's LED: what it reported (saved on the board); controls being used aren't touched
+function renderLed() {
+  const l = slow && slow.led;
+  $('#led-state').textContent = l ? 'saved on the board' : 'waiting for the board (firmware too old?)';
+  $('#led-card').classList.toggle('off', !!l && l.mode === 'off');
+  if (!l) return;
+  for (const b of $('#led-mode').children) b.classList.toggle('on', b.dataset.m === l.mode);
+  for (const b of $('#led-pattern').children) b.classList.toggle('on', b.dataset.p === l.pattern);
+  if (!$('#led-bright').dataset.drag) $('#led-bright').value = l.bright;
+  if (document.activeElement !== $('#led-color')) $('#led-color').value = l.color;
+  showLedValues();
+}
+function showLedValues() {
+  $('#led-bright-out').textContent = `${Math.round($('#led-bright').value / 2.55)}%`;
+  $('#led-color-out').textContent = $('#led-color').value;
+}
+function setLed(change) {
+  const l = (slow && slow.led) || { mode: 'status', pattern: 'strength', bright: 40, color: '#ff0000' };
+  cmd(Object.assign({ cmd: 'led', mode: l.mode, pattern: l.pattern, bright: +$('#led-bright').value || l.bright,
+    color: $('#led-color').value || l.color }, change));
+}
+
 function renderSens() {
   const board = slow && slow.sens, want = slow && slow.settings && slow.settings.sens;
   const cur = want || board;
@@ -1237,6 +1259,13 @@ for (const id of ['#snd-vol', '#snd-hz']) {
   e.onchange = () => { delete e.dataset.drag; setSound(); };
 }
 $('#snd-test').onclick = () => cmd({ cmd: 'sound', test: true });
+for (const b of $('#led-mode').children) b.onclick = () => setLed({ mode: b.dataset.m });
+for (const b of $('#led-pattern').children) b.onclick = () => setLed({ pattern: b.dataset.p });
+$('#led-bright').oninput = () => { $('#led-bright').dataset.drag = '1'; showLedValues(); };
+$('#led-bright').onchange = () => { delete $('#led-bright').dataset.drag; setLed({}); };
+$('#led-color').oninput = showLedValues;
+$('#led-color').onchange = () => setLed({});
+$('#led-default').onclick = () => cmd({ cmd: 'led', mode: 'default' });
 $('#snd-default').onclick = () => cmd({ cmd: 'sound', mode: 'default' });
 $('#set-per-link').onchange = (e) => cmd({ cmd: 'settings', per_link: e.target.checked });
 $('#net-scan').onclick = () => { netScanned = true; cmd({ cmd: 'scan' }); };

@@ -36,6 +36,7 @@ import argparse
 import datetime
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -77,6 +78,8 @@ POKE_C = '#5fd4d0'                              # devices being poked
 WINDOWS = (30.0, 120.0, 600.0)                  # selectable detail windows (s)
 BRIEF_S = 2.0                                   # as record.py: shorter = brief blip
 SOUND_MODES = ('off', 'beep', 'alarm')                 # the board's buzzer modes (SOUND)
+LED_MODES = ('status', 'motion', 'off')                # LEDSET: what the board's LED shows
+LED_PATTERNS = ('strength', 'steady', 'pulse', 'blink')  # how motion looks on it
 SENS_RANGE = (110, 300)                                # long threshold x100 the board accepts (SENS)
 COLORS = ['#4ea8ff', '#ffb547', '#b48cff', '#5fd4d0', '#ff7eb6', '#c3e88d', '#f78c6c', '#89ddff']
 
@@ -124,6 +127,7 @@ class State:
         self.net_aps = {}                                # name -> [(bssid, ch, rssi)]
         self.net_confirmed = None                        # last network the board reported watching
         self.ap_list = None                              # access points chosen one by one (APS): [bssid]
+        self.led = None                                  # the board's LED settings (LEDSET), saved on it
         # Board settings the PC keeps applied (the board reports them every 5 s)
         self.sound = None                                # board's buzzer: dict(mode, vol, hz, buzzer)
         self.kept_sound = Kept(self, lambda w: 'SOUND,%s,%d,%d' % w, 'SOUND,default')
@@ -306,6 +310,12 @@ class State:
             return
         if line.startswith('SENS,'):
             self._sens_line(line.rstrip('\r\n'))
+            return
+        if line.startswith('LEDSET,'):                   # LEDSET,<mode>,<bright>,<pattern>,<rrggbb>
+            p = line.strip().split(',')
+            if len(p) == 5 and p[1] in LED_MODES and p[3] in LED_PATTERNS and p[2].isdigit() \
+                    and re.fullmatch(r'[0-9a-f]{6}', p[4]):
+                self.led = dict(mode=p[1], bright=int(p[2]), pattern=p[3], color='#' + p[4])
             return
         ev = parse_line(line)
         if ev is None:

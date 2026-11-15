@@ -37,8 +37,8 @@ from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
 from light import Light, http_call
-from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LONG_C, MOTION_C, SCAN_C, STILL_C,
-                 SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
+from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LED_MODES, LED_PATTERNS, LONG_C, MOTION_C,
+                 SCAN_C, STILL_C, SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
@@ -513,6 +513,21 @@ class Dashboard:
                 if c.get('what') not in ('on', 'off'):
                     return False, 'bad test'
                 return self.light.test(c['what'])
+            elif what == 'led':
+                if not self.send:
+                    return False, 'the LED needs a board'
+                if c.get('mode') == 'default':
+                    self.s.outbox.append('LEDSET,default')
+                    msg = "LED back to the firmware's settings"
+                else:
+                    color = c.get('color')
+                    bright = c.get('bright')
+                    if c.get('mode') not in LED_MODES or c.get('pattern') not in LED_PATTERNS \
+                            or not isinstance(bright, int) or isinstance(bright, bool) or not 1 <= bright <= 255 \
+                            or not isinstance(color, str) or not re.fullmatch(r'#?[0-9a-fA-F]{6}', color):
+                        return False, 'bad LED setting'
+                    self.s.outbox.append(f"LEDSET,{c['mode']},{bright},{c['pattern']},{color.lstrip('#').lower()}")
+                    msg = {'off': 'LED off', 'motion': 'LED: motion only', 'status': 'LED: status'}[c['mode']]
             elif what == 'mode':
                 if c.get('mode') not in MODES:
                     return False, 'bad mode'
@@ -582,7 +597,7 @@ class Dashboard:
         with self.lock:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
-                       settings=self.cfg, sound=s.sound, sens=s.sens, gates=self._gates(),
+                       settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
                        thresholds=self._thresholds(), today=self._today_totals())
             if s.wall_off is None:
                 return out

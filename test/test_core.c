@@ -500,6 +500,54 @@ int main(void) {
             CHECK(parse_sens("SENS,16000", &x) == SENS_BAD && parse_sens("SENSE", &x) == SENS_BAD);
             CHECK(parse_sens("SOUND", &x) == SENS_BAD && parse_cmd("SENS,160", cm) == CMD_NONE);
         }
+        {   // LEDSET: what the status LED shows
+            led_cfg_t lc = led_cfg_default(40), keep;
+            CHECK(lc.mode == LED_MODE_STATUS && lc.pattern == LED_PAT_STRENGTH && lc.bright == 40 && lc.rgb == 0xff0000);
+            CHECK(led_cfg_default(0).bright == 1 && led_cfg_default(999).bright == 255);
+            CHECK(parse_led("LEDSET", &lc) == LED_QUERY && parse_led("LEDSET\r\n", &lc) == LED_QUERY);
+            CHECK(parse_led("LEDSET,default", &lc) == LED_DEFAULT);
+            CHECK(parse_led("LEDSET,motion,200,pulse,00FF80\r\n", &lc) == LED_SET && lc.mode == LED_MODE_MOTION &&
+                  lc.bright == 200 && lc.pattern == LED_PAT_PULSE && lc.rgb == 0x00ff80);
+            keep = lc;
+            const char *bad[] = {"LEDSET,", "LEDSET,on,40,steady,ff0000", "LEDSET,off,0,steady,ff0000",
+                                 "LEDSET,off,256,steady,ff0000", "LEDSET,off,40,wobble,ff0000",
+                                 "LEDSET,off,40,steady,ff00", "LEDSET,off,40,steady,ff00zz",
+                                 "LEDSET,off,40,steady,ff0000x", "LEDSET,off,40,steady", "LEDSETX", "LED,off"};
+            for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) CHECK(parse_led(bad[i], &lc) == LED_BAD);
+            CHECK(memcmp(&lc, &keep, sizeof lc) == 0);                 // a bad line changes nothing
+            // The defaults show exactly what the LED always did
+            led_cfg_t d0 = led_cfg_default(40);
+            for (int k = 0; k <= 40; k += 5) {                         // motion: red, B/3 .. B with strength
+                int kk = k < 10 ? 10 : k > 30 ? 30 : k;
+                CHECK(led_pick(&d0, false, false, true, k, 0, 0, 1000) == (uint32_t)(40 / 3 + (40 - 40 / 3) * (kk - 10) / 20) << 16);
+            }
+            CHECK(led_pick(&d0, true, false, true, 20, 0, 0, 1000) == (uint32_t)(8 << 16 | 8 << 8));   // looking: yellow wins
+            CHECK((led_pick(&d0, false, true, false, 0, 0, 0, 1000) & 0xffff00) == 0 &&
+                  (led_pick(&d0, false, true, false, 0, 0, 0, 1000) & 0xff) > 0);                    // calibrating: blue
+            CHECK(led_pick(&d0, false, false, false, 0, 990, 0, 1000) == (uint32_t)(12 << 16 | 6 << 8)); // just ended: amber
+            CHECK(led_pick(&d0, false, false, false, 0, 0, 950, 1000) == (uint32_t)(8 << 16 | 8));       // blip: purple
+            CHECK(led_pick(&d0, false, false, false, 0, 0, 0, 1000) == 0);                                // still: off
+            // Motion only: nothing else lights it
+            led_cfg_t mo = d0; mo.mode = LED_MODE_MOTION;
+            CHECK(led_pick(&mo, true, false, false, 0, 0, 0, 1000) == 0 && led_pick(&mo, false, true, false, 0, 0, 0, 1000) == 0);
+            CHECK(led_pick(&mo, false, false, false, 0, 990, 950, 1000) == 0 && led_pick(&mo, false, false, true, 30, 0, 0, 1000) == 40u << 16);
+            // Off: never lit
+            led_cfg_t of = d0; of.mode = LED_MODE_OFF;
+            CHECK(led_pick(&of, true, true, true, 30, 990, 950, 1000) == 0);
+            // Colour and brightness: steady full, a dim colour stays visible
+            led_cfg_t st = d0; st.pattern = LED_PAT_STEADY; st.rgb = 0x00ff80; st.bright = 255;
+            CHECK(led_pick(&st, false, false, true, 10, 0, 0, 1000) == 0x00ff80);
+            st.bright = 1;
+            CHECK(led_pick(&st, false, false, true, 10, 0, 0, 1000) == 0x000100);
+            st.rgb = 0x404040;                                         // would round to black: still lit
+            CHECK(led_pick(&st, false, false, true, 10, 0, 0, 1000) == 0x010101);
+            // Blink: on, then off; pulse: dim and bright, never dark
+            led_cfg_t bl = d0; bl.pattern = LED_PAT_BLINK;
+            CHECK(led_pick(&bl, false, false, true, 10, 0, 0, 100) == 40u << 16 && led_pick(&bl, false, false, true, 10, 0, 0, 500) == 0);
+            led_cfg_t pu = d0; pu.pattern = LED_PAT_PULSE;
+            uint32_t lo = led_pick(&pu, false, false, true, 10, 0, 0, 0), hi = led_pick(&pu, false, false, true, 10, 0, 0, 800);
+            CHECK(lo > 0 && hi == 40u << 16 && lo < hi);
+        }
         {   // SOUND: buzzer settings at run time
             int sm, sv, sh;
             CHECK(parse_sound("SOUND", &sm, &sv, &sh) == SOUND_QUERY && sm == -1);

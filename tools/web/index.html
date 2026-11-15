@@ -273,6 +273,22 @@
         <p class="muted small">Beeps: "di-di-DIIING" once motion has lasted 2 s (at most every 30 s), a sliding "dooooo" when it ends. Alarm: a siren while motion lasts. Every sound uses the volume set here. While this dashboard runs it keeps the board at these settings, even after a restart.</p>
       </article>
     </section>
+    <section class="card snd led" id="led-card">
+      <div class="snd-head"><h2>Board LED</h2><span id="led-state" class="muted small"></span></div>
+      <div class="seg" id="led-mode">
+        <button type="button" data-m="status">Status</button><button type="button" data-m="motion">Motion only</button><button type="button" data-m="off">Off</button>
+      </div>
+      <label class="slider"><span>Brightness</span><input type="range" id="led-bright" min="1" max="255" step="1"><output id="led-bright-out"></output></label>
+      <div class="led-row"><span>Motion looks</span>
+        <div class="seg" id="led-pattern">
+          <button type="button" data-p="strength">Stronger = brighter</button><button type="button" data-p="steady">Steady</button><button type="button" data-p="pulse">Pulse</button><button type="button" data-p="blink">Blink</button>
+        </div>
+      </div>
+      <label class="led-row"><span>Motion colour</span><input type="color" id="led-color" value="#ff0000"><span class="muted small" id="led-color-out"></span></label>
+      <div class="dlg-tools"><button type="button" id="led-default">Use the firmware's</button></div>
+      <p class="muted small"><b>Status</b> shows everything: motion in your colour, amber fading for 30 s after it, a quick purple flash for a blip too faint to count, a slow blue pulse while calibrating, yellow while looking for the router, and dark when the room is still. <b>Motion only</b> lights it for motion and nothing else. Saved on the board, so it stays the same when the board runs on its own.</p>
+    </section>
+
     <section class="card" id="light-card">
       <div class="card-head">
         <h2>Light or smart device on motion <span id="light-state" class="muted small"></span></h2>

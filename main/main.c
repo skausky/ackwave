@@ -181,10 +181,12 @@ static bool aps_save(const ap_list_t *l) {
 static bool ssid_save(const char *name) {
     nvs_handle_t h;
     if (nvs_open("ackwave", NVS_READWRITE, &h) != ESP_OK) return false;
+    // Forgetting it erases only the network keys: other saved settings (the LED) stay
+#define GONE(e) ((e) == ESP_OK || (e) == ESP_ERR_NVS_NOT_FOUND)
     bool ok = name ? nvs_set_str(h, "ssid", name) == ESP_OK && nvs_set_str(h, "dflt", MY_SSID) == ESP_OK
-                   : nvs_erase_all(h) == ESP_OK;
-    esp_err_t e = name ? nvs_erase_key(h, "aps") : ESP_OK;    // a network by name: no list
-    ok = ok && (e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND);
+                   : GONE(nvs_erase_key(h, "ssid")) && GONE(nvs_erase_key(h, "dflt"));
+    ok = ok && GONE(nvs_erase_key(h, "aps"));                 // a network by name: no list
+#undef GONE
     ok = ok && nvs_commit(h) == ESP_OK;
     nvs_close(h);
     return ok;
@@ -391,8 +393,37 @@ static volatile bool led_motion, led_cal;    // set by print_task
 static volatile uint8_t led_strength;        // motion score / threshold x10 (10 = at threshold)
 static volatile uint32_t led_blip_ms;        // when a too-faint blip was last seen, 0 = never
 static volatile uint32_t led_ended_ms;       // when motion last ended, 0 = never
-#define LED_FADE_MS  30000                   // "recent motion" amber fade
-#define LED_BLIP_MS  150
+// What the LED shows (LEDSET): saved on the board, so it also holds on a power bank.
+// Written by run_cmd (control task, like led_update), read by led_update.
+static led_cfg_t led_cfg;
+
+static void led_load(void) {
+    led_cfg = led_cfg_default(LED_BRIGHT);
+    nvs_handle_t h;
+    led_cfg_t c;
+    size_t n = sizeof c;
+    if (nvs_open("ackwave", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_blob(h, "led", &c, &n) == ESP_OK && n == sizeof c && c.mode <= LED_MODE_OFF &&
+            c.pattern <= LED_PAT_BLINK && c.bright >= 1)
+            led_cfg = c;
+        nvs_close(h);
+    }
+}
+
+// c = NULL: forget it (back to the build's settings)
+static bool led_save(const led_cfg_t *c) {
+    nvs_handle_t h;
+    if (nvs_open("ackwave", NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t e = c ? nvs_set_blob(h, "led", c, sizeof *c) : nvs_erase_key(h, "led");
+    bool ok = (e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND) && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    return ok;
+}
+
+static void print_led(void) {
+    printf("LEDSET,%s,%d,%s,%06" PRIx32 "\n", LED_MODE_NAMES[led_cfg.mode], led_cfg.bright,
+           LED_PAT_NAMES[led_cfg.pattern], led_cfg.rgb);
+}
 static rmt_channel_handle_t led_chan;
 static rmt_encoder_handle_t led_enc;
 
@@ -429,8 +460,9 @@ static bool led_rgb(uint8_t r, uint8_t g, uint8_t b) {
     return rmt_transmit(led_chan, led_enc, grb, sizeof grb, &t) == ESP_OK;
 }
 
-static void led_hello(void) {                // white for 0.5 s at power-on
-    if (!led_rgb(LED_BRIGHT, LED_BRIGHT, LED_BRIGHT)) return;
+static void led_hello(void) {                // white for 0.5 s at power-on (unless off)
+    if (led_cfg.mode == LED_MODE_OFF) return;
+    if (!led_rgb(led_cfg.bright, led_cfg.bright, led_cfg.bright)) return;
     vTaskDelay(pdMS_TO_TICKS(500));
     led_rgb(0, 0, 0);
 }
@@ -440,27 +472,10 @@ static uint32_t clock_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000);
 static void led_update(bool searching) {
     static uint32_t shown = UINT32_MAX;      // last colour sent, 0x00RRGGBB
     if (!led_ok) return;
-    const int B = LED_BRIGHT, d = B / 5 ? B / 5 : 1;
-    uint32_t t = clock_ms(), ended = led_ended_ms, blip = led_blip_ms;
-    int r = 0, g = 0, b = 0;
-    if (searching) {
-        r = g = d;
-    } else if (led_cal) {                    // 2 s triangle pulse, dim
-        uint32_t ph = t % 2000, tri = ph < 1000 ? ph : 2000 - ph;
-        b = 1 + (int)((2 * d - 1) * tri / 1000);
-    } else if (led_motion) {                 // B/3 at the threshold .. B at 3x
-        int k = led_strength < 10 ? 10 : led_strength > 30 ? 30 : led_strength;
-        r = B / 3 + (B - B / 3) * (k - 10) / 20;
-    } else if (ended && t - ended < LED_FADE_MS) {
-        int a = (B / 3) * (int)(LED_FADE_MS - (t - ended)) / LED_FADE_MS;
-        if (a >= 2) { r = a; g = a / 2; }    // amber; below 2 it would turn red
-    }
-    if (!r && !g && !b && !searching && !led_cal && !led_motion &&
-        blip && t - blip < LED_BLIP_MS) {
-        r = b = d;
-    }
-    uint32_t c = (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
-    if (c != shown && led_rgb(r, g, b)) shown = c;   // else retry next poll
+    uint32_t c = led_pick(&led_cfg, searching, led_cal, led_motion, led_strength,
+                          led_ended_ms, led_blip_ms, clock_ms());
+    if (c != shown && led_rgb((uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c))
+        shown = c;                           // else retry next poll
 }
 
 // ---------------- Probe mode (hardware bring-up) ----------------
@@ -679,8 +694,9 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
-    int snd, smode, svol, shz, sens, sx, na;
+    int snd, smode, svol, shz, sens, sx, na, ledc;
     ap_list_t new_aps;
+    led_cfg_t new_led;
     if (glide_ms > 0) {
         tune_t t = {{{(uint16_t)hz, (uint16_t)glide_ms, (uint16_t)hz2}}, (uint8_t)vol};
         buzzer_play(&t);
@@ -708,6 +724,12 @@ static void run_cmd(const char *line) {
             buzzer_stop();               // cut whatever is playing
         }
         print_sound();
+    } else if ((ledc = parse_led(line, &new_led)) != LED_BAD) {
+        if (ledc == LED_SET) led_cfg = new_led;
+        else if (ledc == LED_DEFAULT) led_cfg = led_cfg_default(LED_BRIGHT);
+        if (ledc != LED_QUERY && !led_save(ledc == LED_SET ? &led_cfg : NULL))
+            printf("LEDSET,error,not-saved\n");
+        print_led();
     } else if ((sens = parse_sens(line, &sx)) != SENS_BAD) {
         if (sens == SENS_SET) sens_x100 = sx;
         else if (sens == SENS_DEFAULT && sens_build_x100) sens_x100 = sens_build_x100;
@@ -881,6 +903,7 @@ static void control_task(void *arg) {
            my_mac[3], my_mac[4], my_mac[5]);
     print_network();
     print_aps();
+    print_led();
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
         poll_cmds();
@@ -930,6 +953,7 @@ static void control_task(void *arg) {
             print_devices();
             print_network();
             print_aps();
+            print_led();
             print_sound();                   // so the PC sees a change it missed (e.g. a restart)
             if (sens_x100) print_sens();
             printf("STATS,%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
@@ -1101,6 +1125,7 @@ void app_main(void) {
     ESP_ERROR_CHECK(err);
     usb_init();
     ssid_load();
+    led_load();
 
     gate_init(&gate);
     gate.keep_far = aps.n > 0;             // chosen one by one: never skipped as "far"
