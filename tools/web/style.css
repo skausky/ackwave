@@ -344,3 +344,10 @@ table.kv td:nth-child(3) { color: var(--muted); font-size: 12px; }
   th, td { padding: 6px 8px; }
   .card-head { align-items: flex-start; }
 }
+
+/* Light on motion (Settings) */
+.field { display: grid; gap: 4px; margin: 10px 0; font-size: 13px; }
+.field input, .field select { width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 8px;
+  border: 1px solid #2a3542; background: #0d1116; color: var(--fg); font: inherit; }
+.field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+#light-last.err { color: var(--motion); }

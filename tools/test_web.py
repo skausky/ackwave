@@ -69,9 +69,37 @@ def main():
     assert not dash.command({'cmd': 'toggle', 'mac': 'nope'})[0]
     assert not dash.command({'cmd': 'rm -rf'})[0]
 
+    # Light on motion: validated, saved (private file), kept secret from the page,
+    # and driven by the verdict the badge shows
+    lpath, calls = os.path.join(tmp, 'light.json'), []
+    dl = Dashboard(State(600), settings=lpath, light_call=lambda u: (calls.append(u), (True, 'HTTP 200'))[1],
+                   light_run=lambda f: f())
+    on, off = 'https://example.com/on?token=SECRET', 'https://example.com/off?token=SECRET'
+    assert not dl.command({'cmd': 'light', 'enabled': True})[0], "needs an on URL first"
+    for bad in ({'on_url': 'file:///etc/passwd'}, {'on_url': 'https://x/\nCAL'}, {'off_after': 1},
+                {'off_after': [5]}, {'on_url': 7}):
+        assert not dl.command(dict(cmd='light', **bad))[0], bad
+    assert dl.command({'cmd': 'light', 'enabled': True, 'on_url': on, 'off_url': off, 'off_after': 30})[0]
+    assert json.load(open(lpath))['light'] == {'enabled': True, 'on_url': on, 'off_url': off, 'off_after': 30}
+    assert os.stat(lpath).st_mode & 0o077 == 0, "only the owner can read the tokens"
+    assert 'SECRET' not in json.dumps(dl.fast(30)) + json.dumps(dl.slow(30))
+    assert dl.fast(30)['header']['light']['on_host'] == 'example.com'
+    assert not dl.command({'cmd': 'light_test', 'what': 'dim'})[0]
+    assert dl.command({'cmd': 'light_test', 'what': 'off'})[0] and calls == [off]
+    calls.clear()
+    for line in lines:                               # the demo has motion in it
+        dl.feed(line)
+    assert calls and calls[0] == on, calls
+    assert all(a != b for a, b in zip(calls, calls[1:])), "on and off alternate: edges only"
+    assert Dashboard(State(60), settings=lpath).light.cfg['on_url'] == on, "kept across restarts"
+    assert dl.command({'cmd': 'light', 'enabled': False, 'on_url': '', 'off_url': ''})[0]
+    assert json.load(open(lpath))['light']['on_url'] == ''
+
     # Per-link mode: off by default; once on, each ACK link gets its own analysis
     assert dash.command({'cmd': 'settings', 'per_link': True})[0]
-    assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {'per_link': True, 'sound': None, 'sens': None}
+    assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {
+        'per_link': True, 'sound': None, 'sens': None,
+        'light': {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120}}
     for line in lines[half:]:
         dash.feed(line)
     sl = dash.slow(30)

@@ -36,6 +36,7 @@ from breathing import Breathing
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
+from light import Light, http_call
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LONG_C, MOTION_C, SCAN_C, STILL_C,
                  SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
 
@@ -155,7 +156,8 @@ def r2(x):
 class Dashboard:
     """Owns the State; turns it into JSON for the page and runs its commands."""
 
-    def __init__(self, state, send=None, log_name=None, prefs=None, settings=None, sessions_dir=None):
+    def __init__(self, state, send=None, log_name=None, prefs=None, settings=None, sessions_dir=None,
+                 light_call=http_call, light_run=None):
         self.s, self.send, self.log_name, self.prefs = state, send, log_name, prefs
         self.sessions = Sessions(sessions_dir) if sessions_dir else None
         self.started = time.time()
@@ -193,6 +195,9 @@ class Dashboard:
                 self.cfg['sens'] = state.sens_want
         except (ValueError, TypeError):
             pass
+        # Light on motion: web hooks called when motion starts / the room goes still
+        self.light = Light(got.get('light') if isinstance(got.get('light'), dict) else None,
+                           call=light_call, run=light_run)
         if send and state.sound_want is None:
             state.outbox.append('SOUND')         # ask the board for its buzzer settings
         if send and state.sens_want is None:
@@ -355,12 +360,23 @@ class Dashboard:
         with self.lock:
             self.s.feed(line)
             self.version += 1
+            self.light.update(self._motion_now())
             if not line.startswith('CSI,'):
                 self._debug_line(line.rstrip('\r\n'))
             self._flush()
 
     def _now(self):
         return self.s.last_wall or time.time()
+
+    def _motion_now(self):
+        """The verdict the badge shows; no data or calibrating counts as still."""
+        s = self.s
+        return bool(s.det.motion) and s.det.floor > 0 and not s.source_status()
+
+    def tick(self):
+        """Once a second from a timer, so the light still goes off when no data comes."""
+        with self.lock:
+            self.light.update(self._motion_now())
 
     def _debug_line(self, line):
         t = self._now()
@@ -478,6 +494,19 @@ class Dashboard:
                     self.cfg['sens'] = self.s.sens_want
                     msg = f'Long-window threshold x{self.s.sens_want / 100:.1f}'
                 self._save_settings()
+            elif what == 'light':
+                try:
+                    self.light.set(**{k: c.get(k) for k in ('enabled', 'on_url', 'off_url', 'off_after')})
+                except (ValueError, TypeError) as e:
+                    return False, str(e) if isinstance(e, ValueError) else 'bad light setting'
+                self._save_settings()
+                cf = self.light.cfg
+                msg = (f"Light on motion: on, off after {fmt_age(cf['off_after'])} of stillness"
+                       if cf['enabled'] else 'Light on motion: off')
+            elif what == 'light_test':
+                if c.get('what') not in ('on', 'off'):
+                    return False, 'bad test'
+                return self.light.test(c['what'])
             elif what == 'mode':
                 if c.get('mode') not in MODES:
                     return False, 'bad mode'
@@ -501,7 +530,8 @@ class Dashboard:
             try:
                 os.makedirs(os.path.dirname(self.settings_path), exist_ok=True)
                 with open(self.settings_path, 'w') as f:
-                    json.dump(self.cfg, f)
+                    json.dump(dict(self.cfg, light=self.light.config()), f)
+                os.chmod(self.settings_path, 0o600)  # the light URLs hold secret tokens
             except OSError:
                 pass
 
@@ -675,7 +705,7 @@ class Dashboard:
                     recent=recent, board={None: 'n/a', True: 'motion', False: 'still'}[s.board_motion],
                     counts=dict(motion=n_long, brief=n_brief, scans=len(s.hist_scans)),
                     devices=f"{len(dv.devs)} heard · poking {len(dv.poking)}/{MAX_DEVS} ({dv.mode})",
-                    log=self.log_name, board_connected=bool(self.send))
+                    log=self.log_name, board_connected=bool(self.send), light=self.light.view())
 
     def _score(self, t0, t1, win):
         s, det = self.s, self.s.det
@@ -1015,6 +1045,12 @@ def main():
     q = queue.Queue()
     threading.Thread(target=reader, args=(lines, q, log), daemon=True).start()
     srv = serve(dash, a.host, a.port)
+
+    def ticker():
+        while True:
+            time.sleep(1.0)
+            dash.tick()
+    threading.Thread(target=ticker, daemon=True).start()
     url = f"http://localhost:{srv.server_address[1]}"
     print(f"Dashboard: {url}   (Ctrl+C to stop)")
     if a.host not in ('127.0.0.1', 'localhost', '::1'):

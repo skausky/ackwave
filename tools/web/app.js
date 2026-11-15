@@ -183,7 +183,67 @@ function renderHeader(h) {
   $('#foot-dev').textContent = h.devices;
   $('#foot-log').textContent = h.log ? `logging to ${h.log}` : '';
   for (const id of ['#btn-cal', '#net-scan', '#net-default']) $(id).disabled = !h.board_connected;
+  renderLight(h.light);
 }
+
+// ---------------------------------------------------------------- light on motion
+function lightLast(l) {
+  if (!l || !l.last) return '';
+  const when = new Date(l.last.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return `last call: "${l.last.what}" at ${when} · ${l.last.ok ? 'OK' : 'failed'} (${l.last.msg})`;
+}
+function renderLight(l) {
+  if (!l) return;
+  const hl = $('#home-light');
+  hl.hidden = !l.enabled;
+  if (l.enabled) {
+    const fail = l.last && !l.last.ok;
+    hl.textContent = `Light: ${l.busy ? 'switching…' : l.state}` + (fail ? ` · last call failed (${l.last.msg})` : '');
+    hl.style.color = fail ? 'var(--motion)' : '';
+  }
+  if (page !== 'settings') return;
+  if (document.activeElement !== $('#light-on')) $('#light-on').checked = l.enabled;
+  for (const [id, host] of [['#light-on-url', l.on_host], ['#light-off-url', l.off_host]]) {
+    const e = $(id);
+    e.dataset.saved = host ? `saved · goes to ${host} (paste a new one to replace it)` : '';
+    if (!e.value) e.placeholder = e.dataset.saved || e.dataset.hint || e.placeholder;
+  }
+  const sel = $('#light-after');
+  if (document.activeElement !== sel) {
+    if (![...sel.options].some((o) => +o.value === l.off_after))
+      sel.append(el('option', { value: l.off_after, textContent: `${l.off_after} s` }));
+    sel.value = String(l.off_after);
+  }
+  $('#light-state').textContent = l.enabled ? `· light is ${l.state}` : '';
+  $('#light-test-on').disabled = !l.on_host;
+  $('#light-test-off').disabled = !l.off_host;
+  const last = $('#light-last');
+  last.textContent = lightLast(l);
+  last.classList.toggle('err', !!(l.last && !l.last.ok));
+}
+for (const id of ['#light-on-url', '#light-off-url']) $(id).dataset.hint = $(id).placeholder;
+$('#light-on').onchange = async (e) => {
+  const body = { cmd: 'light', enabled: e.target.checked };
+  const on = $('#light-on-url').value.trim(), off = $('#light-off-url').value.trim();
+  if (on) body.on_url = on;
+  if (off) body.off_url = off;
+  if (!(await cmd(body))) e.target.checked = !e.target.checked;
+  else { $('#light-on-url').value = ''; $('#light-off-url').value = ''; }
+};
+$('#light-save').onclick = async () => {
+  const body = { cmd: 'light', off_after: +$('#light-after').value };
+  const on = $('#light-on-url').value.trim(), off = $('#light-off-url').value.trim();
+  if (on) body.on_url = on;
+  if (off) body.off_url = off;
+  if (await cmd(body)) { $('#light-on-url').value = ''; $('#light-off-url').value = ''; }
+};
+$('#light-after').onchange = (e) => cmd({ cmd: 'light', off_after: +e.target.value });
+$('#light-test-on').onclick = () => cmd({ cmd: 'light_test', what: 'on' });
+$('#light-test-off').onclick = () => cmd({ cmd: 'light_test', what: 'off' });
+$('#light-clear').onclick = async () => {
+  if (await cmd({ cmd: 'light', enabled: false, on_url: '', off_url: '' }))
+    for (const id of ['#light-on-url', '#light-off-url']) { $(id).dataset.saved = ''; $(id).placeholder = $(id).dataset.hint; }
+};
 
 // Recent motion as short sentences: when, what, how long, where
 function renderRecent(rows) {

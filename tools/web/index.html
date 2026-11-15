@@ -43,6 +43,7 @@
         <div class="hero-top"><span class="state-dot" id="home-dot"></span><span class="hero-word" id="home-word">WAITING</span></div>
         <div class="hero-head" id="home-head">waiting for data…</div>
         <div class="hero-sub" id="home-since"></div>
+        <div class="hero-sub muted" id="home-light" hidden></div>
         <div class="meter" id="meter" title="How close the room is to the motion threshold right now">
           <div class="meter-label"><span>Activity now</span><b id="meter-word">–</b></div>
           <div class="meter-track"><div class="meter-fill" id="meter-fill"></div><div class="meter-mark"></div></div>
@@ -271,6 +272,19 @@
         <div class="dlg-tools"><button type="button" id="snd-test">Test sounds</button><button type="button" id="snd-default">Use the firmware's settings</button></div>
         <p class="muted small">Beeps: "di-di-DIIING" once motion has lasted 2 s (at most every 30 s), a sliding "dooooo" when it ends. Alarm: a siren while motion lasts. Every sound uses the volume set here. While this dashboard runs it keeps the board at these settings, even after a restart.</p>
       </article>
+    </section>
+    <section class="card" id="light-card">
+      <div class="card-head">
+        <h2>Light on motion <span id="light-state" class="muted small"></span></h2>
+        <label class="switch inline"><input type="checkbox" id="light-on"><span class="track"><span class="knob"></span></span><span class="small">on</span></label>
+      </div>
+      <label class="field"><span>URL that turns it on</span><input type="password" id="light-on-url" autocomplete="off" spellcheck="false" placeholder="https://api-v3.voicemonkey.io/trigger?token=…&amp;device=…"></label>
+      <label class="field"><span>URL that turns it off <span class="muted">(optional)</span></span><input type="password" id="light-off-url" autocomplete="off" spellcheck="false" placeholder="https://api-v3.voicemonkey.io/trigger?token=…&amp;device=…"></label>
+      <label class="field"><span>Turn off after the room is still for</span>
+        <select id="light-after"><option value="30">30 s</option><option value="60">1 min</option><option value="120">2 min</option><option value="300">5 min</option><option value="600">10 min</option><option value="1800">30 min</option></select></label>
+      <div class="dlg-tools gap"><button type="button" class="primary" id="light-save">Save URLs</button><button type="button" id="light-test-on">Test on</button><button type="button" id="light-test-off">Test off</button><button type="button" id="light-clear">Forget URLs</button></div>
+      <p class="muted small" id="light-last"></p>
+      <p class="muted small">Calls the first URL when motion starts and the second once the room has been still for the time above. It only switches off a light it switched on. For an Amazon Smart Plug, make two Routine Trigger devices in <a href="https://voicemonkey.io" target="_blank" rel="noopener">Voice Monkey</a> (e.g. "ackwave motion" and "ackwave still"), then two Alexa Routines: when each one is pressed, turn the plug on / off. Paste each device's trigger URL here. Any URL that switches something works (Home Assistant, IFTTT webhooks). The URLs hold secret tokens: they are kept in <code>sessions/dashboard.json</code> on this PC and never shown again.</p>
     </section>
   </section>
 </main>
