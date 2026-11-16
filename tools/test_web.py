@@ -332,6 +332,45 @@ def main():
         got = json.loads(body)
         assert st == 200 and {'sessions', 'by_hour', 'heatmap', 'durations', 'today'} <= set(got)
         assert len(got['by_hour']) == 24 and got['sessions'][0]['live']
+        # The Map page: its script, and the layout saved on the PC (/api/map)
+        st, body = request(port, 'GET', '/map.js')
+        assert st == 200 and b'window.AckMap' in body
+        hdr = {'X-Ackwave': '1', 'Content-Type': 'application/json'}
+        st, body = request(port, 'GET', '/api/map', headers={'X-Ackwave': '1'})
+        assert st == 200 and json.loads(body) == {}, "no map yet: empty"
+        mac = ':'.join(f'{x:02x}' for x in (0x50, 2, 0x91, 1, 2, 3))
+        layout = {'unit': 'ft', 'env': 'home', 'view': {'x': 1.5, 'y': -2, 's': 30},
+                  'nodes': [{'key': 'ap:0', 'name': 'router', 'x': 6.1, 'y': 0.4, 'placed': True, 'junk': 1},
+                            {'key': mac, 'name': 'Amazon', 'x': -2, 'y': 3.5, 'eirp': 16}],
+                  'img': 'data:image/png;base64,AAAA', 'extra': {'a': 1}}
+        st, body = request(port, 'POST', '/api/map', json.dumps(layout), hdr)
+        assert st == 200 and json.loads(body)['ok'], body
+        st, body = request(port, 'GET', '/api/map', headers={'X-Ackwave': '1'})
+        got = json.loads(body)
+        assert got['nodes'][0] == {'key': 'ap:0', 'name': 'router', 'x': 6.1, 'y': 0.4, 'placed': True}, got
+        assert got['nodes'][1]['eirp'] == 16 and got['view'] == {'x': 1.5, 'y': -2, 's': 30}
+        assert 'extra' not in got and 'img' not in got and 'junk' not in got['nodes'][0], "unknown keys dropped"
+        mpath = os.path.join(os.path.dirname(dash.settings_path), 'map.json')
+        assert os.path.isfile(mpath) and not os.path.exists(mpath + '.tmp'), "written atomically"
+        st, _ = request(port, 'GET', '/api/map')
+        assert st == 403, "map without the dashboard header refused"
+        st, _ = request(port, 'POST', '/api/map', json.dumps(layout), {'Content-Type': 'application/json'})
+        assert st == 403, "saving without the dashboard header refused"
+        st, _ = request(port, 'POST', '/api/map', json.dumps(layout), dict(hdr, Host='evil.example'))
+        assert st == 403, "saving for a foreign Host refused"
+        st, _ = request(port, 'POST', '/api/map', json.dumps(layout), dict(hdr, Origin='http://evil.example'))
+        assert st == 403, "cross-site save refused"
+        big = dict(layout, pad='x' * (300 * 1024))
+        st, _ = request(port, 'POST', '/api/map', json.dumps(big), hdr)
+        assert st == 413, "over the size cap"
+        for bad in ({'nodes': [{'key': 'ap:0', 'x': float('nan'), 'y': 0}]}, {'nodes': [{'key': 'ap:0', 'x': True, 'y': 0}]},
+                    {'nodes': [{'key': 'ap:0', 'x': 1e9, 'y': 0}]}, {'nodes': [{'key': 'a\nb', 'x': 0, 'y': 0}]},
+                    {'nodes': [{'x': 0, 'y': 0}]}, {'nodes': 'x'}, {'unit': 'cubit'}, {'view': {'x': 0, 'y': 0, 's': 0}},
+                    {'nodes': [{'key': str(i), 'x': 0, 'y': 0} for i in range(65)]}, [1, 2]):
+            st, _ = request(port, 'POST', '/api/map', json.dumps(bad), hdr)
+            assert st == 400, bad
+        st, body = request(port, 'GET', '/api/map', headers={'X-Ackwave': '1'})
+        assert json.loads(body) == got, "a refused save changes nothing"
         st, _ = request(port, 'GET', '/api/nope', headers={'X-Ackwave': '1'})
         assert st == 404
         st, _ = request(port, 'GET', '/', headers={'Host': 'evil.example:80'})
@@ -358,14 +397,16 @@ def pages_and_debug(tmp):
     """The multi-page front end and the data behind its new pages."""
     here = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
     js = open(os.path.join(here, 'app.js')).read()
+    mapjs = open(os.path.join(here, 'map.js')).read()
     html = open(os.path.join(here, 'index.html')).read()
     # Names from the network (devices, networks, labels) only ever go in as text
     for bad in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval('):
-        assert bad not in js, bad
-    routes = ['home', 'graphs', 'stats', 'links', 'debug', 'settings']
+        assert bad not in js and bad not in mapjs, bad
+    routes = ['home', 'graphs', 'stats', 'links', 'map', 'debug', 'settings']
     for r in routes:
         assert f'data-page="{r}"' in html and f'href="#/{r}"' in html, r
-    assert "const ROUTES = ['home', 'graphs', 'stats', 'links', 'debug', 'settings'];" in js
+    assert "const ROUTES = ['home', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];" in js
+    assert '<script src="/map.js"></script>' in html and 'localStorage' not in mapjs, "the layout lives on the PC"
     assert 'data-page="train"' not in html and 'data-page="ai"' not in html, "no placeholder pages"
     assert js.count('new EventSource(') == 1, "one live connection for every page"
     assert "'X-Ackwave': '1'" in js and "fetch('/api/stats'" in js
@@ -389,6 +430,11 @@ def pages_and_debug(tmp):
     assert all(not line.startswith('CSI,') for _t, line in dbg['tail']) and len(dbg['tail']) <= 250
     assert len(json.dumps(dbg)) < 120_000
     sl = d.slow(30)
+    # The live radio list (always on): one entry per live ACK link, for the Map page
+    assert sl['radio'] and sl['channel'] in range(1, 14)
+    for r in sl['radio']:
+        assert {'key', 'label', 'ap', 'rssi', 'rate'} <= set(r) and r['rate'] > 0, r
+    assert sl['radio'][0]['key'] == 'ap:0' and sl['radio'][0]['label'] == 'router'
     assert [(g['node'], g['state']) for g in sl['gates']] == [(0, 'ok'), (1, 'far')]
     assert sl['thresholds']['on_short'] == 2.8 and sl['thresholds']['short_gate'] == 1.2
     assert set(sl['today']) == {'periods', 'blips', 'motion_s'}

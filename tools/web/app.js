@@ -15,7 +15,7 @@ const C = {
   cal: css('--cal'), long: css('--long'), blue: css('--blue'), card: css('--card'), card2: css('--card2'),
 };
 const FONT = '11px ui-sans-serif, system-ui, sans-serif';
-const ROUTES = ['home', 'graphs', 'stats', 'links', 'debug', 'settings'];
+const ROUTES = ['home', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];
 
 let win = 30, paused = false, es = null;
 let link = null;                         // per-link focus for breathing / Doppler (null = router)
@@ -634,6 +634,7 @@ function drawTimeline(id = '#timeline', compact = false) {
 function renderFast() {
   if (!fast) return;
   renderHeader(fast.header);
+  if (page === 'map') window.AckMap.update(null, fast.header);   // the board's verdict pulses the router link
   if (!paused) drawLive(true);
 }
 
@@ -663,6 +664,7 @@ function renderSlow() {
   if (page === 'home') { renderHome(); drawTimeline('#home-tl', true); }
   else if (page === 'graphs') drawTimeline();
   else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderDev(); }
+  else if (page === 'map') window.AckMap.update(slow, fast && fast.header);
   else if (page === 'debug') renderRaw();
   else if (page === 'settings') { renderNet(); renderSound(); renderSens(); renderThresholds(); renderLed(); }
   if (page !== 'links') syncLinkFocus();
@@ -1223,6 +1225,7 @@ function route() {
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   document.body.dataset.page = page;
+  if (page === 'map') window.AckMap.show(); else window.AckMap.hide();
   clearInterval(statsTimer);
   if (page === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 60000); }
   if (page === 'settings' && !netScanned && fast && fast.header.board_connected &&
@@ -1328,6 +1331,7 @@ if (params.has('shot')) {
   for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('on', a.dataset.route === page);
   document.body.dataset.page = page;
   renderPage();
+  if (page === 'map') window.AckMap.snapshot(get('/api/map'), slow, fast.header);
   if (params.get('hover')) {
     for (const [id, h] of Object.entries(hov)) {
       h.x = h.f.r.l + (h.f.r.r - h.f.r.l) * +params.get('hover'); h.y = (h.f.r.t + h.f.r.b) / 2;

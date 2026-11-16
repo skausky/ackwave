@@ -31,6 +31,7 @@
   <a href="#/graphs" data-route="graphs"><svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 4 4-7 5 6"/><path d="M3 21h18"/></svg><span>Graphs</span></a>
   <a href="#/stats" data-route="stats"><svg viewBox="0 0 24 24"><path d="M5 21V11M10 21V5M15 21v-7M20 21V9"/></svg><span>Stats</span></a>
   <a href="#/links" data-route="links"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M7.3 11l9.4-4M7.3 13l9.4 4"/></svg><span>Links</span></a>
+  <a href="#/map" data-route="map"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg><span>Map</span></a>
   <a href="#/debug" data-route="debug"><svg viewBox="0 0 24 24"><path d="M8 6l-5 6 5 6M16 6l5 6-5 6M14 4l-4 16"/></svg><span>Debug</span></a>
   <a href="#/settings" data-route="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg><span>Settings</span></a>
 </nav>
@@ -202,6 +203,46 @@
     </section>
   </section>
 
+  <!-- ======================= MAP ======================= -->
+  <section class="page" data-page="map" hidden>
+    <div class="map-grid">
+      <section class="card map-card">
+        <div class="card-head">
+          <h2>Where the board senses motion <span class="muted small" id="map-wave"></span></h2>
+          <div class="tools">
+            <div class="seg" id="map-unit"><button type="button" data-u="ft">ft</button><button type="button" data-u="m">m</button></div>
+            <select id="map-env" title="How fast the signal fades with distance indoors"></select>
+            <button type="button" id="map-fit">Fit</button>
+            <button type="button" id="map-reset" class="ghost">Reset</button>
+          </div>
+        </div>
+        <p class="cap">Each oval is a link's 1st Fresnel zone, drawn to scale: a person inside it changes that link's signal the most (the dashed oval is the weaker 2nd zone). It pulses red while that link sees motion. Drag each dot to where the router or device really is; pinch or scroll to zoom, drag empty space to pan.</p>
+        <div class="map-stage"><canvas id="map-cv"></canvas><div class="overlay" id="map-msg"></div></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>Live links</h2></div>
+        <div id="map-links"></div>
+        <details class="map-notes">
+          <summary>How to read this</summary>
+          <p>A link's motion zone depends only on its length and the channel, so once the dots are where things really are, the ovals are exact. Motion right next to the board or the device counts too, even outside the oval, because that end of the link is so close.</p>
+          <p>The dashed ring around a dot means it was placed from its signal strength, which is rough: walls and furniture make things look farther away. Drag it to its real place.</p>
+          <p>The "open air" estimate uses the free-space loss and the environment's fade rate. A link that is many dB weaker than that has walls or furniture in between.</p>
+        </details>
+        <details class="map-notes">
+          <summary>Hardware numbers used</summary>
+          <table class="kv"><tbody>
+            <tr><td>Board</td><td>ESP32-S3-DevKitC-1, ESP32-S3-WROOM-1 module with PCB antenna</td></tr>
+            <tr><td>Board TX</td><td>20.0 dBm at 802.11g 6 Mbps (Espressif datasheet, typical); ackwave pokes at 6 Mbps</td></tr>
+            <tr><td>Board RX</td><td>−93 dBm sensitivity at 6 Mbps (Espressif datasheet, typical)</td></tr>
+            <tr><td>Antenna</td><td>0 dBi assumed. It is the wavy gold trace at the end of the module. Standing the board on its short edge, antenna end up, matches most routers' upright antennas; keep that end clear of metal. Test it live: turn the board while watching the router's dBm here or on the Links page.</td></tr>
+            <tr><td>ackwave limits</td><td>Links under −85 dBm are weak (no motion beeps); access points and devices drop out under −80 dBm</td></tr>
+            <tr><td>Devices</td><td>Placed from typical power: 20 dBm for routers, 17 dBm for other devices</td></tr>
+          </tbody></table>
+        </details>
+      </section>
+    </div>
+  </section>
+
   <!-- ======================= DEBUG ======================= -->
   <section class="page" data-page="debug" hidden>
     <section class="card chart-card">
@@ -326,6 +367,7 @@
   </form>
 </dialog>
 
+<script src="/map.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

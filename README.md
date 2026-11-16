@@ -58,6 +58,7 @@ Sessions from both `gui` and `record` are saved to `sessions/` in the project fo
 | **Graphs** | The motion score with its thresholds, Doppler, breathing rate and the whole session |
 | **Stats** | Activity by day and hour across all recorded sessions, by hour of day, how long motion lasts, and every session's totals |
 | **Links** | Per-link analysis (experimental), packets per link, the board's poke gating, and the devices to poke |
+| **Map** | Where the board senses motion: each live link (the router, poked devices) as a dot with its motion zone (1st Fresnel zone) drawn to scale in feet and inches, pulsing red while that link sees motion, plus each link's dBm, answers a second, distance and how much weaker it is than open air would give. Dots start at a rough distance guessed from their signal; drag them to where things really are (saved on this PC in `sessions/map.json`) |
 | **Debug** | Router ACK shape jumps and gaps, calibration history, commands sent and refused, board counters and the board's latest lines |
 | **Settings** | The network to watch, sensitivity and the thresholds, the buzzer |
 

@@ -18,6 +18,7 @@ naming this server (no DNS rebinding).
 """
 import argparse
 import json
+import math
 import os
 import queue
 import re
@@ -43,7 +44,11 @@ from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LED_MODES, LED_PATTER
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
-          '/style.css': ('style.css', 'text/css; charset=utf-8')}
+          '/style.css': ('style.css', 'text/css; charset=utf-8'),
+          '/map.js': ('map.js', 'text/javascript; charset=utf-8')}
+MAP_MAX = 256 * 1024                        # the Map page's saved layout (no pictures): bytes
+MAP_NODES = 64
+MAP_UNITS, MAP_ENVS = ('ft', 'm'), ('outdoor', 'open', 'home', 'cluttered')
 FAST_S, SLOW_S, DEBUG_S = 0.25, 1.0, 2.0     # update periods of the three event types
 TAIL_N = 250                                # board lines kept for the Debug page (not CSI)
 TODAY_S = 10.0                              # today's totals: recomputed this often
@@ -599,7 +604,8 @@ class Dashboard:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
-                       thresholds=self._thresholds(), today=self._today_totals())
+                       thresholds=self._thresholds(), today=self._today_totals(),
+                       radio=self._radio(), channel=s.channel[0] if s.channel else None)
             if s.wall_off is None:
                 return out
             t1 = max(s.now, win)
@@ -665,6 +671,70 @@ class Dashboard:
             val = summarize(past, self._live_session())['today']
             self._today = (time.time(), val)
         return val
+
+    # ---------- the Map page ----------
+    def _map_path(self):
+        return os.path.join(os.path.dirname(self.settings_path), 'map.json') if self.settings_path else None
+
+    def map_load(self):
+        """The saved layout ({} if none or unreadable)."""
+        p = self._map_path()
+        try:
+            with open(p) as f:
+                got = json.load(f)
+            return clean_map(got)
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def map_save(self, m):
+        """Validate and store a layout; (ok, message). Written atomically."""
+        try:
+            m = clean_map(m)
+        except ValueError as e:
+            return False, str(e)
+        p = self._map_path()
+        if not p:
+            return False, 'nowhere to save the map (no sessions folder)'
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            tmp = p + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(m, f)
+            os.replace(tmp, p)
+        except OSError as e:
+            return False, f'could not save the map ({e.strerror})'
+        return True, 'saved'
+
+    def _radio(self):
+        """Every live ACK link (always, not only with per-link analysis): what the
+        Map page draws. key: the device's MAC for a poked device, 'ap:<n>' for an
+        access point (ap:0 = the router)."""
+        s = self.s
+        by_idx = {i: mac for mac, i in s.devices.poking.items()}
+        out = []
+        for (src, kind) in sorted(s.arrivals):
+            if kind != 1:
+                continue
+            rate = s.rate((src, 1))
+            if rate <= 0:
+                continue
+            ap = src < MAX_APS
+            key = f'ap:{src}' if ap else by_idx.get(src)
+            if key is None:
+                continue                         # a device that isn't poked any more
+            row = dict(key=key, src=int(src), label=s.devices.link_label(src), ap=ap,
+                       rssi=s.rssi.get((src, 1)), rate=round(rate))
+            ln = self.links.get(src) if self.cfg['per_link'] else None
+            if ln:
+                md = ln['md']
+                now_us = int(s.now * 1e6)
+                st = md.state(now_us)
+                ms, _ml = md.det.max_scores(now_us)
+                f = md.det.floor
+                row.update(state=st, moving=st == 'motion',
+                           activity=r2(ms / f) if ms is not None and f > 0 and st in ('motion', 'still') else None)
+            out.append(row)
+        return out
 
     def _gates(self):
         """Each poked link's gating state from the board's GATE lines."""
@@ -895,6 +965,57 @@ class Dashboard:
         return out
 
 
+def _num(v, lo=-1e6, hi=1e6):
+    """A finite number in [lo, hi], else ValueError (booleans aren't numbers here)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
+        raise ValueError('bad number in the map')
+    return float(v)
+
+
+def _text(v, n=64):
+    if not isinstance(v, str) or len(v) > n or any(ord(c) < 0x20 for c in v):
+        raise ValueError('bad text in the map')
+    return v
+
+
+def clean_map(m):
+    """The Map page's layout, checked: only known keys, finite numbers, short
+    strings. Positions are metres from the board. Raises ValueError."""
+    if not isinstance(m, dict):
+        raise ValueError('the map must be an object')
+    out = {}
+    if 'unit' in m:
+        if m['unit'] not in MAP_UNITS:
+            raise ValueError('bad unit')
+        out['unit'] = m['unit']
+    if 'env' in m:
+        if m['env'] not in MAP_ENVS:
+            raise ValueError('bad environment')
+        out['env'] = m['env']
+    if 'view' in m:
+        v = m['view']
+        if not isinstance(v, dict):
+            raise ValueError('bad view')
+        out['view'] = dict(x=_num(v.get('x')), y=_num(v.get('y')), s=_num(v.get('s'), 0.01, 1e5))
+    if 'nodes' in m:
+        nodes = m['nodes']
+        if not isinstance(nodes, list) or len(nodes) > MAP_NODES:
+            raise ValueError('bad nodes')
+        out['nodes'] = []
+        for n in nodes:
+            if not isinstance(n, dict):
+                raise ValueError('bad node')
+            c = dict(key=_text(n.get('key')), x=_num(n.get('x'), -10000, 10000), y=_num(n.get('y'), -10000, 10000))
+            if 'name' in n:
+                c['name'] = _text(n['name'])
+            if 'eirp' in n:
+                c['eirp'] = _num(n['eirp'], -10, 40)
+            if 'placed' in n:
+                c['placed'] = bool(n['placed'])
+            out['nodes'].append(c)
+    return out
+
+
 def make_handler(dash, allowed_hosts):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
@@ -931,6 +1052,8 @@ def make_handler(dash, allowed_hosts):
                     return self._reply(403, {'error': 'missing X-Ackwave header'})
                 if u.path == '/api/stats':
                     return self._reply(200, dash.stats())
+                if u.path == '/api/map':
+                    return self._reply(200, dash.map_load())
                 return self._reply(404, {'error': 'not found'})
             if u.path == '/snapshot':                # one-off (screenshots, debugging)
                 q = parse_qs(u.query)
@@ -987,7 +1110,28 @@ def make_handler(dash, allowed_hosts):
             host = self.headers.get('Host', '')
             if self.headers.get('X-Ackwave') != '1' or (origin and urlparse(origin).netloc != host):
                 return self._reply(403, {'ok': False, 'msg': 'cross-site request refused'})
-            if urlparse(self.path).path != '/cmd':
+            path = urlparse(self.path).path
+            if path == '/api/map':
+                try:
+                    n = int(self.headers.get('Content-Length') or 0)
+                except ValueError:
+                    return self._reply(400, {'ok': False, 'msg': 'bad request'})
+                if n > MAP_MAX:
+                    self.close_connection = True
+                    left = min(n, 16 * MAP_MAX)          # read it away so the reply gets through
+                    while left > 0:
+                        got = self.rfile.read(min(left, 65536))
+                        if not got:
+                            break
+                        left -= len(got)
+                    return self._reply(413, {'ok': False, 'msg': 'map too big'})
+                try:
+                    m = json.loads(self.rfile.read(n) or b'{}')
+                except ValueError:
+                    return self._reply(400, {'ok': False, 'msg': 'bad request'})
+                ok, msg = dash.map_save(m)
+                return self._reply(200 if ok else 400, {'ok': ok, 'msg': msg})
+            if path != '/cmd':
                 return self._reply(404, {'ok': False, 'msg': 'not found'})
             try:
                 n = int(self.headers.get('Content-Length') or 0)

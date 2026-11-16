@@ -313,6 +313,26 @@ table.kv td:nth-child(3) { color: var(--muted); font-size: 12px; }
 .card .now { margin: 0 0 4px; font-weight: 600; }
 .snd h2 { font-size: 14px; margin: 0; }
 
+/* ---------- map ---------- */
+.map-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr); gap: var(--gap); align-items: start; }
+.map-card .tools { flex-wrap: wrap; }
+.map-card select { font: inherit; color: var(--fg); background: var(--card2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 5px 8px; }
+.map-stage { position: relative; height: min(64vh, 640px); min-height: 320px; border: 1px solid var(--line);
+  border-radius: 10px; overflow: hidden; background: var(--bg); touch-action: none; }
+.map-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+.map-stage canvas:active { cursor: grabbing; }
+.map-link { border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; margin-bottom: 8px; display: grid; gap: 3px;
+  transition: border-color .2s; }
+.map-link.moving { border-color: var(--motion); }
+.map-link-head { display: flex; align-items: center; gap: 8px; }
+.map-link-head b { flex: 1; }
+.map-dot { width: 11px; height: 11px; border-radius: 50%; flex: none; }
+.chip.motion { color: var(--motion); border-color: var(--motion); font-weight: 700; }
+.map-notes summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 8px; }
+.map-notes p { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+@media (max-width: 1000px) { .map-grid { grid-template-columns: 1fr; } .map-stage { height: 56vh; } }
+
 /* ---------- small screens ---------- */
 @media (max-width: 1100px) {
   .home-grid { grid-template-columns: 1fr; }
