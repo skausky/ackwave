@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>ackwave Fresnel zone planner</title>
+<style>
+  :root {
+    --bg: #0d1116; --panel: #161c24; --line: #2a3542; --fg: #e6edf3; --muted: #8b98a8;
+    --accent: #6fd3cf; --board: #6fd3cf; --ap: #f2b45a; --plug: #b58cff; --other: #7fb8ff;
+    --good: #5fd38a; --ok: #e8c94f; --bad: #ff7a6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 10px;
+    background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0 6px 0 0; white-space: nowrap; }
+  header h1 span { color: var(--accent); }
+  button, select, label.btn { font: inherit; color: var(--fg); background: #1f2731; border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; cursor: pointer; white-space: nowrap; }
+  button:hover, label.btn:hover { border-color: var(--accent); }
+  button.on { background: var(--accent); color: #062421; border-color: var(--accent); font-weight: 600; }
+  button.primary { background: var(--accent); color: #062421; border-color: var(--accent); font-weight: 600; }
+  input[type=file] { display: none; }
+  .seg { display: inline-flex; }
+  .seg button { border-radius: 0; margin-left: -1px; }
+  .seg button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
+  .seg button:last-child { border-radius: 0 8px 8px 0; }
+  .grow { flex: 1; }
+  #stage { position: relative; flex: 1; min-height: 0; touch-action: none; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #hint { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: rgba(13,17,22,.9);
+    border: 1px solid var(--accent); border-radius: 10px; padding: 7px 12px; font-size: 13px; max-width: 92%;
+    text-align: center; pointer-events: none; }
+  #hint:empty { display: none; }
+  #legend { position: absolute; right: 10px; bottom: 10px; background: rgba(13,17,22,.85); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 8px; font-size: 11.5px; color: var(--muted); pointer-events: none; }
+  #legend .bar { width: 130px; height: 8px; border-radius: 4px; margin: 4px 0 2px;
+    background: linear-gradient(90deg, rgba(40,90,255,.15), #2a7bff, #19c2a0, #e8d14f, #ff5a3c); }
+  #legend .ends { display: flex; justify-content: space-between; }
+  #sheet { background: var(--panel); border-top: 1px solid var(--line); max-height: 44vh; overflow: auto; padding: 6px 10px 14px; }
+  #sheet h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 10px 0 6px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 5px 0; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; display: inline-block; }
+  .row input[type=text], .row input[type=number] { font: inherit; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; }
+  .row input[type=text] { flex: 1; min-width: 100px; }
+  .row input[type=number] { width: 70px; }
+  .link { padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; margin: 6px 0; }
+  .link b { color: var(--fg); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: #0d1116; }
+  .muted { color: var(--muted); font-size: 12.5px; }
+  .small { font-size: 12px; }
+  #dlg { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 5; }
+  #dlg.open { display: flex; }
+  #dlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; width: min(340px, 92vw); }
+  #dlg input { width: 100%; font: inherit; font-size: 18px; color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px; margin: 8px 0; }
+  input[type=range] { accent-color: var(--accent); width: 110px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  details p, details li { color: var(--muted); font-size: 12.5px; }
+  table.spec { border-collapse: collapse; font-size: 12px; color: var(--muted); }
+  table.spec td { padding: 2px 10px 2px 0; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>ackwave</span> Fresnel planner</h1>
+  <label class="btn" title="Floor plan or a satellite screenshot">Picture<input type="file" id="file" accept="image/*"></label>
+  <span class="seg">
+    <button id="m-move" class="on">Move</button><button id="m-wall">Wall</button><button id="m-scale">Scale</button>
+  </span>
+  <button id="btn-add">+ Device</button>
+  <button id="btn-heat">Heatmap</button>
+  <button id="btn-fit">Fit</button>
+</header>
+<div id="stage"><canvas id="cv"></canvas><div id="hint"></div>
+  <div id="legend" hidden><div>Motion sensitivity</div><div class="bar"></div><div class="ends"><span>low</span><span>high</span></div></div>
+</div>
+<div id="sheet">
+  <h2>Links: what the board hears</h2>
+  <div id="links"></div>
+
+  <h2>Devices</h2>
+  <div id="devices"></div>
+
+  <h2>Walls <span class="muted" style="text-transform:none;letter-spacing:0">(tap Wall, then tap each end)</span></h2>
+  <div class="row"><span class="muted">New walls are</span><select id="wall-mat"></select></div>
+  <div id="walls"></div>
+
+  <h2>Settings</h2>
+  <div class="row">
+    <select id="ch" title="The channel your router is on"></select>
+    <select id="unit"><option value="m">metres</option><option value="ft">feet</option></select>
+    <select id="env" title="How fast the signal fades with distance, on top of the walls you draw"></select>
+  </div>
+  <div class="row"><span class="muted">Picture</span><input type="range" id="opacity" min="0.15" max="1" step="0.05">
+    <button id="btn-clear-pic">Remove picture</button><button id="btn-reset">Start over</button></div>
+
+  <details>
+    <summary>How to read this</summary>
+    <p>The shaded oval around each link is its <b>1st Fresnel zone</b>: the region where a person changes that link's signal the most. The dashed rings are the 2nd and 3rd zones, where motion still shows but more weakly. Its size depends only on the distance and the channel, so it's exact once the scale and positions are right.</p>
+    <p>The <b>heatmap</b> estimates where motion shows up most. It combines the Fresnel zones with bistatic scattering: a person close to either end of a link changes the signal far more than someone the same distance off the middle. Only links that pass ackwave's own limits count, and the router link, which decides alerts, carries most of the weight.</p>
+    <p>The <b>signal estimate</b> uses free-space loss, your environment's fade rate, and the walls you draw, crossed along the straight line. Real rooms add reflections, so expect it to be within about ±6 dB. Compare it with the live RSSI on ackwave's Links page and adjust the device's power (EIRP) until they match. After that, moving things around here predicts well.</p>
+    <p>Steps: add a picture, tap <b>Scale</b> and tap both ends of something you know the length of, drag the dots to where things really are, then draw the walls between them. Pinch or scroll to zoom, drag empty space to pan. Everything stays in this browser only.</p>
+  </details>
+  <details>
+    <summary>Hardware numbers used</summary>
+    <table class="spec">
+      <tr><td>Board</td><td>ESP32-S3-DevKitC-1 (N8R8 / N8R2): ESP32-S3-WROOM-1 module with PCB antenna</td></tr>
+      <tr><td>Board TX</td><td>20.0 dBm at 802.11g 6 Mbps (Espressif WROOM-1 datasheet, typical). ackwave pokes at 6 Mbps.</td></tr>
+      <tr><td>Board RX</td><td>–93 dBm sensitivity at 6 Mbps (Espressif ESP32-S3 datasheet, typical)</td></tr>
+      <tr><td>Board antenna</td><td>0 dBi assumed. The antenna is the wavy gold trace at the end of the module, past the metal can. It changes a few dB with orientation: standing the board on its short edge, antenna end up, matches most routers' vertical antennas. Keep that end clear of metal, cables and the edge of a desk. The best test is live: turn the board while watching the router's dBm on ackwave's Links page.</td></tr>
+      <tr><td>ackwave limits</td><td>Links weaker than –85 dBm are flagged weak (no motion beeps). APs and devices drop out of the rotation below –80 dBm.</td></tr>
+      <tr><td>Devices</td><td>EIRP presets are typical values for that class of device, not measured. Edit them to match what ackwave shows.</td></tr>
+      <tr><td>Walls</td><td>Typical 2.4 GHz losses per crossing. Real walls vary, especially brick, concrete and coated glass.</td></tr>
+    </table>
+  </details>
+</div>
+
+<div id="dlg"><div class="box">
+  <div><b>How long is that line?</b></div>
+  <div class="muted">Measure something real: a wall, a doorway, a driveway.</div>
+  <input id="dlg-len" type="number" inputmode="decimal" min="0" step="any" placeholder="e.g. 4.2">
+  <div class="row"><select id="dlg-unit"><option value="m">metres</option><option value="ft">feet</option></select>
+    <span class="grow"></span><button id="dlg-cancel">Cancel</button><button class="primary" id="dlg-ok">Set</button></div>
+</div></div>
+
+<script>
+(() => {
+  const C = 299792458, FT = 0.3048;
+  // ---------- hardware ----------
+  const BOARD = { name: 'ESP32-S3-DevKitC-1 (WROOM-1)', txDbm: 20.0, sensDbm: -93, gainDbi: 0 };
+  const LIMIT_WEAK = -85, LIMIT_DROP = -80;             // ackwave's own thresholds (main.c, README)
+  const DEVICE_SENS = -90;                              // a typical client/AP at 6 Mbps OFDM
+  const PRESETS = {
+    router_ext: { label: 'Router, external antennas', kind: 'ap', eirp: 23 },
+    router_int: { label: 'Router / ISP gateway, internal antennas', kind: 'ap', eirp: 20 },
+    mesh:       { label: 'Mesh node / extender', kind: 'ap', eirp: 20 },
+    plug:       { label: 'Smart plug (Tuya, GHome, Shelly, Kasa)', kind: 'plug', eirp: 16 },
+    amazon:     { label: 'Amazon Smart Plug', kind: 'plug', eirp: 16 },
+    echo:       { label: 'Echo / smart speaker', kind: 'other', eirp: 17 },
+    tv:         { label: 'Smart TV / streamer', kind: 'other', eirp: 17 },
+    phone:      { label: 'Phone / laptop', kind: 'other', eirp: 15 },
+    custom:     { label: 'Custom', kind: 'other', eirp: 17 },
+  };
+  const MATERIALS = {
+    drywall:  { label: 'Interior wall (drywall)', db: 3, color: '#c9d1d9' },
+    wood:     { label: 'Wooden door / thin wood', db: 3, color: '#c49a6c' },
+    glass:    { label: 'Window, plain glass', db: 2, color: '#8fd3ff' },
+    lowe:     { label: 'Window, low-E / coated', db: 10, color: '#4fa3d9' },
+    brick:    { label: 'Brick / exterior wall', db: 8, color: '#d9775a' },
+    concrete: { label: 'Concrete / block', db: 12, color: '#9aa4ae' },
+    floor:    { label: 'Floor / ceiling', db: 15, color: '#b08cd9' },
+    metal:    { label: 'Metal (appliance, siding)', db: 25, color: '#ff5a5a' },
+  };
+  const ENVS = {
+    outdoor: { label: 'Outdoors, open', n: 2.0 },
+    open:    { label: 'Indoors, open plan', n: 2.2 },
+    home:    { label: 'Indoors, furnished (home)', n: 2.8 },
+    cluttered: { label: 'Indoors, cluttered', n: 3.3 },
+  };
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const COLORS = { board: css('--board'), ap: css('--ap'), plug: css('--plug'), other: css('--other') };
+
+  const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+  const stage = document.getElementById('stage'), hint = document.getElementById('hint');
+
+  // ---------- state ----------
+  const fresh = () => ({
+    pxPerM: 40, unit: 'm', ch: 6, opacity: 0.85, env: 'home', heat: true, wallMat: 'drywall',
+    nodes: [
+      { id: 1, kind: 'board', name: 'ackwave board', x: 300, y: 420 },
+      { id: 2, kind: 'ap', preset: 'router_int', eirp: 20, name: 'Router', x: 700, y: 300 },
+      { id: 3, kind: 'plug', preset: 'amazon', eirp: 16, name: 'Smart plug', x: 620, y: 620 },
+    ],
+    walls: [], nextId: 4, img: null,
+  });
+  let S = fresh();
+  try { const s = JSON.parse(localStorage.getItem('ackwave-fresnel-2') || 'null'); if (s && s.nodes) S = Object.assign(fresh(), s); } catch (e) {}
+  function save() {
+    try { localStorage.setItem('ackwave-fresnel-2', JSON.stringify(S)); }
+    catch (e) { try { localStorage.setItem('ackwave-fresnel-2', JSON.stringify(Object.assign({}, S, { img: null }))); } catch (e2) {} }
+  }
+  let img = null, W = 1100, H = 900;
+  let view = { s: 1, ox: 0, oy: 0 };
+  let mode = 'move', pts = [], hover = null, cursorW = null;
+
+  // ---------- controls ----------
+  const $ = (id) => document.getElementById(id);
+  const chSel = $('ch');
+  for (let c = 1; c <= 13; c++) chSel.append(new Option(`Channel ${c} (${2407 + 5 * c} MHz)`, c));
+  const envSel = $('env');
+  for (const [k, v] of Object.entries(ENVS)) envSel.append(new Option(v.label, k));
+  const matSel = $('wall-mat');
+  for (const [k, v] of Object.entries(MATERIALS)) matSel.append(new Option(`${v.label} · ${v.db} dB`, k));
+  function syncControls() {
+    chSel.value = S.ch; $('unit').value = S.unit; envSel.value = S.env; matSel.value = S.wallMat; $('opacity').value = S.opacity;
+    $('btn-heat').classList.toggle('on', S.heat); $('legend').hidden = !S.heat;
+  }
+  chSel.onchange = () => { S.ch = +chSel.value; changed(); };
+  $('unit').onchange = (e) => { S.unit = e.target.value; changed(); };
+  envSel.onchange = () => { S.env = envSel.value; changed(); };
+  matSel.onchange = () => { S.wallMat = matSel.value; save(); };
+  $('opacity').oninput = (e) => { S.opacity = +e.target.value; changed(true, false); };
+  $('btn-heat').onclick = () => { S.heat = !S.heat; syncControls(); changed(); };
+  $('btn-fit').onclick = fit;
+  $('btn-clear-pic').onclick = () => { S.img = null; useImage(null, () => { fit(); changed(); }); };
+  $('btn-reset').onclick = () => {
+    if ($('btn-reset').dataset.armed) { S = fresh(); useImage(null, () => { syncControls(); renderDevices(); renderWalls(); fit(); changed(); }); delete $('btn-reset').dataset.armed; $('btn-reset').textContent = 'Start over'; }
+    else { $('btn-reset').dataset.armed = 1; $('btn-reset').textContent = 'Tap again to clear'; setTimeout(() => { delete $('btn-reset').dataset.armed; $('btn-reset').textContent = 'Start over'; }, 3000); }
+  };
+  $('btn-add').onclick = () => {
+    const c = toWorld(cv.clientWidth / 2, cv.clientHeight / 2);
+    S.nodes.push({ id: S.nextId++, kind: 'plug', preset: 'plug', eirp: 16, name: 'Device ' + S.nodes.length, x: c.x + 40, y: c.y + 40 });
+    renderDevices(); changed();
+  };
+  for (const m of ['move', 'wall', 'scale']) $('m-' + m).onclick = () => setMode(m);
+  function setMode(m) {
+    mode = m; pts = [];
+    for (const k of ['move', 'wall', 'scale']) $('m-' + k).classList.toggle('on', k === m);
+    hint.textContent = m === 'scale' ? 'Tap one end of something you know the length of, then the other end.'
+      : m === 'wall' ? `Tap where a wall starts, then where it ends. Material: ${MATERIALS[S.wallMat].label}.` : '';
+    draw();
+  }
+
+  // picture loading
+  $('file').onchange = (e) => { const f = e.target.files[0]; if (f) loadFile(f); e.target.value = ''; };
+  stage.addEventListener('dragover', (e) => e.preventDefault());
+  stage.addEventListener('drop', (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadFile(f); });
+  window.addEventListener('paste', (e) => { const it = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/')); if (it) loadFile(it.getAsFile()); });
+  function loadFile(f) {
+    const r = new FileReader();
+    r.onload = () => shrink(r.result, (url) => {
+      const first = !S.img; S.img = url;
+      useImage(url, () => {
+        if (first) S.nodes.forEach((n, i) => { n.x = W * (0.25 + 0.25 * (i % 3)); n.y = H * (0.35 + 0.25 * (i % 2)); });
+        fit(); changed(); setMode('scale');
+      });
+    });
+    r.readAsDataURL(f);
+  }
+  function shrink(url, done) {
+    const im = new Image();
+    im.onload = () => {
+      const k = Math.min(1, 2400 / Math.max(im.width, im.height));
+      if (k === 1) return done(url);
+      const c = document.createElement('canvas'); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k);
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); done(c.toDataURL('image/jpeg', 0.85));
+    };
+    im.src = url;
+  }
+  function useImage(url, then) {
+    if (!url) { img = null; W = 1100; H = 900; then && then(); return; }
+    const im = new Image(); im.onload = () => { img = im; W = im.width; H = im.height; then && then(); }; im.src = url;
+  }
+
+  // scale dialog
+  const dlg = $('dlg'), dlgLen = $('dlg-len'), dlgUnit = $('dlg-unit');
+  function askLength() { dlgUnit.value = S.unit; dlgLen.value = ''; dlg.classList.add('open'); setTimeout(() => dlgLen.focus(), 50); }
+  $('dlg-cancel').onclick = () => { dlg.classList.remove('open'); setMode('move'); };
+  $('dlg-ok').onclick = applyScale;
+  dlgLen.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyScale(); });
+  function applyScale() {
+    const v = parseFloat(dlgLen.value); if (!(v > 0)) { dlgLen.focus(); return; }
+    const m = dlgUnit.value === 'ft' ? v * FT : v, [a, b] = pts;
+    S.pxPerM = Math.hypot(b.x - a.x, b.y - a.y) / m; S.unit = dlgUnit.value;
+    dlg.classList.remove('open'); setMode('move'); syncControls(); changed();
+  }
+
+  // ---------- radio model ----------
+  const freq = () => (2407 + 5 * S.ch) * 1e6;
+  const lambda = () => C / freq();
+  function zone(dM, n) { const a = (dM + n * lambda() / 2) / 2; return { a, b: Math.sqrt(Math.max(0, a * a - (dM / 2) ** 2)) }; }
+  // Log-distance path loss with a free-space reference at 1 m
+  function pathLoss(dM) {
+    const fspl1 = 20 * Math.log10(4 * Math.PI / lambda());          // ≈ 40 dB at 2.44 GHz
+    return fspl1 + 10 * ENVS[S.env].n * Math.log10(Math.max(dM, 0.3));
+  }
+  function segCross(a, b, w) {
+    const d = (b.x - a.x) * (w.y2 - w.y1) - (b.y - a.y) * (w.x2 - w.x1);
+    if (Math.abs(d) < 1e-9) return false;
+    const t = ((w.x1 - a.x) * (w.y2 - w.y1) - (w.y1 - a.y) * (w.x2 - w.x1)) / d;
+    const u = ((w.x1 - a.x) * (b.y - a.y) - (w.y1 - a.y) * (b.x - a.x)) / d;
+    return t > 0 && t < 1 && u >= 0 && u <= 1;
+  }
+  function linkBudget(board, dev) {
+    const dM = Math.hypot(dev.x - board.x, dev.y - board.y) / S.pxPerM;
+    const crossed = S.walls.filter((w) => segCross(board, dev, w));
+    const wallDb = crossed.reduce((s, w) => s + MATERIALS[w.mat].db, 0);
+    const pl = pathLoss(dM) + wallDb;
+    const atBoard = dev.eirp + BOARD.gainDbi - pl;                  // device's ACK as the board hears it
+    const atDev = BOARD.txDbm + BOARD.gainDbi - pl;                 // board's poke as the device hears it
+    const verdict = atBoard < LIMIT_WEAK || atBoard < BOARD.sensDbm + 3 || atDev < DEVICE_SENS + 3 ? 'bad'
+      : atBoard < LIMIT_DROP ? 'ok' : 'good';
+    return { dM, crossed, wallDb, atBoard, atDev, verdict };
+  }
+  const VERDICT = {
+    good: { color: css('--good'), text: 'usable' },
+    ok:   { color: css('--ok'), text: 'marginal' },
+    bad:  { color: css('--bad'), text: 'too weak' },
+  };
+
+  // ---------- view helpers ----------
+  function fmt(m) {
+    if (S.unit === 'ft') { const f = m / FT; return f < 10 ? f.toFixed(1) + ' ft' : Math.round(f) + ' ft'; }
+    return m < 10 ? m.toFixed(2) + ' m' : m.toFixed(1) + ' m';
+  }
+  const toScreen = (x, y) => ({ x: x * view.s + view.ox, y: y * view.s + view.oy });
+  const toWorld = (x, y) => ({ x: (x - view.ox) / view.s, y: (y - view.oy) / view.s });
+  function fit() {
+    let x0, y0, x1, y1;
+    if (img) { x0 = 0; y0 = 0; x1 = W; y1 = H; }
+    else { const xs = S.nodes.map((n) => n.x), ys = S.nodes.map((n) => n.y);
+      x0 = Math.min(...xs) - 160; y0 = Math.min(...ys) - 160; x1 = Math.max(...xs) + 160; y1 = Math.max(...ys) + 160; }
+    const cw = cv.clientWidth, ch = cv.clientHeight;
+    view.s = Math.min(cw / (x1 - x0), ch / (y1 - y0)) * 0.95;
+    view.ox = (cw - (x1 - x0) * view.s) / 2 - x0 * view.s; view.oy = (ch - (y1 - y0) * view.s) / 2 - y0 * view.s;
+    heatDirty = true; draw();
+  }
+
+  // ---------- heatmap ----------
+  // Relative motion sensitivity of each spot, per usable link: bistatic scattering d/(r1·r2)
+  // (strong next to either end), raised inside the first Fresnel zones. Router links weigh
+  // most because they decide alerts; device links are comparisons.
+  const heatCv = document.createElement('canvas'), heatCtx = heatCv.getContext('2d');
+  let heatDirty = true, heatBox = null;
+  function computeHeat() {
+    heatDirty = false;
+    const board = S.nodes.find((n) => n.kind === 'board');
+    const links = board ? S.nodes.filter((n) => n.kind !== 'board').map((n) => ({ n, b: linkBudget(board, n) }))
+      .filter((l) => l.b.verdict !== 'bad') : [];
+    const cw = cv.clientWidth, ch = cv.clientHeight;
+    const cols = Math.min(220, Math.max(60, Math.round(cw / 4))), rows = Math.max(40, Math.round(cols * ch / cw));
+    heatCv.width = cols; heatCv.height = rows;
+    const tl = toWorld(0, 0), br = toWorld(cw, ch);
+    heatBox = { x: tl.x, y: tl.y, w: br.x - tl.x, h: br.y - tl.y };
+    const im = heatCtx.createImageData(cols, rows);
+    if (!links.length) { heatCtx.putImageData(im, 0, 0); return; }
+    const lam = lambda(), k = S.pxPerM;
+    const L = links.map(({ n, b }) => ({
+      ax: board.x / k, ay: board.y / k, bx: n.x / k, by: n.y / k, d: b.dM,
+      w: (n.kind === 'ap' ? 1 : 0.6) * Math.min(1, Math.max(0.35, (b.atBoard - LIMIT_WEAK) / 15)),
+    }));
+    for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+      const x = (heatBox.x + (i + 0.5) / cols * heatBox.w) / k, y = (heatBox.y + (j + 0.5) / rows * heatBox.h) / k;
+      let best = 0;
+      for (const l of L) {
+        const r1 = Math.max(0.25, Math.hypot(x - l.ax, y - l.ay)), r2 = Math.max(0.25, Math.hypot(x - l.bx, y - l.by));
+        const excess = r1 + r2 - l.d;                                 // extra path length, metres
+        const fz = 1 / (1 + (2 * excess / lam) ** 2 / 4);             // ~1 inside zone 1, fades by zone 3
+        const scat = l.d / (r1 * r2);                                 // bistatic, 1/m
+        const s = l.w * (0.55 * fz + 0.45 * Math.min(1, scat / 2)) * Math.min(1, 1.5 / Math.sqrt(1 + excess));
+        if (s > best) best = s;
+      }
+      const v = Math.min(1, best), p = (j * cols + i) * 4, c = ramp(v);
+      im.data[p] = c[0]; im.data[p + 1] = c[1]; im.data[p + 2] = c[2]; im.data[p + 3] = v < 0.06 ? 0 : Math.round(40 + 150 * v);
+    }
+    heatCtx.putImageData(im, 0, 0);
+  }
+  function ramp(v) {
+    const stops = [[0, [40, 90, 255]], [0.3, [42, 123, 255]], [0.55, [25, 194, 160]], [0.78, [232, 209, 79]], [1, [255, 90, 60]]];
+    for (let i = 1; i < stops.length; i++) if (v <= stops[i][0]) {
+      const [a, ca] = stops[i - 1], [b, cb] = stops[i], t = (v - a) / (b - a);
+      return ca.map((c, k) => Math.round(c + (cb[k] - c) * t));
+    }
+    return stops[stops.length - 1][1];
+  }
+
+  // ---------- drawing ----------
+  function resize() {
+    const r = window.devicePixelRatio || 1;
+    cv.width = Math.round(cv.clientWidth * r); cv.height = Math.round(cv.clientHeight * r);
+    ctx.setTransform(r, 0, 0, r, 0, 0); heatDirty = true; draw();
+  }
+  let raf = 0;
+  function draw() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; paint(); }); }
+  function paint() {
+    const cw = cv.clientWidth, ch = cv.clientHeight;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.save(); ctx.translate(view.ox, view.oy); ctx.scale(view.s, view.s);
+    if (img) { ctx.globalAlpha = S.opacity; ctx.drawImage(img, 0, 0); ctx.globalAlpha = 1; } else drawGrid();
+    ctx.restore();
+
+    if (S.heat) {
+      if (heatDirty) computeHeat();
+      const a = toScreen(heatBox.x, heatBox.y);
+      ctx.imageSmoothingEnabled = true; ctx.drawImage(heatCv, a.x, a.y, heatBox.w * view.s, heatBox.h * view.s);
+    }
+    ctx.save(); ctx.translate(view.ox, view.oy); ctx.scale(view.s, view.s);
+    const board = S.nodes.find((n) => n.kind === 'board');
+    if (board) for (const n of S.nodes) if (n.kind !== 'board') drawZones(board, n);
+    for (const w of S.walls) drawWall(w);
+    ctx.restore();
+    if (board) for (const n of S.nodes) if (n.kind !== 'board') drawLinkLabel(board, n);
+    for (const n of S.nodes) drawNode(n);
+    drawPending();
+    drawScaleBar();
+  }
+  function drawGrid() {
+    const step = S.pxPerM;
+    ctx.fillStyle = '#10161d'; ctx.fillRect(-6000, -6000, 14000, 14000);
+    ctx.strokeStyle = '#1b232d'; ctx.lineWidth = 1 / view.s; ctx.beginPath();
+    for (let x = -6000; x < 8000; x += step) { ctx.moveTo(x, -6000); ctx.lineTo(x, 8000); }
+    for (let y = -6000; y < 8000; y += step) { ctx.moveTo(-6000, y); ctx.lineTo(8000, y); }
+    ctx.stroke();
+  }
+  function drawZones(a, b) {
+    const dPx = Math.hypot(b.x - a.x, b.y - a.y), dM = dPx / S.pxPerM; if (dM < 0.05) return;
+    const col = COLORS[b.kind] || COLORS.other, verdict = linkBudget(a, b).verdict;
+    const fade = verdict === 'bad' ? 0.35 : 1;
+    ctx.save(); ctx.translate((a.x + b.x) / 2, (a.y + b.y) / 2); ctx.rotate(Math.atan2(b.y - a.y, b.x - a.x));
+    for (const [n, fillA, lineA] of [[3, 0.03, 0.35], [2, 0.05, 0.5], [1, S.heat ? 0.08 : 0.24, 0.95]]) {
+      const z = zone(dM, n);
+      ctx.beginPath(); ctx.ellipse(0, 0, z.a * S.pxPerM, z.b * S.pxPerM, 0, 0, Math.PI * 2);
+      ctx.fillStyle = rgba(col, fillA * fade); ctx.fill();
+      ctx.strokeStyle = rgba(col, lineA * fade); ctx.lineWidth = (n === 1 ? 2 : 1) / view.s;
+      if (n !== 1) ctx.setLineDash([6 / view.s, 5 / view.s]); ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.strokeStyle = rgba(col, 0.9 * fade); ctx.lineWidth = 1.5 / view.s;
+    if (verdict === 'bad') ctx.setLineDash([4 / view.s, 4 / view.s]);
+    ctx.beginPath(); ctx.moveTo(-dPx / 2, 0); ctx.lineTo(dPx / 2, 0); ctx.stroke(); ctx.setLineDash([]);
+    ctx.restore();
+  }
+  function drawLinkLabel(a, b) {
+    const lb = linkBudget(a, b); if (lb.dM < 0.05) return;
+    const p = toScreen((a.x + b.x) / 2, (a.y + b.y) / 2), v = VERDICT[lb.verdict];
+    label(`${fmt(lb.dM)} · ${Math.round(lb.atBoard)} dBm`, p.x, p.y - 12, v.color);
+  }
+  function drawWall(w) {
+    const m = MATERIALS[w.mat];
+    ctx.strokeStyle = m.color; ctx.lineCap = 'round'; ctx.lineWidth = 5 / view.s;
+    ctx.beginPath(); ctx.moveTo(w.x1, w.y1); ctx.lineTo(w.x2, w.y2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(13,17,22,.7)'; ctx.lineWidth = 1.5 / view.s; ctx.stroke(); ctx.lineCap = 'butt';
+  }
+  function drawNode(n) {
+    const p = toScreen(n.x, n.y), col = COLORS[n.kind] || COLORS.other;
+    ctx.beginPath(); ctx.arc(p.x, p.y, n.kind === 'board' ? 11 : 9, 0, 7); ctx.fillStyle = col; ctx.fill();
+    ctx.lineWidth = hover === n.id ? 4 : 2; ctx.strokeStyle = '#0d1116'; ctx.stroke();
+    if (n.kind === 'board') { ctx.fillStyle = '#062421'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('B', p.x, p.y + 0.5); }
+    label(n.name, p.x, p.y + 24, '#e6edf3');
+  }
+  function drawPending() {
+    if (!pts.length || (mode !== 'scale' && mode !== 'wall')) return;
+    const a = toScreen(pts[0].x, pts[0].y), e = pts[1] || cursorW, b = e ? toScreen(e.x, e.y) : null;
+    ctx.strokeStyle = mode === 'wall' ? MATERIALS[S.wallMat].color : '#fff'; ctx.lineWidth = mode === 'wall' ? 4 : 2;
+    ctx.setLineDash(mode === 'wall' ? [] : [6, 4]);
+    if (b) { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
+    ctx.setLineDash([]);
+    for (const p of [a, b]) if (p) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, 7); ctx.fill(); }
+  }
+  function label(t, x, y, col) {
+    ctx.font = '12px -apple-system, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const w = ctx.measureText(t).width + 10;
+    ctx.fillStyle = 'rgba(13,17,22,.85)'; roundRect(x - w / 2, y - 10, w, 20, 6); ctx.fill();
+    ctx.fillStyle = col; ctx.fillText(t, x, y);
+  }
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+  function drawScaleBar() {
+    const pxPerUnit = S.pxPerM * (S.unit === 'ft' ? FT : 1) * view.s;
+    const len = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500].find((v) => v * pxPerUnit >= 70) || 500;
+    const w = len * pxPerUnit, x = 14, y = cv.clientHeight - 18;
+    ctx.fillStyle = 'rgba(13,17,22,.8)'; roundRect(x - 6, y - 22, w + 12, 30, 6); ctx.fill();
+    ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x, y - 4); ctx.lineTo(x, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y - 4); ctx.stroke();
+    ctx.fillStyle = '#e6edf3'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText(`${len} ${S.unit}`, x + w / 2, y - 7);
+  }
+  function rgba(hex, a) { const n = parseInt(hex.replace('#', ''), 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; }
+
+  // ---------- panels ----------
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  function renderLinks() {
+    const box = $('links'); box.innerHTML = '';
+    const board = S.nodes.find((n) => n.kind === 'board'), others = S.nodes.filter((n) => n.kind !== 'board');
+    if (!board || !others.length) { box.innerHTML = '<div class="muted">Add a router or a device to see a link.</div>'; return; }
+    for (const n of others) {
+      const lb = linkBudget(board, n), z = zone(lb.dM, 1), v = VERDICT[lb.verdict];
+      const walls = lb.crossed.length ? `${lb.crossed.length} wall${lb.crossed.length > 1 ? 's' : ''} (−${lb.wallDb} dB)` : 'no walls';
+      let why = '';
+      if (lb.verdict === 'bad') why = lb.atDev < DEVICE_SENS + 3 ? 'The device may not hear the board\'s pokes.' : 'Below ackwave\'s –85 dBm limit: ignored, no alerts from it.';
+      else if (lb.verdict === 'ok') why = n.kind === 'ap' ? 'Between –85 and –80 dBm: ackwave may rotate this AP out.' : 'Below –80 dBm: Auto mode won\'t pick it; choose it in Manual.';
+      if (n.kind === 'plug' || n.kind === 'other') why += ' Device links are shown for comparison; the router link decides alerts.';
+      const d = document.createElement('div'); d.className = 'link';
+      d.innerHTML = `<span class="dot" style="background:${COLORS[n.kind]}"></span> <b>${esc(n.name)}</b>
+        <span class="pill" style="background:${v.color}">${v.text}</span><br>
+        <span class="small">${fmt(lb.dM)} · ${walls} · board hears it at <b>${lb.atBoard.toFixed(0)} dBm</b>
+        (it hears the board at ${lb.atDev.toFixed(0)} dBm) · zone 1 is <b>${fmt(2 * z.b)}</b> wide at the middle</span>
+        ${why ? `<div class="muted">${why}</div>` : ''}`;
+      box.append(d);
+    }
+    box.insertAdjacentHTML('beforeend', `<div class="muted">Channel ${S.ch}: wavelength ${(lambda() * 100).toFixed(1)} cm · ${ENVS[S.env].label} (n = ${ENVS[S.env].n}) · scale ${S.pxPerM.toFixed(1)} px/m</div>`);
+  }
+  function renderDevices() {
+    const box = $('devices'); box.innerHTML = '';
+    for (const n of S.nodes) {
+      const r = document.createElement('div'); r.className = 'row';
+      r.insertAdjacentHTML('beforeend', `<span class="dot" style="background:${COLORS[n.kind]}"></span>`);
+      const name = document.createElement('input'); name.type = 'text'; name.value = n.name;
+      name.oninput = () => { n.name = name.value; changed(false); }; r.append(name);
+      if (n.kind === 'board') {
+        r.insertAdjacentHTML('beforeend', `<span class="muted">${BOARD.name} · ${BOARD.txDbm} dBm out · ${BOARD.sensDbm} dBm sensitivity</span>`);
+      } else {
+        const ps = document.createElement('select');
+        for (const [k, v] of Object.entries(PRESETS)) ps.append(new Option(v.label, k));
+        ps.value = n.preset || 'custom';
+        ps.onchange = () => { const p = PRESETS[ps.value]; n.preset = ps.value; n.kind = p.kind; n.eirp = p.eirp; renderDevices(); changed(); };
+        const e = document.createElement('input'); e.type = 'number'; e.step = '1'; e.value = n.eirp; e.title = 'Transmit power incl. antenna (EIRP), dBm';
+        e.oninput = () => { const v = parseFloat(e.value); if (isFinite(v)) { n.eirp = v; n.preset = 'custom'; ps.value = 'custom'; changed(); } };
+        const del = document.createElement('button'); del.textContent = '✕'; del.title = 'Remove';
+        del.onclick = () => { S.nodes = S.nodes.filter((m) => m !== n); renderDevices(); changed(); };
+        r.append(ps, e); r.insertAdjacentHTML('beforeend', '<span class="muted">dBm</span>'); r.append(del);
+      }
+      box.append(r);
+    }
+  }
+  function renderWalls() {
+    const box = $('walls'); box.innerHTML = '';
+    if (!S.walls.length) { box.innerHTML = '<div class="muted">No walls yet. Walls only change the signal estimate and the heatmap, not the zone shapes.</div>'; return; }
+    S.walls.forEach((w, i) => {
+      const r = document.createElement('div'); r.className = 'row';
+      r.insertAdjacentHTML('beforeend', `<span class="dot" style="background:${MATERIALS[w.mat].color};border-radius:2px"></span>
+        <span class="small">${fmt(Math.hypot(w.x2 - w.x1, w.y2 - w.y1) / S.pxPerM)}</span>`);
+      const s = document.createElement('select');
+      for (const [k, v] of Object.entries(MATERIALS)) s.append(new Option(`${v.label} · ${v.db} dB`, k));
+      s.value = w.mat; s.onchange = () => { w.mat = s.value; renderWalls(); changed(); };
+      const del = document.createElement('button'); del.textContent = '✕';
+      del.onclick = () => { S.walls.splice(i, 1); renderWalls(); changed(); };
+      r.append(s, del); box.append(r);
+    });
+  }
+  function changed(full = true, heat = true) { if (heat) heatDirty = true; save(); if (full) renderLinks(); draw(); }
+
+  // ---------- pointer ----------
+  const ptrs = new Map(); let drag = null, pinch = null, moved = false;
+  function hit(x, y) {
+    let best = null, bd = 26;
+    for (const n of S.nodes) { const p = toScreen(n.x, n.y), d = Math.hypot(p.x - x, p.y - y); if (d < bd) { bd = d; best = n; } }
+    return best;
+  }
+  const local = (e) => { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  cv.addEventListener('pointerdown', (e) => {
+    cv.setPointerCapture(e.pointerId); const p = local(e); ptrs.set(e.pointerId, p); moved = false;
+    if (ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()];
+      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), s: view.s, w: toWorld((a.x + b.x) / 2, (a.y + b.y) / 2) }; drag = null; return;
+    }
+    const n = mode === 'move' ? hit(p.x, p.y) : null;
+    drag = n ? { node: n } : { pan: true, x: p.x, y: p.y, ox: view.ox, oy: view.oy };
+  });
+  cv.addEventListener('pointermove', (e) => {
+    const p = local(e);
+    if (!ptrs.has(e.pointerId)) {
+      if (pts.length) { cursorW = toWorld(p.x, p.y); draw(); }
+      const h = mode === 'move' ? hit(p.x, p.y) : null, id = h ? h.id : null;
+      if (id !== hover) { hover = id; draw(); } cv.style.cursor = h ? 'grab' : mode === 'move' ? 'default' : 'crosshair'; return;
+    }
+    ptrs.set(e.pointerId, p);
+    if (pinch && ptrs.size >= 2) {
+      const [a, b] = [...ptrs.values()], m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      view.s = clampS(pinch.s * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d);
+      view.ox = m.x - pinch.w.x * view.s; view.oy = m.y - pinch.w.y * view.s; moved = true; heatDirty = true; draw(); return;
+    }
+    if (!drag) return;
+    if (drag.node) { const w = toWorld(p.x, p.y); drag.node.x = w.x; drag.node.y = w.y; moved = true; heatDirty = true; renderLinks(); draw(); }
+    else if (drag.pan) {
+      if (Math.hypot(p.x - drag.x, p.y - drag.y) > 5) moved = true;
+      if (moved) { view.ox = drag.ox + p.x - drag.x; view.oy = drag.oy + p.y - drag.y; heatDirty = true; draw(); }
+    }
+  });
+  function up(e) {
+    const p = ptrs.get(e.pointerId); ptrs.delete(e.pointerId);
+    const wasPinch = !!pinch; if (ptrs.size < 2) pinch = null;
+    if (drag && drag.node && moved) save();
+    if (p && !moved && !wasPinch && ptrs.size === 0 && (mode === 'scale' || mode === 'wall')) {
+      pts.push(toWorld(p.x, p.y));
+      if (pts.length === 1) hint.textContent = 'Now tap the other end.';
+      if (pts.length === 2) {
+        if (mode === 'scale') { hint.textContent = ''; askLength(); }
+        else {
+          const [a, b] = pts; S.walls.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, mat: S.wallMat });
+          pts = []; cursorW = null; hint.textContent = 'Wall added. Tap the next wall\'s start, or tap Move when done.';
+          renderWalls(); changed();
+        }
+      }
+      draw();
+    }
+    if (ptrs.size === 0) drag = null;
+  }
+  cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+  cv.addEventListener('wheel', (e) => {
+    e.preventDefault(); const p = local(e), w = toWorld(p.x, p.y);
+    view.s = clampS(view.s * Math.exp(-e.deltaY * 0.0015)); view.ox = p.x - w.x * view.s; view.oy = p.y - w.y * view.s;
+    heatDirty = true; draw();
+  }, { passive: false });
+  const clampS = (s) => Math.min(25, Math.max(0.03, s));
+
+  // ---------- start ----------
+  window.addEventListener('resize', resize);
+  syncControls();
+  useImage(S.img, () => { resize(); fit(); renderDevices(); renderWalls(); renderLinks(); });
+  if (!S.img) { hint.textContent = 'Add a floor plan or satellite screenshot with Picture, or drag the dots on this 1 m grid.';
+    setTimeout(() => { if (hint.textContent.startsWith('Add a floor')) hint.textContent = ''; }, 6000); }
+})();
+</script>
+</body>
+</html>
