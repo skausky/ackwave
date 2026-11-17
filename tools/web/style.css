@@ -313,6 +313,12 @@ table.kv td:nth-child(3) { color: var(--muted); font-size: 12px; }
 .card .now { margin: 0 0 4px; font-weight: 600; }
 .snd h2 { font-size: 14px; margin: 0; }
 
+/* ---------- alerts from device links ---------- */
+.alert-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px; border-bottom: 1px solid var(--grid); cursor: pointer; flex-wrap: wrap; }
+.alert-row:last-child { border-bottom: 0; }
+.alert-row input { accent-color: var(--accent); }
+.hero-alert { color: #b48cff; font-weight: 600; font-size: 14px; margin-top: -8px; }
+
 /* ---------- map ---------- */
 .map-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr); gap: var(--gap); align-items: start; }
 .map-card .tools { flex-wrap: wrap; }

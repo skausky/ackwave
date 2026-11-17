@@ -37,7 +37,7 @@ def main():
     assert len(blob) < 400_000, len(blob)
     assert f['header']['badge']['word'] in ('STILL', 'MOTION', 'CALIBRATING')
     assert f['score']['series'] and f['window'][1] > f['window'][0]
-    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None, 'sens': None}
+    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None, 'sens': None, 'alerts': []}
     assert sent[:2] == ['SOUND', 'SENS'], "asks the board for its buzzer and threshold settings"
     assert sl['timeline']['end'] >= sl['timeline']['start']
     f600 = dash.fast(600)
@@ -129,7 +129,7 @@ def main():
     # Per-link mode: off by default; once on, each ACK link gets its own analysis
     assert dash.command({'cmd': 'settings', 'per_link': True})[0]
     assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {
-        'per_link': True, 'sound': None, 'sens': None,
+        'per_link': True, 'sound': None, 'sens': None, 'alerts': [],
         'light': {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120}}
     for line in lines[half:]:
         dash.feed(line)
@@ -390,7 +390,81 @@ def main():
     finally:
         srv.shutdown()
     pages_and_debug(tmp)
+    device_alerts(tmp)
     print("WEB TESTS PASSED")
+
+
+def device_alerts(tmp):
+    """Device links you tick drive the alerts (light, and the board's LED and
+    buzzer via EXT) once their slow window confirms; the board's verdict is
+    never touched."""
+    import numpy as np
+    rng = np.random.default_rng(7)
+
+    def csi(ts, src, wild=False, kick=0.0):
+        a = 30 + rng.normal(0, 8 if wild else 0.3, 64) + kick
+        if wild:
+            a += 10 * np.sin(ts / 1e6 * 6 + np.arange(64) / 5)
+        return f"CSI,{ts},{src},1,6,-50,0,0,128,{' '.join(f'0 {int(round(x))}' for x in a)}\n"
+    mac = ':'.join(f'{x:02x}' for x in (0x50, 2, 0x91, 0x1a, 0x2b, 0x3c))
+    other = ':'.join(f'{x:02x}' for x in (0x50, 2, 0x91, 0x1a, 0x2b, 0x3d))
+
+    def make(send=True):
+        sent, calls = [], []
+        s = State(600)
+        d = Dashboard(s, send=sent.append if send else None, settings=os.path.join(tmp, 'alerts.json'),
+                      light_call=lambda u: (calls.append(u), (True, 'HTTP 200'))[1], light_run=lambda f: f())
+        d.cfg['per_link'] = True
+        s.devices.poking[mac] = 10
+        d.light.set(enabled=True, on_url='https://example.com/on', off_url='https://example.com/off', off_after=0)
+        return d, sent, calls
+
+    def run(d, seconds, wild_dev=False, spike=False, ts=[1_000_000]):
+        for i in range(int(seconds * 100)):
+            t = ts[0]
+            d.feed(csi(t, 0))                        # the router (the board's verdict): quiet
+            kick = 25.0 if spike and i < 3 else 0.0  # a lone 30 ms jolt on the device link
+            d.feed(csi(t + 3000, 10, wild=wild_dev, kick=kick))
+            ts[0] += 10_000
+
+    # validation, saved, and reloaded
+    d, sent, calls = make()
+    for bad in ('x', [1], ['nope'], [mac] * 9, [mac + '\nCAL']):
+        assert not d.command({'cmd': 'alerts', 'keys': bad})[0], bad
+    ok, msg = d.command({'cmd': 'alerts', 'keys': [mac.upper()]})
+    assert ok and d.cfg['alerts'] == [mac] and 'plus 1 device link' in msg, msg
+    assert json.load(open(os.path.join(tmp, 'alerts.json')))['alerts'] == [mac]
+    assert Dashboard(State(60), settings=os.path.join(tmp, 'alerts.json')).cfg['alerts'] == [mac]
+
+    run(d, 40)                                       # both quiet: nothing
+    assert 'EXT,1' not in sent and calls == []
+    run(d, 0.5, spike=True)                          # a lone spike on the device link: nothing
+    run(d, 3)
+    assert 'EXT,1' not in sent and calls == [], "a spike alone doesn't set the alerts off"
+    run(d, 10, wild_dev=True)                        # steady motion on the ticked device link
+    assert 'EXT,1' in sent and calls[:1] == ['https://example.com/on'], (sent[-3:], calls)
+    assert not d.s.board_motion and not d.s.det.motion, "the board's own verdict is untouched"
+    sl = d.slow(30)
+    row = [r for r in sl['radio'] if r['key'] == mac][0]
+    assert row['alerts'] and row['alerting'] and d.fast(30)['header']['alerting'] == [d.s.devices.link_label(10)]
+    n = sent.count('EXT,1')
+    d.ext_at -= 2                                    # a second later: told again (the board holds it 5 s)
+    d.tick()
+    assert sent.count('EXT,1') == n + 1
+    run(d, 20)                                       # quiet again
+    assert sent[-1] == 'EXT,0' or 'EXT,0' in sent, sent[-5:]
+    assert calls[-1] == 'https://example.com/off'
+
+    # an unticked device link sees the same motion: no alerts
+    d2, sent2, calls2 = make()
+    d2.command({'cmd': 'alerts', 'keys': [other]})
+    run(d2, 40); run(d2, 10, wild_dev=True)
+    assert 'EXT,1' not in sent2 and calls2 == []
+    # no board (a demo or a file): never
+    d3, sent3, calls3 = make(send=False)
+    d3.cfg['alerts'] = [mac]
+    run(d3, 40); run(d3, 10, wild_dev=True)
+    assert sent3 == [] and calls3 == [] and d3.fast(30)['header']['alerting'] == []
 
 
 def pages_and_debug(tmp):

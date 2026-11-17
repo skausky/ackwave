@@ -126,6 +126,15 @@ class Recorder:
             if line.startswith('NETS,'):
                 self.scanning = False
             return
+        if line.startswith('EXT,'):              # the alerts: a device link the PC watches
+            v = line.strip()[4:]
+            if v in ('0', '1') and v != getattr(self, 'ext', '0'):
+                self.say("Alert: a device link sees motion (the board's own verdict: "
+                         + ('motion)' if self.motion_since is not None else 'still)') if v == '1'
+                         else "Alert over: the device link is still")
+            if v in ('0', '1'):
+                self.ext = v
+            return
         if line.startswith('APS,'):
             p = line.strip().split(',')
             if p[1:2] == ['saved']:

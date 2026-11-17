@@ -62,6 +62,8 @@ SPARK_S = 30.0                              # a link's score trace in its card
 # under the first, until back over the second
 LINK_MIN_RATE, LINK_OK_RATE = 15.0, 20.0
 LINK_EVENTS = 400                           # device-link motion periods remembered
+ALERT_MAX = 8                               # device links that may drive the alerts
+EXT_EVERY_S = 1.0                           # EXT,1 repeated this often (the board holds it 5 s)
 
 
 class LinkDetector:
@@ -176,7 +178,11 @@ class Dashboard:
         self.lock = threading.Lock()
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
-        self.cfg = dict(SETTINGS, sound=None, sens=None)   # kept on the board; None = its own
+        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[])   # kept on the board; None = its own
+        # Device links that drive the alerts (light, buzzer, LED) besides the board:
+        # src -> True once that link's slow window confirmed its current motion
+        self.confirmed = {}
+        self.ext_sent, self.ext_at = False, 0.0       # what the board was last told (EXT)
         # sound: [mode, vol, hz]; sens: long-window threshold x100
         got = {}
         if settings:
@@ -186,6 +192,10 @@ class Dashboard:
                 if not isinstance(got, dict):    # damaged: same as missing
                     got = {}
                 self.cfg.update({k: got[k] for k in SETTINGS if k in got})
+                al = got.get('alerts')
+                if isinstance(al, list) and len(al) <= ALERT_MAX and all(
+                        isinstance(k, str) and MAC_RE.fullmatch(k) for k in al):
+                    self.cfg['alerts'] = [k.lower() for k in al]
             except (OSError, ValueError):
                 got = {}
         try:                                     # re-applied whenever the board differs
@@ -379,15 +389,58 @@ class Dashboard:
         return bool(s.det.motion) and s.det.floor > 0 and not s.source_status()
 
     def tick(self):
-        """Once a second from a timer, so the light still goes off when no data comes."""
+        """Once a second from a timer, so the light still goes off when no data
+        comes, and the board keeps hearing that a device link sees motion."""
         with self.lock:
             self._light_rule()
+            self._flush()
+
+    def _src_key(self, src):
+        """A link's key as the Map page and the alerts list name it."""
+        if src < MAX_APS:
+            return f'ap:{src}'
+        for mac, i in self.s.devices.poking.items():
+            if i == src:
+                return mac
+        return None
+
+    def _alerting(self):
+        """Device links you ticked that see motion now. One counts once its slow
+        (4 s) window has confirmed the motion, and until that motion ends, so a
+        lone spike on a noisy link never sets off the light or the buzzer."""
+        out = []
+        if not self.cfg['per_link'] or not self.cfg['alerts']:
+            self.confirmed.clear()
+            return out
+        for src, ln in self.links.items():
+            if src < MAX_APS or self._src_key(src) not in self.cfg['alerts']:
+                self.confirmed.pop(src, None)
+                continue
+            md = ln['md']
+            if not md.motion:
+                self.confirmed[src] = False
+            elif md.det.m_long:
+                self.confirmed[src] = True
+            if md.motion and self.confirmed.get(src):
+                out.append(src)
+        return out
 
     def _light_rule(self):
-        """Only a live board switches the light: demo or file input (no board to
-        send to) never does, or a demo's fake motion would switch a real plug."""
-        if self.send:
-            self.light.update(self._motion_now())
+        """The alerts: the light (on the PC) and the board's LED and buzzer (EXT).
+        Only a live board drives them: demo or file input (no board to send to)
+        never does, or a demo's fake motion would switch a real plug. The board's
+        own verdict counts, plus the device links you ticked."""
+        if not self.send:
+            return
+        ext = bool(self._alerting())
+        self.light.update(self._motion_now() or ext)
+        now = time.monotonic()
+        if ext and (not self.ext_sent or now - self.ext_at >= EXT_EVERY_S):
+            self.s.outbox.append('EXT,1')
+            self.ext_sent, self.ext_at = True, now
+        elif not ext and self.ext_sent:
+            self.s.outbox.append('EXT,0')
+            self.ext_sent = False
 
     def _debug_line(self, line):
         t = self._now()
@@ -505,6 +558,18 @@ class Dashboard:
                     self.cfg['sens'] = self.s.sens_want
                     msg = f'Long-window threshold x{self.s.sens_want / 100:.1f}'
                 self._save_settings()
+            elif what == 'alerts':
+                keys = c.get('keys')
+                if not isinstance(keys, list) or len(keys) > ALERT_MAX or not all(
+                        isinstance(k, str) and MAC_RE.fullmatch(k) for k in keys):
+                    return False, 'bad list of device links'
+                self.cfg['alerts'] = sorted({k.lower() for k in keys})
+                self._save_settings()
+                n = len(self.cfg['alerts'])
+                msg = (f"Alerts: the board plus {n} device link{'s' if n != 1 else ''}" if n
+                       else 'Alerts: the board only')
+                if n and not self.cfg['per_link']:
+                    msg += ' (switch on per-link analysis for them to count)'
             elif what == 'light':
                 try:
                     self.light.set(**{k: c.get(k) for k in ('enabled', 'on_url', 'off_url', 'off_after')})
@@ -723,7 +788,9 @@ class Dashboard:
             if key is None:
                 continue                         # a device that isn't poked any more
             row = dict(key=key, src=int(src), label=s.devices.link_label(src), ap=ap,
-                       rssi=s.rssi.get((src, 1)), rate=round(rate))
+                       rssi=s.rssi.get((src, 1)), rate=round(rate),
+                       alerts=key in self.cfg['alerts'],
+                       alerting=bool(self.confirmed.get(src)) and src in self.links and self.links[src]['md'].motion)
             ln = self.links.get(src) if self.cfg['per_link'] else None
             if ln:
                 md = ln['md']
@@ -800,6 +867,7 @@ class Dashboard:
                     counts=dict(motion=n_long, brief=n_brief, scans=len(s.hist_scans)),
                     devices=f"{len(dv.devs)} heard · poking {len(dv.poking)}/{MAX_DEVS} ({dv.mode})",
                     log=self.log_name, board_connected=bool(self.send),
+                    alerting=[s.devices.link_label(x) for x in self._alerting()] if self.send else [],
                     light=dict(self.light.view(), live=bool(self.send)))
 
     def _score(self, t0, t1, win):

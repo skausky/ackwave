@@ -173,6 +173,9 @@ function renderHeader(h) {
     e.querySelector('.detail').textContent = t.detail;
   }
   renderRecent(h.recent);
+  const al = $('#home-alert'), names = h.alerting || [];
+  al.hidden = !names.length;
+  if (names.length) al.textContent = `Alert: motion near ${names.join(' + ')} (device link${names.length > 1 ? 's' : ''})`;
   for (const id of ['#counts', '#home-counts']) {
     const counts = $(id);
     counts.replaceChildren();
@@ -663,7 +666,7 @@ function renderSlow() {
     : n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
   if (page === 'home') { renderHome(); drawTimeline('#home-tl', true); }
   else if (page === 'graphs') drawTimeline();
-  else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderDev(); }
+  else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderDev(); renderAlerts(); }
   else if (page === 'map') window.AckMap.update(slow, fast && fast.header);
   else if (page === 'debug') renderRaw();
   else if (page === 'settings') { renderNet(); renderSound(); renderSens(); renderThresholds(); renderLed(); }
@@ -809,6 +812,31 @@ function renderLinks() {
   for (const n of [...box.childNodes]) if (!n.dataset || !seen.has(n.dataset.src)) n.remove();
   if (!rows.length) box.textContent = 'collecting: each link needs about a minute of data';
   drawLanes();
+}
+
+// Device links that drive the alerts besides the board (ticked here, saved on the PC)
+function renderAlerts() {
+  const keys = (slow.settings && slow.settings.alerts) || [], perLink = !!(slow.settings && slow.settings.per_link);
+  const live = (slow.radio || []).filter((r) => !r.ap);
+  const rows = live.map((r) => ({ key: r.key, label: r.label, sub: `${r.rssi} dBm · ${r.rate}/s`, r }))
+    .concat(keys.filter((k) => !live.some((r) => r.key === k)).map((k) => ({ key: k, label: k, sub: 'not heard now' })));
+  $('#alerts-state').textContent = !perLink ? 'switch on per-link analysis above for these to count'
+    : keys.length ? `the board + ${keys.length} device link${keys.length > 1 ? 's' : ''}` : 'the board only';
+  const box = $('#alert-list');
+  box.replaceChildren();
+  if (!rows.length) box.append(el('p', { className: 'muted small', textContent: 'No device links yet: poke a device (below) to add one.' }));
+  for (const row of rows) {
+    const cb = el('input', { type: 'checkbox', checked: keys.includes(row.key) });
+    cb.onchange = () => {
+      const next = new Set(keys);
+      if (cb.checked) next.add(row.key); else next.delete(row.key);
+      cmd({ cmd: 'alerts', keys: [...next] });
+    };
+    const state = row.r && row.r.alerting ? el('span', { className: 'chip motion', textContent: 'alerting' })
+      : row.r && row.r.state ? el('span', { className: 'chip', textContent: row.r.state }) : null;
+    box.append(el('label', { className: 'alert-row' }, cb, el('b', { textContent: row.label }),
+      el('span', { className: 'muted small', textContent: row.sub }), state));
+  }
 }
 
 function renderRates() {

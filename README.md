@@ -58,6 +58,7 @@ Sessions from both `gui` and `record` are saved to `sessions/` in the project fo
 | **Graphs** | The motion score with its thresholds, Doppler, breathing rate and the whole session |
 | **Stats** | Activity by day and hour across all recorded sessions, by hour of day, how long motion lasts, and every session's totals |
 | **Links** | Per-link analysis (experimental), packets per link, the board's poke gating, and the devices to poke |
+| **Links** | (alerts) The **Alerts from device links** card: tick device links that should also switch the light, the buzzer and the board's LED (purple), once their slow window confirms the motion. The board's own verdict always counts and is never changed; this works while the dashboard runs |
 | **Map** | Where the board senses motion: each live link (the router, poked devices) as a dot with its motion zone (1st Fresnel zone) drawn to scale in feet and inches, pulsing red while that link sees motion, plus each link's dBm, answers a second, distance and how much weaker it is than open air would give. Dots start at a rough distance guessed from their signal; drag them to where things really are (saved on this PC in `sessions/map.json`) |
 | **Debug** | Router ACK shape jumps and gaps, calibration history, commands sent and refused, board counters and the board's latest lines |
 | **Settings** | The network to watch, sensitivity and the thresholds, the buzzer |
@@ -318,6 +319,8 @@ SOUND,test      play the current mode's sound: started, then ended (the siren in
 SENS            report the slow (4 s) window's motion threshold: SENS,<x100> (140 = x1.4)
 SENS,<110-300>  change it until the next restart (the web dashboard's Sensitivity setting)
 SENS,default    back to the build's
+EXT,<1|0>       a device link the PC watches sees motion: the LED (purple) and the buzzer follow it
+                too; EXT,1 lapses after 5 s unless repeated. Never changes the board's own verdict
 LEDSET          report the LED settings
 LEDSET,<mode>,<bright>,<pattern>,<rrggbb>   change them (saved on the board): mode status
                 (everything), motion (only motion) or off; brightness 1-255; how motion

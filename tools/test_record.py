@@ -208,6 +208,11 @@ def network_lines():
     assert "Access points chosen from the PC: the board restarts" in text
     assert text.count("watches 1 chosen access point now") == 1 and m not in text, text
     assert "watches every access point of the network now" in text
+    # Alerts from device links (the board reports EXT changes): logged apart from motion
+    out, rec = drive([(0, "CALIB,1,track,boot,25000,70000,35000"), (5, "EXT,1"), (6, "EXT,1"), (20, "EXT,0")])
+    text = '\n'.join(out)
+    assert text.count("Alert: a device link sees motion (the board's own verdict: still)") == 1, text
+    assert "Alert over" in text and not rec.periods, "never a motion period of the board's own"
 
 
 def replay_raw_log():

@@ -519,34 +519,46 @@ int main(void) {
             led_cfg_t d0 = led_cfg_default(40);
             for (int k = 0; k <= 40; k += 5) {                         // motion: red, B/3 .. B with strength
                 int kk = k < 10 ? 10 : k > 30 ? 30 : k;
-                CHECK(led_pick(&d0, false, false, true, k, 0, 0, 1000) == (uint32_t)(40 / 3 + (40 - 40 / 3) * (kk - 10) / 20) << 16);
+                CHECK(led_pick(&d0, false, false, true, false, k, 0, 0, 1000) == (uint32_t)(40 / 3 + (40 - 40 / 3) * (kk - 10) / 20) << 16);
             }
-            CHECK(led_pick(&d0, true, false, true, 20, 0, 0, 1000) == (uint32_t)(8 << 16 | 8 << 8));   // looking: yellow wins
-            CHECK((led_pick(&d0, false, true, false, 0, 0, 0, 1000) & 0xffff00) == 0 &&
-                  (led_pick(&d0, false, true, false, 0, 0, 0, 1000) & 0xff) > 0);                    // calibrating: blue
-            CHECK(led_pick(&d0, false, false, false, 0, 990, 0, 1000) == (uint32_t)(12 << 16 | 6 << 8)); // just ended: amber
-            CHECK(led_pick(&d0, false, false, false, 0, 0, 950, 1000) == (uint32_t)(8 << 16 | 8));       // blip: purple
-            CHECK(led_pick(&d0, false, false, false, 0, 0, 0, 1000) == 0);                                // still: off
+            CHECK(led_pick(&d0, true, false, true, false, 20, 0, 0, 1000) == (uint32_t)(8 << 16 | 8 << 8));   // looking: yellow wins
+            CHECK((led_pick(&d0, false, true, false, false, 0, 0, 0, 1000) & 0xffff00) == 0 &&
+                  (led_pick(&d0, false, true, false, false, 0, 0, 0, 1000) & 0xff) > 0);                    // calibrating: blue
+            CHECK(led_pick(&d0, false, false, false, false, 0, 990, 0, 1000) == (uint32_t)(12 << 16 | 6 << 8)); // just ended: amber
+            CHECK(led_pick(&d0, false, false, false, false, 0, 0, 950, 1000) == (uint32_t)(8 << 16 | 8));       // blip: purple
+            CHECK(led_pick(&d0, false, false, false, false, 0, 0, 0, 1000) == 0);                                // still: off
             // Motion only: nothing else lights it
             led_cfg_t mo = d0; mo.mode = LED_MODE_MOTION;
-            CHECK(led_pick(&mo, true, false, false, 0, 0, 0, 1000) == 0 && led_pick(&mo, false, true, false, 0, 0, 0, 1000) == 0);
-            CHECK(led_pick(&mo, false, false, false, 0, 990, 950, 1000) == 0 && led_pick(&mo, false, false, true, 30, 0, 0, 1000) == 40u << 16);
+            CHECK(led_pick(&mo, true, false, false, false, 0, 0, 0, 1000) == 0 && led_pick(&mo, false, true, false, false, 0, 0, 0, 1000) == 0);
+            CHECK(led_pick(&mo, false, false, false, false, 0, 990, 950, 1000) == 0 && led_pick(&mo, false, false, true, false, 30, 0, 0, 1000) == 40u << 16);
             // Off: never lit
             led_cfg_t of = d0; of.mode = LED_MODE_OFF;
-            CHECK(led_pick(&of, true, true, true, 30, 990, 950, 1000) == 0);
+            CHECK(led_pick(&of, true, true, true, false, 30, 990, 950, 1000) == 0);
             // Colour and brightness: steady full, a dim colour stays visible
             led_cfg_t st = d0; st.pattern = LED_PAT_STEADY; st.rgb = 0x00ff80; st.bright = 255;
-            CHECK(led_pick(&st, false, false, true, 10, 0, 0, 1000) == 0x00ff80);
+            CHECK(led_pick(&st, false, false, true, false, 10, 0, 0, 1000) == 0x00ff80);
             st.bright = 1;
-            CHECK(led_pick(&st, false, false, true, 10, 0, 0, 1000) == 0x000100);
+            CHECK(led_pick(&st, false, false, true, false, 10, 0, 0, 1000) == 0x000100);
             st.rgb = 0x404040;                                         // would round to black: still lit
-            CHECK(led_pick(&st, false, false, true, 10, 0, 0, 1000) == 0x010101);
+            CHECK(led_pick(&st, false, false, true, false, 10, 0, 0, 1000) == 0x010101);
             // Blink: on, then off; pulse: dim and bright, never dark
             led_cfg_t bl = d0; bl.pattern = LED_PAT_BLINK;
-            CHECK(led_pick(&bl, false, false, true, 10, 0, 0, 100) == 40u << 16 && led_pick(&bl, false, false, true, 10, 0, 0, 500) == 0);
+            CHECK(led_pick(&bl, false, false, true, false, 10, 0, 0, 100) == 40u << 16 && led_pick(&bl, false, false, true, false, 10, 0, 0, 500) == 0);
             led_cfg_t pu = d0; pu.pattern = LED_PAT_PULSE;
-            uint32_t lo = led_pick(&pu, false, false, true, 10, 0, 0, 0), hi = led_pick(&pu, false, false, true, 10, 0, 0, 800);
+            uint32_t lo = led_pick(&pu, false, false, true, false, 10, 0, 0, 0), hi = led_pick(&pu, false, false, true, false, 10, 0, 0, 800);
             CHECK(lo > 0 && hi == 40u << 16 && lo < hi);
+            // A device link sees motion (EXT): purple, in status and motion-only modes, not when off;
+            // the board's own motion wins; looking for the router still wins over it
+            CHECK(led_pick(&d0, false, false, false, true, 0, 0, 0, 1000) == (uint32_t)(0x8a * 40 / 255 << 16 | 0x3c * 40 / 255 << 8 | 0xff * 40 / 255));
+            CHECK(led_pick(&mo, false, false, false, true, 0, 0, 0, 1000) == led_pick(&d0, false, false, false, true, 0, 0, 0, 1000));
+            CHECK(led_pick(&of, false, false, false, true, 0, 0, 0, 1000) == 0);
+            CHECK(led_pick(&d0, false, false, true, true, 30, 0, 0, 1000) == 40u << 16);
+            CHECK(led_pick(&d0, true, false, false, true, 0, 0, 0, 1000) == (uint32_t)(8 << 16 | 8 << 8));
+            CHECK(led_pick(&d0, false, false, false, true, 0, 0, 950, 1000) != (uint32_t)(8 << 16 | 8));   // no blip flash over it
+            CHECK(led_pick(&bl, false, false, false, true, 0, 0, 0, 500) == 0);                            // blinks too
+            // EXT commands
+            CHECK(parse_ext("EXT,1") == 1 && parse_ext("EXT,0\r\n") == 0 && parse_ext("EXT,2") == -1);
+            CHECK(parse_ext("EXT,10") == -1 && parse_ext("EXT,") == -1 && parse_ext("EXT") == -1 && parse_ext("EXTX,1") == -1);
         }
         {   // SOUND: buzzer settings at run time
             int sm, sv, sh;

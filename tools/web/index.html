@@ -44,6 +44,7 @@
         <div class="hero-top"><span class="state-dot" id="home-dot"></span><span class="hero-word" id="home-word">WAITING</span></div>
         <div class="hero-head" id="home-head">waiting for data…</div>
         <div class="hero-sub" id="home-since"></div>
+        <div class="hero-alert" id="home-alert" hidden></div>
         <div class="hero-sub muted" id="home-light" hidden></div>
         <div class="meter" id="meter" title="How close the room is to the motion threshold right now">
           <div class="meter-label"><span>Activity now</span><b id="meter-word">–</b></div>
@@ -184,6 +185,12 @@
       </div>
       <div class="links" id="links"></div>
     </section>
+    <section class="card" id="alerts-card">
+      <div class="card-head"><h2>Alerts from device links</h2><span class="muted small" id="alerts-state"></span></div>
+      <p class="cap">Tick the device links that should also switch the light, the buzzer and the board's LED (purple for motion only a device link sees). A ticked link counts once its slow (4 s) window confirms the motion, so a lone spike on a noisy link never sets them off. The board's own verdict always counts, and it is never changed by this. Works while this dashboard runs; on its own the board uses its own verdict.</p>
+      <div id="alert-list"></div>
+    </section>
+
     <section class="row2">
       <article class="card">
         <div class="card-head"><h2>Packets by link</h2></div>

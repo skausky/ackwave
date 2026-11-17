@@ -469,10 +469,19 @@ static void led_hello(void) {                // white for 0.5 s at power-on (unl
 
 static uint32_t clock_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
+// EXT from the PC: a device link it watches sees motion. Held EXT_HOLD_MS after
+// each EXT,1, so the LED and buzzer fall back to the board's own verdict on
+// their own if the PC goes away. Never touches the detector or STATE.
+static volatile uint32_t ext_until_ms;       // 0 = none
+static bool ext_on(void) {
+    uint32_t u = ext_until_ms;
+    return u && (int32_t)(u - clock_ms()) > 0;
+}
+
 static void led_update(bool searching) {
     static uint32_t shown = UINT32_MAX;      // last colour sent, 0x00RRGGBB
     if (!led_ok) return;
-    uint32_t c = led_pick(&led_cfg, searching, led_cal, led_motion, led_strength,
+    uint32_t c = led_pick(&led_cfg, searching, led_cal, led_motion, ext_on(), led_strength,
                           led_ended_ms, led_blip_ms, clock_ms());
     if (c != shown && led_rgb((uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c))
         shown = c;                           // else retry next poll
@@ -694,7 +703,7 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
-    int snd, smode, svol, shz, sens, sx, na, ledc;
+    int snd, smode, svol, shz, sens, sx, na, ledc, ext;
     ap_list_t new_aps;
     led_cfg_t new_led;
     if (glide_ms > 0) {
@@ -724,6 +733,8 @@ static void run_cmd(const char *line) {
             buzzer_stop();               // cut whatever is playing
         }
         print_sound();
+    } else if ((ext = parse_ext(line)) >= 0) {
+        ext_until_ms = ext ? (clock_ms() + EXT_HOLD_MS) | 1 : 0;   // print_task reports changes
     } else if ((ledc = parse_led(line, &new_led)) != LED_BAD) {
         if (ledc == LED_SET) led_cfg = new_led;
         else if (ledc == LED_DEFAULT) led_cfg = led_cfg_default(LED_BRIGHT);
@@ -1023,6 +1034,7 @@ static void print_task(void *arg) {
     bool beeped = false;                     // this motion got its beep: sound its end too
     int64_t last_beep = INT64_MIN / 2;       // when the last motion beep played
     int64_t next_whoop = -1;                 // alarm mode: next whoop, -1 = alarm off
+    bool ext_was = false, ext_beeped = false;  // EXT: a device link's motion, from the PC
     // Link watch: a weak link is noisy and looks like motion, so no beeps then
     int64_t link_from = 0;
     int link_acks = 0, link_rssi_sum = 0;
@@ -1103,10 +1115,34 @@ static void print_task(void *arg) {
                 last_beep = p.ts;
             }
         }
+        // A device link the PC watches sees motion: the same sounds, while the
+        // board's own verdict is still (its own motion has its own sounds above)
+        bool ext = ext_on();
+        if (ext != ext_was) {
+            printf("EXT,%d\n", ext ? 1 : 0);
+            if (!ext) led_ended_ms = clock_ms() | 1;
+            if (ext && !det.motion) {
+                if (snd_mode == SND_ALARM) {
+                    if (next_whoop < 0) next_whoop = p.ts;
+                    ext_beeped = true;
+                } else if (snd_mode == SND_BEEP && p.ts - last_beep >= (int64_t)BEEP_GAP_MS * 1000) {
+                    tune_t t = tune_motion(true);
+                    buzzer_play(&t);
+                    ext_beeped = true;
+                    last_beep = p.ts;
+                }
+            } else if (!ext && ext_beeped && !det.motion && snd_mode == SND_BEEP) {
+                tune_t t = tune_motion(false);
+                buzzer_play(&t);
+            }
+            if (!ext) ext_beeped = false;
+            ext_was = ext;
+        }
+        bool alarm_on = (det.motion && !link_weak) || (ext && ext_beeped);
         if (next_whoop >= 0) {
-            if (!det.motion || link_weak || snd_mode != SND_ALARM) {
+            if (!alarm_on || snd_mode != SND_ALARM) {
                 next_whoop = -1;             // motion over, link went bad or mode changed: stop
-                if (det.motion) buzzer_stop();
+                if (det.motion || ext) buzzer_stop();
             } else if (p.ts >= next_whoop) {
                 tune_t t = tune_siren();
                 buzzer_play(&t);

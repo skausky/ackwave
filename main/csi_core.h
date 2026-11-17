@@ -259,6 +259,9 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //                  saved; parse_aps) instead of every one named like the network
 //   APS,clear      back to watching every access point of the network by name
 //   APS            report the list (APS,<n>[,<mac>...])
+//   EXT,<1|0>      a device link the PC watches sees motion (1) or not (0): the LED
+//                  and buzzer follow it too; 1 lapses after EXT_HOLD_MS unless repeated.
+//                  The board's own verdict (STATE) is never changed by it
 enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL, CMD_SCAN };
 
 static inline bool parse_mac(const char *s, uint8_t out[6]) {
@@ -534,12 +537,25 @@ static inline int parse_led(const char *line, led_cfg_t *out) {
     return LED_SET;
 }
 
+// EXT,1 / EXT,0: returns 1 or 0, or -1 if the line isn't one
+#define EXT_HOLD_MS 5000                     // EXT,1 lasts this long unless repeated
+static inline int parse_ext(const char *line) {
+    if (!line || strncmp(line, "EXT,", 4) != 0 || (line[4] != '0' && line[4] != '1')) return -1;
+    char e = line[5];
+    if (e != '\0' && e != '\r' && e != '\n') return -1;
+    return line[4] - '0';
+}
+
+#define LED_EXT_RGB 0x8a3cff                 // motion only a device link sees: purple
+
 // The LED's colour now (0xRRGGBB). searching: looking for the router;
 // strength: motion score / threshold x10 (10 = at it); ended_ms / blip_ms: when
 // motion last ended / a too-faint blip was seen (0 = never); t_ms: now.
 #define LED_FADE_MS  30000                   // "recent motion" amber fade
 #define LED_BLIP_MS  150
-static inline uint32_t led_pick(const led_cfg_t *c, bool searching, bool cal, bool motion,
+// ext: a device link the PC watches sees motion while the board's own verdict is still
+// (shown in LED_EXT_RGB with the motion pattern; "stronger = brighter" shows it steady).
+static inline uint32_t led_pick(const led_cfg_t *c, bool searching, bool cal, bool motion, bool ext,
                                 int strength, uint32_t ended_ms, uint32_t blip_ms, uint32_t t_ms) {
     const int B = c->bright, d = B / 5 ? B / 5 : 1;
     int r = 0, g = 0, b = 0;
@@ -550,9 +566,10 @@ static inline uint32_t led_pick(const led_cfg_t *c, bool searching, bool cal, bo
     } else if (status && cal) {               // 2 s triangle pulse, dim
         uint32_t ph = t_ms % 2000, tri = ph < 1000 ? ph : 2000 - ph;
         b = 1 + (int)((2 * d - 1) * tri / 1000);
-    } else if (motion) {
+    } else if (motion || ext) {
+        uint32_t rgb = motion ? c->rgb : LED_EXT_RGB;
         int lvl = B;                          // how bright the motion colour is, 0-255
-        if (c->pattern == LED_PAT_STRENGTH) {   // B/3 at the threshold .. B at 3x
+        if (c->pattern == LED_PAT_STRENGTH && motion) {   // B/3 at the threshold .. B at 3x
             int k = strength < 10 ? 10 : strength > 30 ? 30 : strength;
             lvl = B / 3 + (B - B / 3) * (k - 10) / 20;
         } else if (c->pattern == LED_PAT_PULSE) {        // a 1.6 s breath, never fully dark
@@ -561,11 +578,11 @@ static inline uint32_t led_pick(const led_cfg_t *c, bool searching, bool cal, bo
         } else if (c->pattern == LED_PAT_BLINK) {        // 0.4 s on, 0.4 s off
             lvl = (t_ms % 800) < 400 ? B : 0;
         }
-        r = (int)((c->rgb >> 16) & 0xff) * lvl / 255;
-        g = (int)((c->rgb >> 8) & 0xff) * lvl / 255;
-        b = (int)(c->rgb & 0xff) * lvl / 255;
+        r = (int)((rgb >> 16) & 0xff) * lvl / 255;
+        g = (int)((rgb >> 8) & 0xff) * lvl / 255;
+        b = (int)(rgb & 0xff) * lvl / 255;
         if (lvl && !r && !g && !b) {          // a very dim colour still shows
-            r = (c->rgb >> 16) & 0xff ? 1 : 0; g = (c->rgb >> 8) & 0xff ? 1 : 0; b = c->rgb & 0xff ? 1 : 0;
+            r = (rgb >> 16) & 0xff ? 1 : 0; g = (rgb >> 8) & 0xff ? 1 : 0; b = rgb & 0xff ? 1 : 0;
         }
     } else if (!status) {
         return 0;                             // motion only: dark otherwise
@@ -573,7 +590,7 @@ static inline uint32_t led_pick(const led_cfg_t *c, bool searching, bool cal, bo
         int a = (B / 3) * (int)(LED_FADE_MS - (t_ms - ended_ms)) / LED_FADE_MS;
         if (a >= 2) { r = a; g = a / 2; }     // amber; below 2 it would turn red
     }
-    if (status && !r && !g && !b && !searching && !cal && !motion && blip_ms && t_ms - blip_ms < LED_BLIP_MS)
+    if (status && !r && !g && !b && !searching && !cal && !motion && !ext && blip_ms && t_ms - blip_ms < LED_BLIP_MS)
         r = b = d;                            // a blip too faint to count: quick purple
     return (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
 }
