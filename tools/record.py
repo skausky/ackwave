@@ -159,6 +159,8 @@ class Recorder:
         if ev is None:
             if line.startswith('BUTTON,recalibrate,pc'):
                 self.say("Recalibrate requested from the PC: recalibrating in 5 s, step away")
+            elif line.startswith('BUTTON,reset-settings'):
+                self.say("BOOT button held 5 s: the board's saved settings are back to the firmware's")
             elif line.startswith('BUTTON,recalibrate'):
                 self.say("BOOT button pressed: recalibrating in 5 s, step away")
             return

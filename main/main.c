@@ -242,6 +242,31 @@ static volatile int sens_x100, sens_build_x100;
 
 static void print_sens(void) { printf("SENS,%d\n", sens_x100); }
 
+// ---------------- Settings saved on the board ----------------
+// What you set from the dashboard is kept in NVS, so the board does the same
+// when unplugged from the PC (a charger, a power bank), after RST too. Holding
+// BOOT for 5 s puts them back to the build's (settings_reset). Each value is
+// written only when it changes.
+static void nvs_put(const char *key, const void *v, size_t n) {
+    nvs_handle_t h;
+    if (nvs_open("ackwave", NVS_READWRITE, &h) != ESP_OK) return;
+    if (v) nvs_set_blob(h, key, v, n); else nvs_erase_key(h, key);
+    nvs_commit(h);
+    nvs_close(h);
+}
+static bool nvs_take(const char *key, void *v, size_t n) {
+    nvs_handle_t h;
+    size_t got = n;
+    bool ok = false;
+    if (nvs_open("ackwave", NVS_READONLY, &h) == ESP_OK) {
+        ok = nvs_get_blob(h, key, v, &got) == ESP_OK && got == n;
+        nvs_close(h);
+    }
+    return ok;
+}
+static int saved_sens;                         // SENS saved on the board, 0 = none (print_task applies it)
+typedef struct { int8_t mode; uint8_t vol; uint16_t hz; } snd_saved_t;
+
 // Rising = something started, falling = it ended, low = a problem.
 // Motion uses BUZZER_HZ and a minor third above it.
 static const tune_t TUNE_HELLO  = {{{BUZZER_SOFT_HZ, 70, 0}, {3000, 70, 0}, {BUZZER_HZ, 120, 0}}, 0};  // rising chirp
@@ -671,6 +696,8 @@ static int sweep(void) {
         for (int c = 0; c <= MAX_CH; c++) { hits[c] = sweep_hits[c]; best[c] = sweep_best[c]; }
         got = aps_best_channel(hits, best, MAX_CH);
     }
+    for (int k = 0; got && k < MAX_DEVS; k++)    // devices restored at boot: on the router's channel
+        if (node_active(&nodes, DEV_NODE(k)) && node_ch[DEV_NODE(k)] == 0) node_ch[DEV_NODE(k)] = got;
     set_ch(got ? got : prev);
     scanning = false;
     last_seen_ms = now_ms();
@@ -689,6 +716,39 @@ static bool seen_has(const uint8_t *mac) {
 
 #define MACF "%02x:%02x:%02x:%02x:%02x:%02x"
 #define MACA(m) (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]
+
+// The poked devices, saved so the board pokes them again after a restart or away from the PC
+static void devs_save(void) {
+    uint8_t blob[MAX_DEVS * 6];
+    int n = 0;
+    for (int k = 0; k < MAX_DEVS; k++)
+        if (node_active(&nodes, DEV_NODE(k))) memcpy(blob + 6 * n++, nodes.mac[DEV_NODE(k)], 6);
+    uint8_t old[MAX_DEVS * 6];
+    size_t on = 0;
+    nvs_handle_t h;
+    if (nvs_open("ackwave", NVS_READONLY, &h) == ESP_OK) {   // unchanged: no write
+        on = sizeof old;
+        if (nvs_get_blob(h, "devs", old, &on) != ESP_OK) on = 0;
+        nvs_close(h);
+    }
+    if (on == (size_t)n * 6 && memcmp(old, blob, on) == 0) return;
+    nvs_put("devs", n ? blob : NULL, (size_t)n * 6);
+}
+
+// Boot: poke the saved devices again (their channel is set once the router is found)
+static void devs_load(void) {
+    uint8_t blob[MAX_DEVS * 6];
+    size_t n = sizeof blob;
+    nvs_handle_t h;
+    if (nvs_open("ackwave", NVS_READONLY, &h) != ESP_OK) return;
+    if (nvs_get_blob(h, "devs", blob, &n) != ESP_OK || n % 6) n = 0;
+    nvs_close(h);
+    for (int k = 0; k < (int)(n / 6) && k < MAX_DEVS; k++) {
+        gate_reset(&gate, DEV_NODE(k));
+        node_ch[DEV_NODE(k)] = 0;
+        dev_set(&nodes, k, blob + 6 * k);
+    }
+}
 
 static __attribute__((unused)) void print_poking(void) {   // unused when POKE_HZ = 0
     for (int k = 0; k < MAX_DEVS; k++)
@@ -721,10 +781,14 @@ static void run_cmd(const char *line) {
             snd_mode = MOTION_ALARM ? SND_ALARM : SND_BEEP;
             snd_vol = BUZZER_VOL;
             snd_hz = BUZZER_HZ;
+            nvs_put("snd", NULL, 0);
         } else if (snd == SOUND_SET) {
+            snd_saved_t before = { (int8_t)snd_mode, (uint8_t)snd_vol, (uint16_t)snd_hz };
             snd_mode = smode;
             if (svol > 0) snd_vol = svol;
             if (shz > 0) snd_hz = shz;
+            snd_saved_t now_ = { (int8_t)snd_mode, (uint8_t)snd_vol, (uint16_t)snd_hz };
+            if (memcmp(&before, &now_, sizeof now_) != 0) nvs_put("snd", &now_, sizeof now_);
         }
         if (snd == SOUND_TEST) {         // the current mode's sound
             tune_t t = snd_mode == SND_ALARM ? tune_siren() : tune_motion_test();
@@ -742,8 +806,13 @@ static void run_cmd(const char *line) {
             printf("LEDSET,error,not-saved\n");
         print_led();
     } else if ((sens = parse_sens(line, &sx)) != SENS_BAD) {
-        if (sens == SENS_SET) sens_x100 = sx;
-        else if (sens == SENS_DEFAULT && sens_build_x100) sens_x100 = sens_build_x100;
+        if (sens == SENS_SET) {
+            if (sx != sens_x100) { int16_t v = (int16_t)sx; nvs_put("sens", &v, sizeof v); }
+            sens_x100 = sx;
+        } else if (sens == SENS_DEFAULT && sens_build_x100) {
+            sens_x100 = sens_build_x100;
+            nvs_put("sens", NULL, 0);
+        }
         print_sens();
     } else if (cmd == CMD_SCAN) {
         // Commands wait in the USB buffer while a scan runs, so a SCAN sent
@@ -780,10 +849,12 @@ static void run_cmd(const char *line) {
         printf("BUTTON,recalibrate,pc\n");
     } else if (cmd == CMD_UNPOKE_ALL) {
         for (int k = 0; k < MAX_DEVS; k++) dev_clear(&nodes, k);
+        devs_save();
         printf("UNPOKED,all\n");
     } else if (cmd == CMD_UNPOKE) {
         int n = node_find(&nodes, mac);
         if (n >= MAX_APS) dev_clear(&nodes, n - MAX_APS);
+        devs_save();
         printf("UNPOKED," MACF "\n", MACA(mac));
     } else if (cmd == CMD_POKE) {
         bool is_new;
@@ -799,6 +870,7 @@ static void run_cmd(const char *line) {
                 gate_reset(&gate, DEV_NODE(k));
                 node_ch[DEV_NODE(k)] = cur_ch;
                 dev_set(&nodes, k, mac);
+                devs_save();
             }
             printf("POKING,%d," MACF "\n", DEV_NODE(k), MACA(mac));
         }
@@ -905,6 +977,30 @@ static void net_scan(void) {
     scan_done_ms = now_ms() | 1;
 }
 
+// BOOT held 5 s: the settings saved from the dashboard go back to the build's
+// (buzzer, sensitivity, LED, poked devices). The network is kept: it has its own
+// "back to default". Confirmed by three white flashes.
+static void settings_reset(void) {
+    nvs_put("snd", NULL, 0);
+    nvs_put("sens", NULL, 0);
+    nvs_put("devs", NULL, 0);
+    led_save(NULL);
+    snd_mode = MOTION_ALARM ? SND_ALARM : SND_BEEP;
+    snd_vol = BUZZER_VOL;
+    snd_hz = BUZZER_HZ;
+    if (sens_build_x100) sens_x100 = sens_build_x100;
+    led_cfg = led_cfg_default(LED_BRIGHT);
+    for (int k = 0; k < MAX_DEVS; k++) dev_clear(&nodes, k);
+    printf("BUTTON,reset-settings\n");
+    for (int i = 0; i < 3; i++) {
+        led_rgb(60, 60, 60); vTaskDelay(pdMS_TO_TICKS(150));
+        led_rgb(0, 0, 0); vTaskDelay(pdMS_TO_TICKS(150));
+    }
+    buzzer_auto(&TUNE_READY);
+    print_sound(); print_sens(); print_led();
+    printf("UNPOKED,all\n");
+}
+
 // The only task that changes channels
 static void control_task(void *arg) {
     int printed = 0;
@@ -927,15 +1023,14 @@ static void control_task(void *arg) {
         }
 
 #if CAL_BUTTON_GPIO >= 0
-        static int held;                   // debounce: 2 polls = 100 ms
-        if (btn_ok && gpio_get_level(CAL_BUTTON_GPIO) == 0) {
-            if (++held == 2) {
-                cal_request = 1;
-                buzzer_auto(&TUNE_TICK);
-                printf("BUTTON,recalibrate\n");
-            }
-        } else {
-            held = 0;
+        static btn_t btn;                  // short press: recalibrate; held 5 s: reset settings
+        int act = btn_ok ? btn_step(&btn, gpio_get_level(CAL_BUTTON_GPIO) == 0, POLL_MS) : BTN_NONE;
+        if (act == BTN_SHORT) {
+            cal_request = 1;
+            buzzer_auto(&TUNE_TICK);
+            printf("BUTTON,recalibrate\n");
+        } else if (act == BTN_LONG) {
+            settings_reset();
         }
 #endif
 
@@ -1027,6 +1122,7 @@ static void print_task(void *arg) {
     md_init(&det, &cfg, esp_timer_get_time());
     const float off_ratio = cfg.off_long / cfg.on_long;
     int sens_cur = sens_build_x100 = sens_x100 = (int)lroundf(cfg.on_long * 100);
+    if (saved_sens) sens_x100 = saved_sens;  // applied below like a SENS from the PC
     print_sens();
     uint32_t epoch = ch_epoch;
     int64_t next_calib = 0;
@@ -1162,9 +1258,17 @@ void app_main(void) {
     usb_init();
     ssid_load();
     led_load();
+    snd_saved_t sv;                          // the buzzer as last set (saved), else the build's
+    if (nvs_take("snd", &sv, sizeof sv) && sv.mode >= 0 && sv.mode <= SND_ALARM && sv.vol >= 1 &&
+        sv.vol <= SOUND_VOL_MAX && sv.hz >= 100) {
+        snd_mode = sv.mode; snd_vol = sv.vol; snd_hz = sv.hz;
+    }
+    int16_t ss;
+    if (nvs_take("sens", &ss, sizeof ss) && ss >= SENS_MIN && ss <= SENS_MAX) saved_sens = ss;
 
     gate_init(&gate);
     gate.keep_far = aps.n > 0;             // chosen one by one: never skipped as "far"
+    devs_load();                           // the devices it poked before (saved)
     buzzer_init();                           // never fatal
     buzzer_play(&TUNE_HELLO);                // power-on chirp: shows the wiring works
     print_sound();

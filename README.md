@@ -251,7 +251,7 @@ Wire a **passive piezo** between a free GPIO (GPIO 4 is a good choice; avoid str
 
 A piezo can't be detected electrically, so the buzzer is opt-in. If the pin can't be set up, the board prints `BUZZER,error,...` and carries on sensing.
 
-**Changing it without reflashing:** the web dashboard's Settings page has a Buzzer section: off, beeps or alarm, volume, pitch and a test button. The choice is saved on the PC (`sessions/dashboard.json`) and re-applied whenever the dashboard or GUI is connected, also after the board restarts. The board doesn't store it, so on its own (a charger or power bank) it uses the settings it was built with. Typical use: buzzer off at the desk, beeping when it's out on its own.
+**Changing it without reflashing:** the web dashboard's Settings page has a Buzzer section: off, beeps or alarm, volume, pitch and a test button. The board saves the choice, so it keeps it after RST or unplugging, also on a charger or power bank away from the PC (the dashboard keeps its own copy too and re-applies it when connected). **Holding BOOT for 5 s** puts the board's saved settings (buzzer, sensitivity, LED, poked devices) back to the firmware's, with three white flashes; a short press still recalibrates. The network it watches is kept.
 
 ### Bring-up: probe mode
 
@@ -312,12 +312,12 @@ APS,clear       back to every access point of the network by name (USE also clea
 BEEP[,<ms>[,<hz>[,<vol>]]]  test beep (1-3000 ms, default 300; pitch 100-10000 Hz; volume 1-100 %)
 GLIDE,<ms>,<hz>,<hz2>[,<vol>]  test a smooth pitch glide from hz to hz2
 SOUND           report the buzzer settings: SOUND,<off|beep|alarm>,<vol>,<hz>[,no-buzzer]
-SOUND,<off|beep|alarm>[,<vol>[,<hz>]]  change them until the next restart (vol 1-50 %, hz 500-6000);
+SOUND,<off|beep|alarm>[,<vol>[,<hz>]]  change them (saved on the board; vol 1-50 %, hz 500-6000);
                 off silences every automatic sound (BEEP and SOUND,test still play)
 SOUND,default   back to the build's BUZZER_VOL, BUZZER_HZ and MOTION_ALARM
 SOUND,test      play the current mode's sound: started, then ended (the siren in alarm mode)
 SENS            report the slow (4 s) window's motion threshold: SENS,<x100> (140 = x1.4)
-SENS,<110-300>  change it until the next restart (the web dashboard's Sensitivity setting)
+SENS,<110-300>  change it (saved on the board; the web dashboard's Sensitivity setting)
 SENS,default    back to the build's
 EXT,<1|0>       a device link the PC watches sees motion: the LED (purple) and the buzzer follow it
                 too; EXT,1 lapses after 5 s unless repeated. Never changes the board's own verdict

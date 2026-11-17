@@ -307,7 +307,7 @@
           <button type="button" data-x="140">High · ×1.4</button><button type="button" data-x="160">Medium · ×1.6</button><button type="button" data-x="180">Low · ×1.8</button>
         </div>
         <div class="dlg-tools gap"><button type="button" id="sens-default">Use the firmware's</button></div>
-        <p class="muted small">Sensitivity is the one threshold the board lets you change (the slow, 4 s window). The rest are shown for reference; changing them needs new firmware.</p>
+        <p class="muted small">Sensitivity is the one threshold the board lets you change (the slow, 4 s window); it is saved on the board. The rest are shown for reference; changing them needs new firmware.</p>
         <table class="kv"><tbody id="thresholds"></tbody></table>
       </article>
       <article class="card snd">
@@ -318,7 +318,7 @@
         <label class="slider"><span>Volume</span><input type="range" id="snd-vol" min="1" max="50" step="1"><output id="snd-vol-out"></output></label>
         <label class="slider"><span>Pitch</span><input type="range" id="snd-hz" min="500" max="6000" step="100"><output id="snd-hz-out"></output></label>
         <div class="dlg-tools"><button type="button" id="snd-test">Test sounds</button><button type="button" id="snd-default">Use the firmware's settings</button></div>
-        <p class="muted small">Beeps: "di-di-DIIING" once motion has lasted 2 s (at most every 30 s), a sliding "dooooo" when it ends. Alarm: a siren while motion lasts. Every sound uses the volume set here. While this dashboard runs it keeps the board at these settings, even after a restart.</p>
+        <p class="muted small">Beeps: "di-di-DIIING" once motion has lasted 2 s (at most every 30 s), a sliding "dooooo" when it ends. Alarm: a siren while motion lasts. Every sound uses the volume set here. Saved on the board, so it keeps them unplugged from the PC too; hold BOOT for 5 s to put the board's settings back to the firmware's.</p>
       </article>
     </section>
     <section class="card snd led" id="led-card">

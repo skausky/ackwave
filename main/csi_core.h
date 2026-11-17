@@ -249,11 +249,11 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //   USE,<name>     watch this network from now on (saved; parse_use)
 //   USE_DEFAULT    forget that choice: back to the build's MY_SSID
 //   SOUND          report the buzzer settings (parse_sound)
-//   SOUND,<off|beep|alarm>[,<vol>[,<hz>]]  change them until the next restart
+//   SOUND,<off|beep|alarm>[,<vol>[,<hz>]]  change them (saved on the board)
 //   SOUND,default  back to the build's buzzer settings
 //   SOUND,test     play the current mode's sound (siren in alarm mode)
 //   SENS           report the long-window threshold (parse_sens)
-//   SENS,<x100>    set it until the next restart: 110-300 = x1.1-x3.0
+//   SENS,<x100>    set it (saved on the board): 110-300 = x1.1-x3.0
 //   SENS,default   back to the build's
 //   APS,<mac>[,<mac>...]  watch these access points (1-8, any network names,
 //                  saved; parse_aps) instead of every one named like the network
@@ -535,6 +535,24 @@ static inline int parse_led(const char *line, led_cfg_t *out) {
     c.mode = (uint8_t)m; c.bright = (uint8_t)v; c.pattern = (uint8_t)p; c.rgb = rgb;
     *out = c;
     return LED_SET;
+}
+
+// ---------- The BOOT button ----------
+// A short press recalibrates (on release); held BTN_LONG_MS it resets the board's
+// saved settings instead (once, while still held). Call every poll with the level.
+#define BTN_LONG_MS 5000
+enum { BTN_NONE = 0, BTN_SHORT, BTN_LONG };
+typedef struct { int held; bool long_done; } btn_t;
+static inline int btn_step(btn_t *b, bool pressed, int poll_ms) {
+    if (pressed) {
+        b->held++;
+        if (!b->long_done && b->held * poll_ms >= BTN_LONG_MS) { b->long_done = true; return BTN_LONG; }
+        return BTN_NONE;
+    }
+    int r = b->held >= 2 && !b->long_done ? BTN_SHORT : BTN_NONE;   // 2 polls: not a bounce
+    b->held = 0;
+    b->long_done = false;
+    return r;
 }
 
 // EXT,1 / EXT,0: returns 1 or 0, or -1 if the line isn't one

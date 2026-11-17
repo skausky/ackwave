@@ -556,6 +556,17 @@ int main(void) {
             CHECK(led_pick(&d0, true, false, false, true, 0, 0, 0, 1000) == (uint32_t)(8 << 16 | 8 << 8));
             CHECK(led_pick(&d0, false, false, false, true, 0, 0, 950, 1000) != (uint32_t)(8 << 16 | 8));   // no blip flash over it
             CHECK(led_pick(&bl, false, false, false, true, 0, 0, 0, 500) == 0);                            // blinks too
+            // The BOOT button: short press on release; a 5 s hold resets settings once
+            btn_t bt = {0};
+            CHECK(btn_step(&bt, true, 50) == BTN_NONE && btn_step(&bt, false, 50) == BTN_NONE);   // a bounce
+            for (int i = 0; i < 4; i++) CHECK(btn_step(&bt, true, 50) == BTN_NONE);
+            CHECK(btn_step(&bt, false, 50) == BTN_SHORT);
+            int longs = 0, shorts = 0;
+            for (int i = 0; i < 160; i++) { int r = btn_step(&bt, true, 50); longs += r == BTN_LONG; shorts += r == BTN_SHORT; }
+            CHECK(longs == 1 && shorts == 0);                                         // once, at 5 s
+            CHECK(btn_step(&bt, false, 50) == BTN_NONE && bt.held == 0);             // no recalibration after it
+            for (int i = 0; i < 99; i++) CHECK(btn_step(&bt, true, 50) == BTN_NONE); // 4.95 s: not yet long
+            CHECK(btn_step(&bt, false, 50) == BTN_SHORT);
             // EXT commands
             CHECK(parse_ext("EXT,1") == 1 && parse_ext("EXT,0\r\n") == 0 && parse_ext("EXT,2") == -1);
             CHECK(parse_ext("EXT,10") == -1 && parse_ext("EXT,") == -1 && parse_ext("EXT") == -1 && parse_ext("EXTX,1") == -1);

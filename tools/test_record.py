@@ -34,6 +34,8 @@ def main():
     assert "MOTION started (short x4.0, long x1.8)" in text
     assert "still again after 17 s" in text
     assert "BOOT button pressed" in text and "Recalibrating (button pressed)" in text
+    out2, _ = drive([(0, "BUTTON,reset-settings")])
+    assert "BOOT button held 5 s" in out2[0], out2
     assert text.count("MOTION started") == 3
     assert "still again after 1 s (brief)" in text
     assert "1 brief blip(s) under 2 s" in text
