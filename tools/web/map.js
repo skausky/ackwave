@@ -224,6 +224,7 @@ window.AckMap = (() => {
           : 'turn on per-link analysis (Links page) to judge it';
       const dot = el('span', { className: 'map-dot' }); dot.style.background = color;
       const head = el('div', { className: 'map-link-head' }, dot, el('b', { textContent: r.label }),
+        r.via ? el('span', { className: 'muted small', textContent: `on ${r.via}` }) : null,
         el('span', { className: 'chip' + (mv ? ' motion' : ''), textContent: st }));
       const rows = [];
       if (r.rssi !== null && r.rssi !== undefined) {

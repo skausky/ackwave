@@ -933,8 +933,8 @@ static void print_devices(void) {
         if (!e->used) continue;
         uint32_t age = now - e->last_ms;
         if ((int32_t)age < 0) age = 0;
-        printf("DEV," MACF ",%d,%" PRIu32 ",%" PRIu32 ",%" PRIu32 "\n", MACA(e->mac),
-               e->rssi_x16 / 16, e->n_tx, e->n_rx, age);
+        printf("DEV," MACF ",%d,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%d\n", MACA(e->mac),
+               e->rssi_x16 / 16, e->n_tx, e->n_rx, age, e->ap);
     }
 }
 

@@ -192,6 +192,7 @@ typedef struct {
     int      rssi_x16;          // average of frames it sent, x16; 0 = none yet
     uint32_t n_tx, n_rx;        // frames it sent / frames sent to it
     uint32_t last_ms;
+    int8_t   ap;                // the AP (node 0..MAX_APS-1) of its latest frame
     bool     used;
 } seen_dev_t;
 
@@ -208,7 +209,8 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
     else if (ds == 2) { bssid = f + 10; dev = f + 4;  sent_by_dev = false; }  // from AP
     else return -1;                                     // ad-hoc / mesh backhaul
     if (dev[0] & 0x01) return -1;                       // group address
-    if (!node_is_ap(node_find(t, bssid))) return -1;    // not our network
+    int ap = node_find(t, bssid);
+    if (!node_is_ap(ap)) return -1;                     // not our network
     if (node_is_ap(node_find(t, dev))) return -1;       // an AP of ours, not a device
     int k = -1;
     for (int i = 0; i < MAX_SEEN && k < 0; i++)         // already listed?
@@ -235,6 +237,7 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
         e->n_rx++;
     }
     e->last_ms = now_ms;
+    e->ap = (int8_t)ap;                                 // a device can move to another AP
     return k;
 }
 

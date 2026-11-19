@@ -52,7 +52,15 @@ def check(cond, what):
 
 def test_parse():
     check(parse_line(f"DEV,{TV.upper()},-55,12,3,400\n") ==
-          ('dev', dict(mac=TV, rssi=-55, tx=12, rx=3, age_ms=400)), 'DEV')
+          ('dev', dict(mac=TV, rssi=-55, tx=12, rx=3, age_ms=400, ap=-1)), 'DEV from an older board')
+    check(parse_line(f"DEV,{TV},-55,12,3,400,2") ==
+          ('dev', dict(mac=TV, rssi=-55, tx=12, rx=3, age_ms=400, ap=2)), 'DEV with its AP')
+    check(parse_line(f"DEV,{TV},-55,12,3,400,9")[1]['ap'] == -1, 'not an AP node: unknown')
+    d = Devices(clock=Clock())
+    d.feed('dev', dict(mac=TV, rssi=-55, tx=12, rx=3, age_ms=0, ap=1))
+    d.feed('dev', dict(mac=TV, rssi=-55, tx=13, rx=3, age_ms=0, ap=-1))   # an older line: keep it
+    r = d.rows()[0]
+    check(r['ap'] == 1 and r['router'] == 'Router 2', 'a device row names its router')
     check(parse_line("GATE,8,-60,97,500,ok") ==
           ('gate', dict(idx=8, rssi=-60, yield_pct=97, sent=500, state='ok')), 'GATE')
     check(parse_line("GATE,8,-60,97,500,maybe") is None, 'bad GATE state')
@@ -166,8 +174,11 @@ def test_auto_picks_stationary():
     out = cycle(d, clk, [steady(TV, -55, 0, n)], poking={TV: 8},
                 gates=[dict(idx=8, rssi=-55, yield_pct=95, sent=50, state='ok')])
     check(out == [] and d.poking == {TV: 8}, f'steady state: {out}')
-    check(d.link_label(8) == TV[-8:] and d.link_label(0) == 'router'
-          and d.link_label(1) == 'AP 1' and d.link_label(9) == 'device 9', 'labels')
+    check(d.link_label(8) == TV[-8:] and d.link_label(0) == 'Router 1'
+          and d.link_label(1) == 'Router 2' and d.link_label(9) == 'device 9', 'labels')
+    d.router_name = lambda i: 'Kitchen' if i == 1 else None
+    check(d.link_label(1) == 'Kitchen' and d.link_label(0) == 'Router 1', 'a router nickname')
+    d.router_name = None
     check(d.rows()[0]['mac'] == TV and d.rows()[0]['poked'], 'poked first in the table')
 
 

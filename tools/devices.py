@@ -129,10 +129,11 @@ class Oui:
 
 
 class Device:
-    __slots__ = ('mac', 'first', 'last_heard', 'tx', 'rx', 'rssi', 'samples', 'tx_hist')
+    __slots__ = ('mac', 'first', 'last_heard', 'tx', 'rx', 'rssi', 'samples', 'tx_hist', 'ap')
 
     def __init__(self, mac, now):
         self.mac = mac
+        self.ap = -1                     # the AP node it talks through (newer boards say), -1 = unknown
         self.first = self.last_heard = now
         self.tx = self.rx = 0
         self.rssi = 0
@@ -157,6 +158,7 @@ class Devices:
         self.mode = mode if mode in MODES else 'auto'
         self.manual = set(manual)
         self.devs = {}
+        self.router_name = None          # node index -> name (the dashboard sets it); None: 'Router N'
         self.poking = {}                 # mac -> node index, as the board last said
         self._cycle = {}
         self.gate = {}                   # node index -> last GATE dict
@@ -189,6 +191,8 @@ class Devices:
             if d['tx'] < dv.tx:                           # board rebooted
                 dv.tx_hist.clear()
             dv.tx, dv.rx = d['tx'], d['rx']
+            if d.get('ap', -1) >= 0:
+                dv.ap = d['ap']
             if d['rssi'] < 0:
                 dv.rssi = d['rssi']
             dv.tx_hist.append((now, d['tx']))
@@ -313,9 +317,11 @@ class Devices:
         return self.oui.name(mac) if self.oui else ('private address' if mac_is_random(mac) else '')
 
     def link_label(self, idx):
-        """Short name for node idx: 'router', 'AP 1' or a device's maker."""
+        """Short name for node idx: a router's name ('Router 1', or the nickname
+        you gave it) or a device's maker."""
         if idx < 8:
-            return 'router' if idx == 0 else f"AP {idx}"
+            got = self.router_name(idx) if self.router_name else None
+            return got or f"Router {idx + 1}"
         for mac, i in self.poking.items():
             if i == idx:
                 return self.name(mac) or mac[-8:]
@@ -338,7 +344,8 @@ class Devices:
             out.append(dict(mac=dv.mac, name=self.name(dv.mac), rssi=dv.rssi, tx=dv.tx,
                             rx=dv.rx, rate=dv.tx_rate(now), heard=now - dv.last_heard,
                             status=st, why=why, poked=idx is not None, idx=idx, link=link,
-                            picked=dv.mac in self.manual))
+                            picked=dv.mac in self.manual, ap=dv.ap,
+                            router=self.link_label(dv.ap) if 0 <= dv.ap < 8 else ''))
         out.sort(key=lambda r: (not r['poked'], order.get(r['status'], 99), -r['rssi'] if r['rssi'] else 999))
         return out
 

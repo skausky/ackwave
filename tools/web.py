@@ -66,6 +66,7 @@ LINK_EVENTS = 400                           # device-link motion periods remembe
 ALERT_MAX = 8                               # device links that may drive the alerts
 EXT_EVERY_S = 1.0                           # EXT,1 repeated this often (the board holds it 5 s)
 ACT_LABEL_RE = re.compile(r'[a-z0-9_]{1,24}')  # an activity's key (own names allowed)
+ROUTER_NAME_MAX, ROUTER_NAMES_MAX = 24, 32    # nicknames you give routers (by BSSID)
 
 
 class LinkDetector:
@@ -168,6 +169,7 @@ class Dashboard:
     def __init__(self, state, send=None, log_name=None, prefs=None, settings=None, sessions_dir=None,
                  light_call=http_call, light_run=None):
         self.s, self.send, self.log_name, self.prefs = state, send, log_name, prefs
+        state.devices.router_name = self._router_name   # nicknames on every page
         self.sessions = Sessions(sessions_dir) if sessions_dir else None
         self.started = time.time()
         self._today = (0.0, None)                # (when, today's totals)
@@ -180,7 +182,7 @@ class Dashboard:
         self.lock = threading.Lock()
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
-        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[])   # kept on the board; None = its own
+        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={})   # sound, sens: kept on the board; None = its own
         # Device links that drive the alerts (light, buzzer, LED) besides the board:
         # src -> True once that link's slow window confirmed its current motion
         self.confirmed = {}
@@ -198,6 +200,10 @@ class Dashboard:
                 if isinstance(al, list) and len(al) <= ALERT_MAX and all(
                         isinstance(k, str) and MAC_RE.fullmatch(k) for k in al):
                     self.cfg['alerts'] = [k.lower() for k in al]
+                rn = got.get('router_names')
+                if isinstance(rn, dict) and len(rn) <= ROUTER_NAMES_MAX:
+                    self.cfg['router_names'] = {k.lower(): v for k, v in rn.items()
+                                                if isinstance(k, str) and MAC_RE.fullmatch(k) and _router_nick(v)}
             except (OSError, ValueError):
                 got = {}
         try:                                     # re-applied whenever the board differs
@@ -576,6 +582,25 @@ class Dashboard:
                     self.cfg['sens'] = self.s.sens_want
                     msg = f'Long-window threshold x{self.s.sens_want / 100:.1f}'
                 self._save_settings()
+            elif what == 'router_name':
+                bssid, name = c.get('bssid'), c.get('name')
+                if not isinstance(bssid, str) or not MAC_RE.fullmatch(bssid):
+                    return False, 'bad router address'
+                if not isinstance(name, str):
+                    return False, 'bad name'
+                name = ' '.join(name.split())
+                names = self.cfg['router_names']
+                if not name:
+                    names.pop(bssid.lower(), None)
+                    msg = 'Name removed'
+                elif not _router_nick(name):
+                    return False, f'a name is 1-{ROUTER_NAME_MAX} characters'
+                elif bssid.lower() not in names and len(names) >= ROUTER_NAMES_MAX:
+                    return False, 'too many router names: remove one first'
+                else:
+                    names[bssid.lower()] = name
+                    msg = f'Router named "{name}"'
+                self._save_settings()
             elif what == 'alerts':
                 keys = c.get('keys')
                 if not isinstance(keys, list) or len(keys) > ALERT_MAX or not all(
@@ -754,6 +779,7 @@ class Dashboard:
         with self.lock:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
+                       routers=self._routers(),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
                        thresholds=self._thresholds(), today=self._today_totals(),
                        radio=self._radio(), channel=s.channel[0] if s.channel else None,
@@ -874,7 +900,11 @@ class Dashboard:
             key = f'ap:{src}' if ap else by_idx.get(src)
             if key is None:
                 continue                         # a device that isn't poked any more
-            row = dict(key=key, src=int(src), label=s.devices.link_label(src), ap=ap,
+            via = ''
+            if not ap:
+                d = s.devices.devs.get(key)
+                via = s.devices.link_label(d.ap) if d is not None and 0 <= d.ap < MAX_APS else ''
+            row = dict(key=key, src=int(src), label=s.devices.link_label(src), ap=ap, via=via,
                        rssi=s.rssi.get((src, 1)), rate=round(rate),
                        alerts=key in self.cfg['alerts'],
                        alerting=bool(self.confirmed.get(src)) and src in self.links and self.links[src]['md'].motion)
@@ -888,6 +918,36 @@ class Dashboard:
                 row.update(state=st, moving=st == 'motion',
                            activity=r2(ms / f) if ms is not None and f > 0 and st in ('motion', 'still') else None)
             out.append(row)
+        return out
+
+    def _router_name(self, idx):
+        """A router's name for every page: your nickname for its BSSID, else
+        'Router N' (N = its node + 1). Used by Devices.link_label."""
+        mac = self.s.nodes.get(idx)
+        nick = self.cfg['router_names'].get(mac.lower()) if mac else None
+        return nick or f"Router {idx + 1}"
+
+    def _routers(self):
+        """The routers (access points) the board learned: name, network,
+        channel, signal, ACK rate, and the devices that talk through each."""
+        s, dv = self.s, self.s.devices
+        ssid_of = {b.lower(): n for n, aps in s.net_aps.items() for b, _c, _r in aps}
+        net = s.network[1] if s.network and s.network[0] != 'none' else ''
+        on = {}
+        for r in dv.rows():
+            if 0 <= r['ap'] < MAX_APS and r['status'] != 'gone':
+                on.setdefault(r['ap'], []).append(dict(mac=r['mac'], name=r['name'], poked=r['poked']))
+        out = []
+        for idx, mac in sorted(s.nodes.items()):
+            if not 0 <= idx < MAX_APS:
+                continue
+            g = dv.gate.get(idx)
+            rssi = s.rssi.get((idx, 1)) or (g['rssi'] if g else None)
+            out.append(dict(idx=int(idx), bssid=mac, name=self._router_name(idx),
+                            nick=self.cfg['router_names'].get(mac.lower(), ''),
+                            network=ssid_of.get(mac.lower(), net), ch=s.channel[0] if s.channel else None,
+                            rssi=rssi, rate=round(s.rate((idx, 1))), state=g['state'] if g else None,
+                            devices=on.get(idx, [])))
         return out
 
     def _gates(self):
@@ -1097,7 +1157,7 @@ class Dashboard:
             rows.append(dict(mac=r['mac'], name=r['name'], rssi=r['rssi'], tx=r['tx'],
                              rate=round(r['rate'] * 60), heard=fmt_age(r['heard']) + ' ago',
                              why=r['why'], link=r['link'], poked=r['poked'], picked=r['picked'],
-                             status=r['status']))
+                             status=r['status'], ap=r['ap'], router=r['router']))
         return dict(mode=dv.mode, modes=list(MODES), rows=rows, max=MAX_DEVS,
                     poking=len(dv.poking), seen=dv.board_seen)
 
@@ -1118,6 +1178,12 @@ class Dashboard:
         if s.stats:
             out['stats'] = {k: v for k, v in s.stats.items() if isinstance(v, (int, float))}
         return out
+
+
+def _router_nick(v):
+    """A router nickname: 1-24 printable characters, no surrounding spaces."""
+    return (isinstance(v, str) and 0 < len(v) <= ROUTER_NAME_MAX and v == v.strip()
+            and not any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in v))
 
 
 def _num(v, lo=-1e6, hi=1e6):

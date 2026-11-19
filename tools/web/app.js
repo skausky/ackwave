@@ -668,7 +668,7 @@ function renderSlow() {
     : n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
   if (page === 'home') { renderHome(); drawTimeline('#home-tl', true); }
   else if (page === 'graphs') drawTimeline();
-  else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderDev(); renderAlerts(); }
+  else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderRouters(); renderDev(); renderAlerts(); }
   else if (page === 'map') window.AckMap.update(slow, fast && fast.header);
   else if (page === 'debug') renderRaw();
   else if (page === 'activity') renderActCal();
@@ -1179,7 +1179,7 @@ function renderNet() {
         const cb = el('input', { type: 'checkbox', checked: apPick.has(a.bssid), title: 'combine this access point with others' });
         cb.onchange = () => { if (cb.checked) apPick.add(a.bssid); else apPick.delete(a.bssid); renderApsBar(n); };
         box.append(el('label', { className: used ? 'used' : '' }, cb,
-          `${a.bssid} · ch ${a.ch} · ${a.rssi} dBm` + (used ? ' · in use' : '')));
+          (routerNick(a.bssid) ? `${routerNick(a.bssid)} · ` : '') + `${a.bssid} · ch ${a.ch} · ${a.rssi} dBm` + (used ? ' · in use' : '')));
       }
       name.append(box);
     }
@@ -1239,10 +1239,35 @@ function renderDev() {
     const cb = el('input', { type: 'checkbox', checked: r.poked || r.picked, title: 'poke this device' });
     cb.onchange = () => cmd({ cmd: 'toggle', mac: r.mac });
     tr.append(el('td', {}, cb));
-    [`${r.name}  ${r.mac}`, r.rssi ? `${r.rssi} dBm` : '–', r.rate, r.heard, r.why, r.link]
-      .forEach((v, i) => tr.append(el('td', { textContent: v, className: i === 4 ? 'why' : '' })));
+    [`${r.name}  ${r.mac}`, r.router || '–', r.rssi ? `${r.rssi} dBm` : '–', r.rate, r.heard, r.why, r.link]
+      .forEach((v, i) => tr.append(el('td', { textContent: v, className: i === 5 ? 'why' : '' })));
     body.append(tr);
   }
+}
+
+// Routers the board learned: your name for each (kept on the PC by BSSID),
+// its network, signal and the devices that talk through it
+function routerNick(bssid) {
+  const names = slow && slow.settings && slow.settings.router_names;
+  return (names && names[String(bssid).toLowerCase()]) || '';
+}
+function renderRouters() {
+  const rs = slow && slow.routers;
+  if (!rs) return;
+  $('#routers-state').textContent = rs.length ? `${rs.length} found` : 'waiting for the board…';
+  const STATE = { ok: 'good', weak: 'weak', silent: 'not answering', far: 'too far' };
+  fillRows($('#routers'), rs.map((r) => {
+    const devs = r.devices.length
+      ? r.devices.map((d) => d.name + (d.poked ? ' (poked)' : '')).join(', ') : '–';
+    const btn = el('button', { type: 'button', className: 'ghost', textContent: r.nick ? 'Rename' : 'Name it',
+      onclick: () => {
+        const name = prompt(`A name for ${r.name} (${r.bssid}). Leave empty to go back to "Router ${r.idx + 1}".`, r.nick);
+        if (name !== null) cmd({ cmd: 'router_name', bssid: r.bssid, name });
+      } });
+    return [el('span', {}, el('b', { textContent: r.name }), el('span', { className: 'muted small', textContent: ` ${r.bssid}` })),
+      r.network || '–', r.ch ?? '–', r.rssi ? `${r.rssi} dBm${r.state ? ' · ' + (STATE[r.state] || r.state) : ''}` : '–',
+      r.rate || '–', devs, btn];
+  }), 'none yet');
 }
 
 // ---------------------------------------------------------------- activity

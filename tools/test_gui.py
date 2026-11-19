@@ -58,7 +58,7 @@ def main():
                for _a, dur, peak, going in rec), rec
     assert s.last_motion().startswith('last motion') and s.last_motion().endswith('ago')
     word, _col, detail = s.link_health()
-    assert word == 'WEAK' and 'router ACK' in detail, (word, detail)   # demo: 40 ACKs/s
+    assert word == 'WEAK' and 'Router 1 ACK' in detail, (word, detail)   # demo: 40 ACKs/s
     view.draw()
     assert re.search(r' x\d+\.\d', view.recent.get_text()) and 'link WEAK' in view.health.get_text()
     view.details = True

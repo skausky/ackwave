@@ -129,7 +129,7 @@ def fake_devices(t):
     out = []
     for i, (m, rssi, rate, wob) in enumerate(DEMO_DEVICES):
         r = rssi + (round(wob * math.sin(t * 0.7 + i)) if rssi else 0)
-        out.append(f"DEV,{m},{r},{int(rate * t)},{int(t / 3)},{0 if rate else 4000}")
+        out.append(f"DEV,{m},{r},{int(rate * t)},{int(t / 3)},{0 if rate else 4000},{i % 2}")  # its router
     return out
 
 

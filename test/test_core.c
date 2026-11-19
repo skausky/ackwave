@@ -378,6 +378,13 @@ int main(void) {
         CHECK(seen_note(&sl, &dt, df, 24, -40, 1100) == -1);   // broadcast
         df[1] = 0x01; memcpy(df + 4, AP2, 6); memcpy(df + 10, PLUG, 6);
         CHECK(seen_note(&sl, &dt, df, 24, -40, 1100) == -1);   // AP2 isn't ours here
+        CHECK(sl.d[e].ap == node_find(&dt, AP1) && node_is_ap(sl.d[e].ap));  // its AP is kept
+        {   // a device that moves to another AP of ours: DEV names the new one
+            node_table_t t2 = dt;
+            int a2 = node_add(&t2, AP2);
+            seen_list_t s2 = sl;
+            CHECK(node_is_ap(a2) && seen_note(&s2, &t2, df, 24, -40, 1150) == e && s2.d[e].ap == a2);
+        }
         df[1] = 0x03; memcpy(df + 4, AP1, 6);
         CHECK(seen_note(&sl, &dt, df, 24, -40, 1100) == -1);   // mesh backhaul
         df[1] = 0x01; df[0] = 0x80;

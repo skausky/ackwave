@@ -37,7 +37,7 @@ def main():
     assert len(blob) < 400_000, len(blob)
     assert f['header']['badge']['word'] in ('STILL', 'MOTION', 'CALIBRATING')
     assert f['score']['series'] and f['window'][1] > f['window'][0]
-    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None, 'sens': None, 'alerts': []}
+    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}}
     assert sent[:2] == ['SOUND', 'SENS'], "asks the board for its buzzer and threshold settings"
     assert sl['timeline']['end'] >= sl['timeline']['start']
     f600 = dash.fast(600)
@@ -129,7 +129,7 @@ def main():
     # Per-link mode: off by default; once on, each ACK link gets its own analysis
     assert dash.command({'cmd': 'settings', 'per_link': True})[0]
     assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {
-        'per_link': True, 'sound': None, 'sens': None, 'alerts': [],
+        'per_link': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {},
         'light': {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120}}
     for line in lines[half:]:
         dash.feed(line)
@@ -420,6 +420,50 @@ def failed_send(tmp):
     assert ok and wire[-1] == 'USE,Café ☕\n'.encode('utf-8')
 
 
+def _mac(*b):
+    """An address built from bytes (no address literals in the repo)."""
+    return ':'.join(f'{x:02x}' for x in b)
+
+
+AP0, AP1, AP2 = (_mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf0 + i) for i in range(3))   # the demo's routers
+DEV_A, DEV_B = _mac(0x11, 0x22, 0x33, 0x44, 0x55, 0x66), _mac(0x11, 0x22, 0x33, 0x44, 0x55, 0x77)
+
+
+def routers_named(d, tmp):
+    """Routers have names everywhere ('Router 1', or the nickname you gave
+    its BSSID), and each device says which router it talks through."""
+    sl = d.slow(30)
+    rs = {r['idx']: r for r in sl['routers']}
+    assert set(rs) >= {0, 1} and rs[0]['bssid'] == AP0 and rs[0]['name'] == 'Router 1'
+    assert rs[0]['rate'] > 0 and rs[0]['state'] == 'ok' and rs[1]['state'] == 'far'
+    d.feed(f'DEV,{DEV_A},-58,40,10,300,1\n')       # a device on router 2
+    d.feed(f'DEV,{DEV_B},-61,40,10,300\n')         # an older board: router unknown
+    rows = {r['mac']: r for r in d.slow(30)['devices']['rows']}
+    assert rows[DEV_A]['router'] == 'Router 2' and rows[DEV_B]['router'] == ''
+    on = {r['idx']: [x['mac'] for x in r['devices']] for r in d.slow(30)['routers']}
+    assert DEV_A in on[1] and DEV_A not in on[0]
+    assert all(DEV_B not in v for v in on.values()), "router unknown: listed under none"
+    path = os.path.join(tmp, 'names.json')
+    d.settings_path = path
+    ok, msg = d.command({'cmd': 'router_name', 'bssid': AP1.upper(), 'name': '  Living   room '})
+    assert ok and 'Living room' in msg, msg
+    assert d.s.devices.link_label(1) == 'Living room'
+    rows = {r['mac']: r for r in d.slow(30)['devices']['rows']}
+    assert rows[DEV_A]['router'] == 'Living room'
+    with open(path) as f:
+        assert json.load(f)['router_names'] == {AP1: 'Living room'}
+    for bad in ({'bssid': 'nope', 'name': 'x'}, {'bssid': AP1, 'name': 'x' * 25},
+                {'bssid': AP1, 'name': 'a\x01b'}, {'bssid': AP1, 'name': 3}):
+        assert not d.command(dict(bad, cmd='router_name'))[0], bad
+    # a fresh dashboard loads the names (and drops bad ones)
+    with open(path, 'w') as f:
+        json.dump({'router_names': {AP1: 'Living room', 'junk': 'x', AP2: ''}}, f)
+    d2 = Dashboard(State(60), settings=path)
+    assert d2.cfg['router_names'] == {AP1: 'Living room'}
+    assert d.command({'cmd': 'router_name', 'bssid': AP1, 'name': ''})[0]
+    assert d.s.devices.link_label(1) == 'Router 2', "an empty name removes the nickname"
+
+
 def device_alerts(tmp):
     """Device links you tick drive the alerts (light, and the board's LED and
     buzzer via EXT) once their slow window confirms; the board's verdict is
@@ -534,8 +578,9 @@ def pages_and_debug(tmp):
     assert sl['radio'] and sl['channel'] in range(1, 14)
     for r in sl['radio']:
         assert {'key', 'label', 'ap', 'rssi', 'rate'} <= set(r) and r['rate'] > 0, r
-    assert sl['radio'][0]['key'] == 'ap:0' and sl['radio'][0]['label'] == 'router'
+    assert sl['radio'][0]['key'] == 'ap:0' and sl['radio'][0]['label'] == 'Router 1'
     assert [(g['node'], g['state']) for g in sl['gates']] == [(0, 'ok'), (1, 'far')]
+    routers_named(d, tmp)
     assert sl['thresholds']['on_short'] == 2.8 and sl['thresholds']['short_gate'] == 1.2
     assert set(sl['today']) == {'periods', 'blips', 'motion_s'}
     st = d.stats()
