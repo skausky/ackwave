@@ -1,10 +1,17 @@
-# Control panel redesign (plan, not built yet)
+# Control panel redesign and next steps (plan, not built yet)
 
 The dashboard (`tools/web.py`, `tools/web/`) is thorough but heavy: eight
 tabs, every chart at once, and a lot of data to the browser. This is the plan
 for a simpler control panel with an advanced mode, plus guarding features,
-easy downloads and lighter storage. Nothing here changes the board's firmware
-or its motion verdict.
+easy downloads and lighter storage.
+
+Updated 2026-11-19 after studying ESPectre (another ESP32 Wi-Fi sensing
+project) and testing our detector on its labelled recordings: see
+[What ESPectre taught us](#what-espectre-taught-us), then the new parts on
+[detection](#better-motion-detection), [activities](#activities-v2),
+[routers and devices](#say-which-router-each-device-is-on),
+[satellites](#satellites-and-a-pi-hub), and the updated
+[build order](#build-order). Those parts do change the firmware.
 
 The mockups are in [`mockups/`](mockups/) (inline-styled HTML of the design
 canvas: read them for layout, colours and copy; they need the canvas runtime
@@ -147,14 +154,143 @@ The README's 55 MB/h includes device links.
   60 s.
 - On a Pi's SD card, Compact or Events only.
 
+## What ESPectre taught us
+
+[ESPectre](https://github.com/francescopace/espectre) (GPLv3) is a mature
+ESP32 motion sensor: firmware for six chips, Home Assistant / Matter, a
+published dataset and a small neural network. We take ideas from its docs,
+never its code (ackwave is MIT), and use its dataset only on this PC for
+testing, never in the repo or in shipped weights.
+
+**Where ackwave is already ahead.** ESPectre must join the Wi-Fi network
+and make traffic (pings, or its own null frames to the router); one board
+watches one link. Ackwave joins nothing, works on any nearby network, and one
+board watches up to 8 routers plus 4 device links. Per link it is the same
+exchange as their cheapest mode (a null frame and its ACK, about 1.3 % airtime
+at 100 a second by their own estimate).
+ESPectre's own docs say its "two-device" link needs both boards connected to
+the same router; ours needs neither.
+
+**Our detector on their labelled data (first real ground truth).** 270
+minutes of recordings (empty room / someone still / normal movement) from 5
+chip types in 4 homes, played through our firmware detector
+(`build-host/score_lines`) as one session per board: empty first (so it
+calibrates as on a real boot), then still, then moving.
+
+| Share of time called motion | empty | someone still | moving |
+|---|---:|---:|---:|
+| ackwave, default (SENS 1.4), all chips | 4.2 % | 8.5 % | **67 %** |
+| ackwave, default, S3 only | 1.0 % | 12.9 % | **56 %** |
+| ackwave, SENS 1.2, all chips | 23 % | 27 % | 87 % |
+| ESPectre's own model (their report) | under 1 % | under 1 % | about 99 % |
+
+Their CSI comes from data frames, not ACKs, and their score is measured on
+their own homes, so it flatters them. Still, the lesson is clear: one
+threshold on one energy number cannot be both quiet and sensitive (1.2 catches
+87 % but calls an empty room motion 23 % of the time). Several numbers that
+describe *how* the signal moves can.
+
+**Ideas worth taking:**
+1. **Gain-proof numbers.** Every feature is a ratio (spread ÷ mean,
+   correlation, crossing rate), so the radio's automatic gain changes cancel.
+   Their best two: how much the per-packet spread changes from one packet to
+   the next (lag-1 autocorrelation) and its robust range (IQR ÷ mean) over 1 s.
+2. **A tiny network on the board.** 8 numbers → 24 → 12 → 1 (529 weights);
+   on an S3 it costs about 1.7 % more CPU than their plain detector. That fits
+   our satellites.
+3. **Fixed time slots.** Packets are placed on a 10 ms grid (one per slot),
+   so features with time lags mean the same at any packet rate; a window
+   needs 70 % of its slots filled to count.
+4. **Outlier filter** (Hampel: replace a value more than 5 MADs from the
+   median of its 7 neighbours) before scoring.
+5. **Calibration that survives a passer-by.** If the worst 5 s of the 10 s
+   calibration holds a burst, drop it and extend in 5 s steps (up to 30 s),
+   instead of starting over; after 60 s of proven quiet the threshold may only
+   go *down*.
+6. **Honest testing.** Score by whole recording, room and board (never mix
+   windows of one recording into training and testing), report the *worst*
+   recording, and set an alarm budget for long empty recordings.
+7. **Presence is its own question**, not a lower motion threshold: a still
+   person shows up in breathing-band power and slow drift. It is on their
+   roadmap, not shipped. We already have a breathing tile and the activity
+   page's still-body shape, so we can get there first.
+8. **Identifying people is weak on one ESP32 link.** Their literature notes:
+   about 95 % for 2 people and 74 % for 3 in controlled tests, and a 2026 paper
+   finds gait separation stuck at 45–56 %. For 4 housemates expect worse than
+   74 %. Parked; if ever tried: walking only, opt-in, everyone told.
+
+## Better motion detection
+
+1. **Benchmark first** (`tools/bench_external.py`): replay any labelled
+   recordings (ESPectre's, kept outside the repo, and our own activity clips)
+   through the firmware detector; report empty / still / moving shares, the
+   worst recording, and false alarms per hour. Every detector change must not
+   make the worst case worse.
+2. **More numbers, PC side:** add the gain-proof features above next to our
+   score, fit a small logistic model (then a tiny network) on our own data
+   plus the benchmark, and show it in Advanced beside the board's verdict.
+3. **On the board** once it beats the current detector on the benchmark
+   without more false alarms: same features in `csi_core.h` (with host tests
+   against the Python), weights stored in NVS so the PC can update them.
+   The current detector stays as the fallback and for weak links.
+4. Burst-tolerant calibration and the down-only settle rule (ideas 4–5).
+
+## Activities v2
+
+The user's feedback on the Activity page: it works well; keep the learning
+when the board or router moves; and posture and movement happen together
+("sitting and moving", "lying and still").
+
+- **Two answers, not one:** *posture* (standing, sitting, lying, away) and
+  *movement* (still, moving, walking). A clip can set one or both. The page
+  shows "Sitting · moving". The moments (sitting down, getting up) stay.
+- **Survive a move:** the movement numbers mostly carry over; the still-body
+  shape belongs to one placement. Clips record a *placement* (which router,
+  board spot). After a move: movement keeps working, posture asks for one
+  short still clip per posture ("re-check sitting here"). Clips from several
+  placements are kept and all used, so it gets sturdier.
+- The gain-proof features above help both.
+
+## Say which router each device is on
+
+Today the pages say "router", "AP 1" and list devices without their router.
+The board already reads the router's address in every frame it uses to list
+a device (`seen_note` in `csi_core.h`) but does not keep it.
+
+- Firmware: keep the router (AP slot) per device and add it to `DEV` (old
+  dashboards ignore the extra field).
+- Dashboard: name routers everywhere ("Router 2 · <network> · ch 6 · −52 dBm",
+  with a nickname you can set), group devices under their router, and show
+  each link as "board ↔ router 2" or "board ↔ Phone (on router 1)".
+- Map and Links use the same names.
+
+## Satellites and a Pi hub
+
+More ESP32-S3 boards ("satellites") plus one on a Raspberry Pi as the hub;
+no board joins any network.
+
+- Each satellite pokes the router, devices and **each other** (an ESP32
+  answers pokes like any device), so links can cross the rooms you choose.
+- Satellites send results (motion, scores, activity), not raw CSI, to the hub
+  board over ESP-NOW; the hub board passes them to the Pi over USB, and the Pi
+  runs the dashboard (in Compact or Events-only storage).
+- The tiny network runs on each satellite; the Pi trains and sends weights.
+- Open questions to measure first: ESP-NOW range and airtime next to the
+  pokes, and keeping every board on the router's channel.
+
 ## Build order
 
 1. Light data stream (appends, per-page payloads) and the simple Watch
    screen.
-2. Tabs collapsed to 4 + the Advanced switch.
-3. Guard mode, then Away mode.
-4. Download (zip + token).
-5. Storage modes, retention, periodic flush.
+2. Routers named and devices grouped under them (small firmware change).
+3. Tabs collapsed to 4 + the Advanced switch.
+4. Detection benchmark, then the gain-proof features PC side.
+5. Activities v2 (posture + movement, placements).
+6. Guard mode, then Away mode.
+7. Download (zip + token).
+8. Storage modes, retention, periodic flush.
+9. Detection on the board, then satellites and the Pi hub (needs the
+   boards).
 
 Each step keeps the tests green (`make test`); `tools/test_web.py` checks the
 page list (`ROUTES`) and that nothing from the network is put on the page as
