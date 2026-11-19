@@ -99,8 +99,10 @@ def _pc1(x):
     column centred and detrended): its time series."""
     if x.shape[0] < 4:
         return np.zeros(x.shape[0])
-    u, s, _vt = np.linalg.svd(x, full_matrices=False)
-    return u[:, 0] * s[0]
+    # x projected on the top eigenvector of x'x: the same as the SVD's
+    # u[:, 0] * s[0] (up to sign, which no spectrum sees), much cheaper
+    _w, v = np.linalg.eigh(x.T @ x)
+    return x @ v[:, -1]
 
 
 def _detrend(x, t):
@@ -354,63 +356,82 @@ class Activities:
         yardstick for "close" and "unknown"."""
         if self._scale is not None:
             return self._scale
-        rows = [(c, w) for c in self.clips for w in c['wins']]
+        # every clip window as rows of arrays, so distances are computed for
+        # all of them at once (a Python loop per pair took seconds with many
+        # clips, and the dashboard waits for this)
+        rows = [(i, c, w) for i, c in enumerate(self.clips) for w in c['wins']]
         if not rows:
             self._scale = dict(sd=np.ones(N_DYN), shape=0.02, typ=1.0)
+            self._mat = None
             return self._scale
+        labs = sorted({c['label'] for _i, c, _w in rows})
+        m = dict(dyn=np.array([w['dyn'] for _i, _c, w in rows], float),
+                 shape=np.array([w['shape'] for _i, _c, w in rows], float),
+                 lab=np.array([labs.index(c['label']) for _i, c, _w in rows]),
+                 clip=np.array([i for i, _c, _w in rows]),
+                 ch=np.array([-1 if c['ch'] is None else c['ch'] for _i, c, _w in rows]),
+                 t=np.array([w.get('t', 0) for _i, _c, w in rows], float), labs=labs)
         # how much each number varies within the same activity (averaged over
         # activities): pooling all windows would let the most uniform activity
         # (a still room) set the scale and blow every other difference up
         spreads = []
-        for lab in {c['label'] for c, _w in rows}:
-            d = np.array([w['dyn'] for c, w in rows if c['label'] == lab])
+        for j in range(len(labs)):
+            d = m['dyn'][m['lab'] == j]
             if len(d) >= 3:
                 spreads.append(np.median(np.abs(d - np.median(d, 0)), 0) * 1.4826)
         sd = np.mean(spreads, 0) if spreads else np.zeros(N_DYN)
         sd = np.maximum(sd, MIN_SD)
         # shape: half the median difference between any two windows, so a
         # typical difference counts about as much as one feature's
-        sh = np.array([w['shape'] for _c, w in rows])
+        sh = m['shape']
         pick = sh[:: max(1, len(sh) // 60)]
         diffs = np.abs(pick[:, None, :] - pick[None, :, :]).mean(2)
         iu = np.triu_indices(len(pick), 1)
         shape = float(np.median(diffs[iu])) if iu[0].size else 0.02
         self._scale = dict(sd=sd, shape=max(shape, 0.005) * 2.0, typ=1.0)
+        self._mat = m
         # nearest neighbour of the same label: in another clip when there is
         # one, else in the same clip but not overlapping (>= WIN_S apart)
+        clips_of = {j: set(m['clip'][m['lab'] == j].tolist()) for j in range(len(labs))}
         near = []
-        for c, w in rows[::2]:
-            others = [o for o in self.clips if o['label'] == c['label'] and o is not c]
-            if others:
-                cands, k = [(o, ow) for o in others for ow in o['wins']], 1.0
+        for r in range(0, len(rows), 2):
+            j, ci = m['lab'][r], m['clip'][r]
+            dist = self._dists(m['dyn'][r], m['shape'][r], m['ch'][r])
+            if len(clips_of[j]) > 1:
+                cand, k = (m['lab'] == j) & (m['clip'] != ci), 1.0
             else:                                 # one clip: its own windows are more alike than
-                cands = [(c, ow) for ow in c['wins']           # any later moment, so allow more
-                         if abs(ow.get('t', 0) - w.get('t', 0)) >= WIN_S]
-                k = SAME_CLIP_X
-            if cands:
-                near.append(k * min(self._dist(w, ow, c['ch'] == o['ch']) for o, ow in cands))
+                cand = (m['clip'] == ci) & (np.abs(m['t'] - m['t'][r]) >= WIN_S)   # any later moment,
+                k = SAME_CLIP_X                                                     # so allow more
+            if cand.any():
+                near.append(k * float(dist[cand].min()))
         if near:
             self._scale['typ'] = max(float(np.median(near)), 0.3)
         return self._scale
 
-    def _dist(self, a, b, same_ch):
-        s = self._scale or self._prep()
-        dd = (np.asarray(a['dyn']) - np.asarray(b['dyn'])) / s['sd']
-        d = float(np.mean(dd * dd))
-        if same_ch:                               # where a still body is
-            sh = float(np.mean(np.abs(np.asarray(a['shape']) - np.asarray(b['shape'])))) / s['shape']
-            d += SHAPE_W * sh * sh
-        return math.sqrt(d)
+    def _dists(self, dyn, shape, ch):
+        """Distance from one window to every clip window (an array, in _mat's order)."""
+        s, m = self._scale, self._mat
+        dd = (m['dyn'] - np.asarray(dyn, float)) / s['sd']
+        d = np.mean(dd * dd, 1)
+        same = m['ch'] == (-1 if ch is None else ch)          # where a still body is: same channel only
+        if same.any():
+            sh = np.mean(np.abs(m['shape'][same] - np.asarray(shape, float)), 1) / s['shape']
+            d[same] += SHAPE_W * sh * sh
+        return np.sqrt(d)
 
     def match(self, w):
-        """Score one window against every clip: (label, distance, scores) where
-        scores = {label: mean distance to its K nearest windows}."""
+        """Score one window against every clip: {label: mean distance to its K
+        nearest windows}."""
         self._prep()
-        per = {}
-        for c in self.clips:
-            same = c['ch'] == w['ch']
-            per.setdefault(c['label'], []).extend(self._dist(w, cw, same) for cw in c['wins'])
-        scores = {lab: float(np.mean(sorted(v)[:K])) for lab, v in per.items()}
+        m = self._mat
+        if m is None:
+            return {}
+        dist = self._dists(w['dyn'], w['shape'], w['ch'])
+        scores = {}
+        for j, lab in enumerate(m['labs']):
+            v = dist[m['lab'] == j]
+            k = min(K, v.size)
+            scores[lab] = float(np.partition(v, k - 1)[:k].mean())
         return scores
 
     def labels(self):
