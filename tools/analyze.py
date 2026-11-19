@@ -95,9 +95,9 @@ def parse_line(line):
                                 sent=int(p[4]), state=p[5])
         if line.startswith('DEV,'):                      # a device heard on our network
             p = line.split(',')
-            if len(p) not in (6, 7) or len(p[1]) != 17:  # 7th: its AP (node), newer boards
-                return None
-            ap = int(p[6]) if len(p) == 7 else -1
+            if len(p) < 6 or len(p[1]) != 17:            # 7th: its AP (node), newer boards;
+                return None                              # later fields are ignored, not refused
+            ap = int(p[6]) if len(p) > 6 and p[6].lstrip('-').isdigit() else -1
             return 'dev', dict(mac=p[1].lower(), rssi=int(p[2]), tx=int(p[3]),
                                rx=int(p[4]), age_ms=int(p[5]), ap=ap if 0 <= ap < MAX_APS else -1)
         if line.startswith('POKING,'):

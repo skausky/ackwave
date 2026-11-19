@@ -1257,8 +1257,12 @@ function renderRouters() {
   $('#routers-state').textContent = rs.length ? `${rs.length} found` : 'waiting for the board…';
   const STATE = { ok: 'good', weak: 'weak', silent: 'not answering', far: 'too far' };
   fillRows($('#routers'), rs.map((r) => {
-    const devs = r.devices.length
-      ? r.devices.map((d) => d.name + (d.poked ? ' (poked)' : '')).join(', ') : '–';
+    // short: the poked ones by name, the rest as a count (the full list on hover)
+    const poked = r.devices.filter((d) => d.poked).map((d) => d.name);
+    const rest = r.devices.length - poked.length;
+    const devs = el('span', { title: r.devices.map((d) => `${d.name} ${d.mac}`).join('\n'),
+      textContent: !r.devices.length ? '–' : [poked.length ? `poking ${poked.join(', ')}` : '',
+        rest ? `${rest}${poked.length ? ' more' : ''} heard` : ''].filter(Boolean).join(' · ') });
     const btn = el('button', { type: 'button', className: 'ghost', textContent: r.nick ? 'Rename' : 'Name it',
       onclick: () => {
         const name = prompt(`A name for ${r.name} (${r.bssid}). Leave empty to go back to "Router ${r.idx + 1}".`, r.nick);

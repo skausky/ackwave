@@ -56,6 +56,7 @@ def test_parse():
     check(parse_line(f"DEV,{TV},-55,12,3,400,2") ==
           ('dev', dict(mac=TV, rssi=-55, tx=12, rx=3, age_ms=400, ap=2)), 'DEV with its AP')
     check(parse_line(f"DEV,{TV},-55,12,3,400,9")[1]['ap'] == -1, 'not an AP node: unknown')
+    check(parse_line(f"DEV,{TV},-55,12,3,400,2,future,7")[1]['ap'] == 2, 'later fields are ignored')
     d = Devices(clock=Clock())
     d.feed('dev', dict(mac=TV, rssi=-55, tx=12, rx=3, age_ms=0, ap=1))
     d.feed('dev', dict(mac=TV, rssi=-55, tx=13, rx=3, age_ms=0, ap=-1))   # an older line: keep it
