@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ackwave · Download and storage</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;600&amp;display=swap">
+<style>
+body{margin:0;background:#090C10}
+a{color:#3DD6C8}a:hover{color:#7FE7DD}
+button{font:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #090C10; color: #E6EDF3; font-family: Inter, system-ui, sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+  <header style="display: flex; align-items: center; gap: 12px; padding: 18px 18px 6px">
+    <a href="#" aria-label="Back" style="width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; color: #E6EDF3"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 5l-7 7 7 7"/></svg></a>
+    <span style="font-size: 20px; font-weight: 700">Data</span>
+  </header>
+
+  <section style="margin: 6px 14px 0; padding: 16px; border: 1px solid #1E2630; border-radius: 14px; background: #10151B; display: flex; flex-direction: column; gap: 12px">
+    <div style="display: flex; justify-content: space-between; align-items: baseline">
+      <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .12em; color: #8B98A5">THIS SESSION</span>
+      <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8B98A5">since 12:04 · 4 h 06 min</span>
+    </div>
+    <button type="button" style="height: 52px; border-radius: 12px; border: 0; background: #3DD6C8; color: #071513; font-weight: 700; font-size: 15px; display: flex; align-items: center; justify-content: center; gap: 10px"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Download everything (.zip · 96 MB)</button>
+    <span style="font-size: 12px; color: #8B98A5; line-height: 1.5">Events, every CSI packet, activity clips and labels, alert clips, and a summary you can open in a spreadsheet.</span>
+  </section>
+
+  <section style="margin: 12px 14px 0; border: 1px solid #1E2630; border-radius: 14px; background: #10151B; overflow: hidden">
+    <div style="padding: 12px 16px 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .12em; color: #8B98A5">OR JUST</div>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; color: #E6EDF3; text-decoration: none; border-top: 1px solid #1E2630; min-height: 24px"><span style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 15px">Timeline</span><span style="font-size: 12px; color: #8B98A5">events.csv · motion, activities, alerts</span></span><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8B98A5">40 KB</span></a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; color: #E6EDF3; text-decoration: none; border-top: 1px solid #1E2630; min-height: 24px"><span style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 15px">Last hour, raw</span><span style="font-size: 12px; color: #8B98A5">csi.bin.gz · for analysis</span></span><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8B98A5">23 MB</span></a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; color: #E6EDF3; text-decoration: none; border-top: 1px solid #1E2630; min-height: 24px"><span style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 15px">Alert clips</span><span style="font-size: 12px; color: #8B98A5">one minute around each alert</span></span><span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8B98A5">2 · 0.8 MB</span></a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; color: #E6EDF3; text-decoration: none; border-top: 1px solid #1E2630; min-height: 24px"><span style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 15px">Older sessions</span><span style="font-size: 12px; color: #8B98A5">pick a day from History</span></span><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#8B98A5" stroke-width="2"><path d="M9 5l7 7-7 7"/></svg></a>
+  </section>
+
+  <section style="margin: 12px 14px 0; padding: 16px; border: 1px solid #1E2630; border-radius: 14px; background: #10151B; display: flex; flex-direction: column; gap: 12px">
+    <div style="display: flex; justify-content: space-between; align-items: baseline">
+      <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .12em; color: #8B98A5">STORAGE</span>
+      <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px">3.1 of 8 GB</span>
+    </div>
+    <div style="height: 10px; border-radius: 5px; background: #0C1015; overflow: hidden"><div style="width: 39%; height: 100%; background: #3DD6C8"></div></div>
+    <fieldset style="border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+      <legend style="font-size: 13px; color: #C9D3DC; margin-bottom: 6px">What to keep</legend>
+      <label style="display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid #3DD6C8; background: #0C1A1A; min-height: 24px"><input type="radio" name="keep" checked style="margin-top: 3px; accent-color: #3DD6C8"><span style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 14px; font-weight: 600">Compact</span><span style="font-size: 12px; color: #8B98A5">every packet, signal strength only · ~13 MB/h</span></span></label>
+      <label style="display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid #1E2630; min-height: 24px"><input type="radio" name="keep" style="margin-top: 3px; accent-color: #3DD6C8"><span style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 14px; font-weight: 600">Full</span><span style="font-size: 12px; color: #8B98A5">every packet with phase, for research · ~26 MB/h</span></span></label>
+      <label style="display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid #1E2630; min-height: 24px"><input type="radio" name="keep" style="margin-top: 3px; accent-color: #3DD6C8"><span style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 14px; font-weight: 600">Events only</span><span style="font-size: 12px; color: #8B98A5">timeline plus a minute around each motion · tiny</span></span></label>
+    </fieldset>
+    <span style="font-size: 12px; color: #8B98A5">Oldest raw data is deleted past 8 GB or 14 days. Timelines are always kept.</span>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

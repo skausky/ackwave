@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ackwave · Guard alert</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;600&amp;display=swap">
+<style>
+body{margin:0;background:#090C10}
+a{color:#3DD6C8}a:hover{color:#7FE7DD}
+button{font:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #090C10; color: #E6EDF3; font-family: Inter, system-ui, sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+  <header style="display: flex; align-items: center; justify-content: space-between; padding: 18px 18px 10px">
+    <div style="display: flex; align-items: center; gap: 10px">
+      <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#FF8A3D" stroke-width="2" stroke-linecap="round"><path d="M2 14c3 0 3-6 6-6s3 9 6 9 3-12 6-12"/></svg>
+      <span style="font-weight: 700; letter-spacing: .02em">ackwave</span>
+    </div>
+    <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #FF8A3D; display: flex; align-items: center; gap: 6px"><span style="width: 7px; height: 7px; border-radius: 50%; background: #FF8A3D"></span>GUARD ARMED · AWAY</span>
+  </header>
+
+  <section style="margin: 4px 14px 0; padding: 18px 16px; border-radius: 14px; background: #2A1508; border: 1px solid rgba(255,138,61,.6); display: flex; flex-direction: column; gap: 8px">
+    <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .14em; color: #FFB37F">ALERT · 03:12:44</span>
+    <span style="font-size: 30px; font-weight: 700; line-height: 1.1">Movement upstairs while you're away</span>
+    <span style="font-size: 15px; color: #F3D4BF">Walking, near the hallway link · 14 s and counting. Your phone left at 22:40.</span>
+  </section>
+
+  <section style="margin: 12px 14px 0; border: 1px solid #1E2630; border-radius: 14px; background: #0C1015; overflow: hidden">
+    <div style="display: flex; justify-content: space-between; padding: 10px 14px 0; font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .12em; color: #8B98A5"><span>WHERE</span><span>HALLWAY LINK LIT</span></div>
+    <svg width="360" height="160" viewBox="0 0 360 160" role="img" aria-label="Sensing map: the hallway link to the router is lit orange, with a moving dot on it.">
+      <rect x="14" y="10" width="332" height="140" rx="6" fill="none" stroke="#1E2630"/>
+      <line x1="180" y1="10" x2="180" y2="64" stroke="#1E2630"/>
+      <line x1="180" y1="104" x2="180" y2="150" stroke="#1E2630"/>
+      <line x1="150" y1="88" x2="300" y2="30" stroke="#FF8A3D" stroke-width="12" stroke-opacity=".16" stroke-linecap="round"/>
+      <line x1="150" y1="88" x2="300" y2="30" stroke="#FF8A3D" stroke-width="2.5"/>
+      <line x1="150" y1="88" x2="52" y2="38" stroke="#3A4654" stroke-width="2" stroke-dasharray="4 5"/>
+      <line x1="150" y1="88" x2="70" y2="138" stroke="#3A4654" stroke-width="2" stroke-dasharray="4 5"/>
+      <circle cx="244" cy="52" r="7" fill="#FF8A3D"/>
+      <circle cx="244" cy="52" r="16" fill="none" stroke="#FF8A3D" stroke-opacity=".4"/>
+      <circle cx="226" cy="59" r="3" fill="#FF8A3D" fill-opacity=".5"/>
+      <circle cx="210" cy="65" r="2.5" fill="#FF8A3D" fill-opacity=".3"/>
+      <rect x="142" y="80" width="16" height="16" rx="3" fill="#E6EDF3"/>
+      <circle cx="300" cy="30" r="6" fill="#8B98A5"/>
+      <circle cx="52" cy="38" r="5" fill="#8B98A5"/>
+      <circle cx="70" cy="138" r="5" fill="#8B98A5"/>
+      <text x="292" y="52" fill="#8B98A5" font-family="JetBrains Mono, monospace" font-size="10">router A</text>
+      <text x="164" y="108" fill="#E6EDF3" font-family="JetBrains Mono, monospace" font-size="10">board</text>
+    </svg>
+  </section>
+
+  <section style="margin: 12px 14px 0; padding: 12px 14px; border: 1px solid #1E2630; border-radius: 14px; background: #10151B; display: flex; flex-direction: column; gap: 8px">
+    <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .12em; color: #8B98A5"><span>MOVEMENT · LAST 60 S</span><span>CLIP SAVED</span></div>
+    <svg width="330" height="54" viewBox="0 0 330 54" role="img" aria-label="Movement strength over the last minute: flat, then a sharp rise for the last fifteen seconds.">
+      <line x1="0" y1="30" x2="330" y2="30" stroke="#FF5A4F" stroke-dasharray="3 4" stroke-opacity=".6"/>
+      <polyline fill="none" stroke="#8B98A5" stroke-width="1.5" points="0,46 20,45 40,47 60,46 80,45 100,47 120,46 140,45 160,46 180,47 200,45 220,46 240,44"/>
+      <polyline fill="none" stroke="#FF8A3D" stroke-width="2" points="240,44 252,30 262,14 272,22 282,8 292,18 302,10 312,20 322,12 330,16"/>
+    </svg>
+    <span style="font-size: 12px; color: #8B98A5">The minute around the alert is kept with the session, ready to download.</span>
+  </section>
+
+  <section style="margin: 12px 14px 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px">
+    <button type="button" style="height: 52px; border-radius: 12px; border: 0; background: #FF8A3D; color: #0B0E12; font-weight: 700; font-size: 15px">Sound siren</button>
+    <button type="button" style="height: 52px; border-radius: 12px; border: 1px solid #3A4654; background: #10151B; color: #E6EDF3; font-weight: 600; font-size: 15px">Lights on</button>
+    <button type="button" style="height: 52px; border-radius: 12px; border: 1px solid #3A4654; background: #10151B; color: #E6EDF3; font-weight: 600; font-size: 15px">It's me · disarm</button>
+    <button type="button" style="height: 52px; border-radius: 12px; border: 1px solid #3A4654; background: #10151B; color: #E6EDF3; font-weight: 600; font-size: 15px">Dismiss</button>
+  </section>
+
+  <p style="margin: 14px 18px 0; font-size: 12px; color: #8B98A5; line-height: 1.5">Sent to your phone as a push. The board's LED is red and its buzzer sounds in alarm mode, even without the PC.</p>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

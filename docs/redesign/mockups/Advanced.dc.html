@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ackwave · Advanced mode</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;600&amp;display=swap">
+<style>
+body{margin:0;background:#090C10}
+a{color:#3DD6C8}a:hover{color:#7FE7DD}
+button{font:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="min-height: 1000px; box-sizing: border-box; background: #090C10; color: #E6EDF3; font-family: Inter, system-ui, sans-serif">
+
+  <header style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 24px; border-bottom: 1px solid #1E2630">
+    <div style="display: flex; align-items: center; gap: 12px">
+      <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#3DD6C8" stroke-width="2" stroke-linecap="round"><path d="M2 14c3 0 3-6 6-6s3 9 6 9 3-12 6-12"/></svg>
+      <span style="font-weight: 700; font-size: 17px; letter-spacing: .02em">ackwave</span>
+      <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8B98A5; display: flex; align-items: center; gap: 6px; margin-left: 10px"><span style="width: 7px; height: 7px; border-radius: 50%; background: #3DD6C8"></span>LIVE · ROUTER A · CH 6 · 97 ACK/s · -48 dBm</span>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px">
+      <div role="group" aria-label="Mode" style="display: inline-flex; border: 1px solid #1E2630; border-radius: 10px; overflow: hidden">
+        <button type="button" aria-pressed="false" style="height: 40px; padding: 0 16px; border: 0; background: transparent; color: #8B98A5; font-size: 13px">Simple</button>
+        <button type="button" aria-pressed="true" style="height: 40px; padding: 0 16px; border: 0; border-left: 1px solid #1E2630; background: #1A222C; color: #E6EDF3; font-weight: 600; font-size: 13px">Advanced</button>
+      </div>
+      <button type="button" style="height: 40px; padding: 0 18px; border-radius: 20px; border: 1px solid #8B98A5; background: transparent; color: #E6EDF3; font-weight: 600; font-size: 13px">Arm guard</button>
+    </div>
+  </header>
+
+  <div style="display: flex; flex-wrap: wrap">
+    <nav aria-label="Pages" style="flex: 1 1 200px; max-width: 220px; padding: 18px 12px; display: flex; flex-direction: column; gap: 4px; border-right: 1px solid #1E2630; box-sizing: border-box">
+      <a href="#" style="display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 10px; color: #8B98A5; text-decoration: none; font-size: 14px">Watch</a>
+      <a href="#" style="display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 10px; color: #8B98A5; text-decoration: none; font-size: 14px">Activity</a>
+      <a href="#" style="display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 10px; color: #8B98A5; text-decoration: none; font-size: 14px">History</a>
+      <span style="margin: 14px 12px 4px; font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: .14em; color: #6B7785">ADVANCED</span>
+      <a href="#" aria-current="page" style="display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 10px; background: #10151B; color: #E6EDF3; text-decoration: none; font-weight: 600; font-size: 14px; box-shadow: inset 3px 0 0 #3DD6C8">Signals</a>
+      <a href="#" style="display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 10px; color: #8B98A5; text-decoration: none; font-size: 14px">Links &amp; map</a>
+      <a href="#" style="display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 10px; color: #8B98A5; text-decoration: none; font-size: 14px">System</a>
+      <span style="height: 14px"></span>
+      <a href="#" style="display: flex; align-items: center; gap: 12px; padding: 11px 12px; border-radius: 10px; color: #8B98A5; text-decoration: none; font-size: 14px">Settings</a>
+    </nav>
+
+    <main style="flex: 999 1 560px; min-width: 0; padding: 20px 24px; box-sizing: border-box; display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; align-content: start">
+
+      <section style="grid-column: 1 / -1; padding: 16px 18px; border: 1px solid #1E2630; border-radius: 16px; background: #10151B; display: flex; flex-direction: column; gap: 10px">
+        <div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .12em; color: #8B98A5"><span>MOTION SCORE × QUIET LEVEL · LAST 2 MIN</span><span style="display: flex; gap: 14px"><span style="color: #FF8A3D">— short 0.5 s</span><span style="color: #A78BFA">— long 4 s</span><span style="color: #FF5A4F">- - thresholds</span></span></div>
+        <svg viewBox="0 0 1000 180" style="width: 100%; height: auto" role="img" aria-label="Sample chart: both scores near 1 for a minute, then the short score rises well above its threshold during walking and falls back.">
+          <line x1="0" y1="60" x2="1000" y2="60" stroke="#FF5A4F" stroke-dasharray="6 6" stroke-opacity=".7"/>
+          <line x1="0" y1="118" x2="1000" y2="118" stroke="#FF5A4F" stroke-dasharray="2 6" stroke-opacity=".5"/>
+          <polyline fill="none" stroke="#FF8A3D" stroke-width="2" points="0,150 60,148 120,152 180,146 240,150 300,149 360,151 420,147 480,140 520,90 560,40 600,70 640,30 680,55 720,45 760,100 800,138 860,148 920,150 1000,149"/>
+          <polyline fill="none" stroke="#A78BFA" stroke-width="2" points="0,154 120,153 240,154 360,153 460,150 540,128 620,100 700,92 780,108 860,134 940,148 1000,151"/>
+        </svg>
+      </section>
+
+      <section style="padding: 16px 18px; border: 1px solid #1E2630; border-radius: 16px; background: #10151B; display: flex; flex-direction: column; gap: 10px">
+        <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .12em; color: #8B98A5"><span>DOPPLER · 0–25 HZ</span><span>~0.4 m/s</span></div>
+        <div style="display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; height: 120px" role="img" aria-label="Sample Doppler heat map: energy appears at low frequencies during walking.">
+          <div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #1C5B56"></div><div style="background: #2A8C84"></div><div style="background: #3DD6C8"></div><div style="background: #9AE8E0"></div><div style="background: #3DD6C8"></div><div style="background: #2A8C84"></div><div style="background: #3DD6C8"></div><div style="background: #2A8C84"></div><div style="background: #1C5B56"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div><div style="background: #10232A"></div>
+        </div>
+        <span style="font-size: 12px; color: #8B98A5">Each column is 5 s; brighter = more movement energy at low frequencies.</span>
+      </section>
+
+      <section style="padding: 16px 18px; border: 1px solid #1E2630; border-radius: 16px; background: #10151B; display: flex; flex-direction: column; gap: 10px">
+        <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .12em; color: #8B98A5"><span>BREATHING · LAST 10 MIN</span><span style="color: #3DD6C8">12 /min · clear</span></div>
+        <svg viewBox="0 0 400 120" style="width: 100%; height: auto" role="img" aria-label="Sample breathing rate: steady around twelve per minute.">
+          <line x1="0" y1="60" x2="400" y2="60" stroke="#1E2630"/>
+          <polyline fill="none" stroke="#3DD6C8" stroke-width="2" points="0,64 40,60 80,58 120,62 160,61 200,57 240,60 280,63 320,59 360,60 400,58"/>
+        </svg>
+        <span style="font-size: 12px; color: #8B98A5">Only when someone is still and near a link.</span>
+      </section>
+
+      <section style="padding: 16px 18px; border: 1px solid #1E2630; border-radius: 16px; background: #10151B; display: flex; flex-direction: column; gap: 8px">
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .12em; color: #8B98A5">LINKS</div>
+        <div style="overflow-x: auto">
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px; font-family: 'JetBrains Mono', monospace">
+            <thead><tr style="color: #8B98A5; text-align: left"><th style="padding: 6px 4px; font-weight: 400">Link</th><th style="padding: 6px 4px; font-weight: 400">ACK/s</th><th style="padding: 6px 4px; font-weight: 400">dBm</th><th style="padding: 6px 4px; font-weight: 400">Activity</th></tr></thead>
+            <tbody>
+              <tr style="border-top: 1px solid #1E2630"><td style="padding: 6px 4px">router A</td><td style="padding: 6px 4px">97</td><td style="padding: 6px 4px">-48</td><td style="padding: 6px 4px; color: #3DD6C8">0.6×</td></tr>
+              <tr style="border-top: 1px solid #1E2630"><td style="padding: 6px 4px">TV</td><td style="padding: 6px 4px">41</td><td style="padding: 6px 4px">-61</td><td style="padding: 6px 4px">0.9×</td></tr>
+              <tr style="border-top: 1px solid #1E2630"><td style="padding: 6px 4px">plug</td><td style="padding: 6px 4px">38</td><td style="padding: 6px 4px">-66</td><td style="padding: 6px 4px">1.0×</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section style="padding: 16px 18px; border: 1px solid #1E2630; border-radius: 16px; background: #10151B; display: flex; flex-direction: column; gap: 8px">
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: .12em; color: #8B98A5">SYSTEM</div>
+        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+          <div style="padding: 10px; border-radius: 10px; background: #0C1015; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 11px; color: #8B98A5">Server CPU</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 16px">6 %</span></div>
+          <div style="padding: 10px; border-radius: 10px; background: #0C1015; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 11px; color: #8B98A5">To this page</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 16px">4 KB/s</span></div>
+          <div style="padding: 10px; border-radius: 10px; background: #0C1015; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 11px; color: #8B98A5">Writing</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 16px">13 MB/h</span></div>
+          <div style="padding: 10px; border-radius: 10px; background: #0C1015; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 11px; color: #8B98A5">USB lines lost</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 16px">0</span></div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
