@@ -382,7 +382,8 @@ def open_port(src, baud):
     port = serial.Serial(src, baud, timeout=1)
     skip_backlog(port)
     lines = (b.decode('utf-8', 'ignore') for b in iter(port.readline, None))
-    return lines, lambda text: port.write(text.encode('ascii') + b'\n')
+    # UTF-8: a network name may hold any bytes (the board takes them as they come)
+    return lines, lambda text: port.write(text.encode('utf-8') + b'\n')
 
 
 def open_source(src, baud):

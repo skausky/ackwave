@@ -1414,10 +1414,13 @@ def main():
                 state.lost = line[5:].strip() or 'connection lost'
                 continue
             state.feed(line)
-        for cmd in state.outbox:
+        cmds, state.outbox[:] = list(state.outbox), []
+        for cmd in cmds:                                 # one failed command never blocks the rest
             if send:
-                send(cmd)
-        state.outbox.clear()
+                try:
+                    send(cmd)
+                except Exception as e:
+                    print(f"command not sent ({cmd[:40]!r}): {e}", file=sys.stderr)
         if panel and time.monotonic() - last_panel[0] > 1.0:
             last_panel[0] = time.monotonic()
             panel.refresh()

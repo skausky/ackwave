@@ -391,7 +391,33 @@ def main():
         srv.shutdown()
     pages_and_debug(tmp)
     device_alerts(tmp)
+    failed_send(tmp)
     print("WEB TESTS PASSED")
+
+
+def failed_send(tmp):
+    """A command that can't be sent is reported and dropped: it never stays in
+    the outbox to fail again on every line and block every later command. A
+    non-ASCII network name goes out as UTF-8 (the board takes bytes)."""
+    wire, fail = [], {'on': True}
+
+    def send(text):
+        if fail['on'] and text.startswith('USE,'):
+            raise OSError('port gone')
+        wire.append(text.encode('utf-8') + b'\n')
+
+    s = State(600)
+    dash = Dashboard(s, send=send, settings=os.path.join(tmp, 'd2.json'))
+    dash.tick()
+    ok, _ = dash.command({'cmd': 'use', 'name': 'Café ☕'})
+    assert ok and not s.outbox, "the failed command was dropped"
+    assert any('not sent' in r[1] for r in dash.refused), "and reported on the Debug page"
+    dash.tick()                                   # no exception: nothing left to fail
+    ok, _ = dash.command({'cmd': 'cal'})
+    assert ok and wire[-1] == b'CAL\n', "later commands still go out"
+    fail['on'] = False
+    ok, _ = dash.command({'cmd': 'use', 'name': 'Café ☕'})
+    assert ok and wire[-1] == 'USE,Café ☕\n'.encode('utf-8')
 
 
 def device_alerts(tmp):

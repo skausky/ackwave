@@ -264,6 +264,41 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //                  The board's own verdict (STATE) is never changed by it
 enum { CMD_NONE = 0, CMD_POKE, CMD_UNPOKE, CMD_UNPOKE_ALL, CMD_CAL, CMD_SCAN };
 
+// ---------- Command lines from the PC ----------
+// Assembles bytes into lines. The longest command is APS with MAX_APS
+// addresses (4 + 8 x 18 = 147 chars), so lines get 192 bytes. A longer line is
+// dropped whole: everything up to its newline is skipped, so its tail is never
+// run as a command of its own.
+#define CMD_LINE_MAX 192
+typedef struct {
+    char buf[CMD_LINE_MAX];
+    int  n;
+    bool overflow;       // the current line is too long: skipping to its end
+} cmd_rx_t;
+
+// Feed one byte. Returns the line (NUL-terminated, without CR/LF) once a
+// complete, non-empty line has arrived, else NULL. The line stays valid until
+// the next call.
+static inline const char *cmd_rx_feed(cmd_rx_t *r, char c) {
+    if (c == '\n' || c == '\r') {
+        bool ok = !r->overflow && r->n > 0;
+        int n = r->n;
+        r->n = 0;
+        r->overflow = false;
+        if (!ok) return NULL;
+        r->buf[n] = '\0';
+        return r->buf;
+    }
+    if (r->overflow) return NULL;
+    if (r->n < CMD_LINE_MAX - 1) {
+        r->buf[r->n++] = c;
+    } else {
+        r->n = 0;
+        r->overflow = true;
+    }
+    return NULL;
+}
+
 static inline bool parse_mac(const char *s, uint8_t out[6]) {
     for (int i = 0; i < 6; i++) {
         int v = 0;

@@ -455,11 +455,19 @@ class Dashboard:
                 self.calibs.append(dict(t=r2(t), phase=c['phase'], why=c['why'], floor=c['floor']))
 
     def _flush(self):
-        for cmd in self.s.outbox:
-            if self.send:
+        # Taken off the outbox first: a command that fails (serial unplugged, a
+        # bad character) is reported and dropped, never retried on every line
+        cmds, self.s.outbox[:] = list(self.s.outbox), []
+        for cmd in cmds:
+            if not self.send:
+                continue
+            try:
                 self.send(cmd)
-                self.sent_cmds.append((self._now(), cmd))
-        self.s.outbox.clear()
+            except Exception as e:
+                print(f"command not sent ({cmd[:40]!r}): {e}", file=sys.stderr)
+                self.refused.append((self._now(), f'not sent: {e}'[:120], cmd))
+                continue
+            self.sent_cmds.append((self._now(), cmd))
 
     # ---------- commands from the page ----------
     def command(self, c):
@@ -1286,7 +1294,10 @@ def main():
     def ticker():
         while True:
             time.sleep(1.0)
-            dash.tick()
+            try:
+                dash.tick()
+            except Exception as e:               # the light and EXT must keep running
+                print(f"tick failed ({e})", file=sys.stderr)
     threading.Thread(target=ticker, daemon=True).start()
     url = f"http://localhost:{srv.server_address[1]}"
     print(f"Dashboard: {url}   (Ctrl+C to stop)")

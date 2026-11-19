@@ -914,18 +914,11 @@ static void put_line(const char *line, int n) {
 
 // Commands from the PC (never blocks, works with no PC attached)
 static void poll_cmds(void) {
-    static char buf[48];
-    static int n;
+    static cmd_rx_t rx;                    // an overlong line is dropped whole (csi_core.h)
     uint8_t c;
     while (usb_ok && usb_serial_jtag_read_bytes(&c, 1, 0) == 1) {
-        if (c == '\n' || c == '\r') {
-            if (n) { buf[n] = '\0'; run_cmd(buf); }
-            n = 0;
-        } else if (n < (int)sizeof buf - 1) {
-            buf[n++] = (char)c;
-        } else {
-            n = 0;                         // overlong line: drop it
-        }
+        const char *line = cmd_rx_feed(&rx, (char)c);
+        if (line) run_cmd(line);
     }
 }
 

@@ -441,6 +441,33 @@ int main(void) {
             CHECK(parse_aps(al, &L) == APS_BAD);
             al[strlen(al) - 18] = '\0';                                       // 8: fine
             CHECK(parse_aps(al, &L) == MAX_APS);
+            {   // The longest command (APS with 8 addresses) gets through the line
+                // reader whole; a line over the limit is dropped whole, its tail
+                // never run as a command of its own
+                cmd_rx_t rx;
+                memset(&rx, 0, sizeof rx);
+                const char *got = NULL;
+                for (const char *p = al; *p; p++) CHECK(cmd_rx_feed(&rx, *p) == NULL);
+                got = cmd_rx_feed(&rx, '\n');
+                CHECK(got && strcmp(got, al) == 0 && parse_aps(got, &L) == MAX_APS);
+                char big[CMD_LINE_MAX + 40];
+                memset(big, 'A', sizeof big - 1);
+                big[sizeof big - 1] = '\0';
+                memcpy(big + sizeof big - 5, "CAL", 3);          // a tail that would parse
+                int lines = 0;
+                for (const char *p = big; *p; p++) lines += cmd_rx_feed(&rx, *p) != NULL;
+                CHECK(lines == 0 && cmd_rx_feed(&rx, '\n') == NULL);
+                got = NULL;                                      // the next line is fine again
+                for (const char *p = "CAL\r\n"; *p; p++) { const char *x = cmd_rx_feed(&rx, *p); if (x) got = x; }
+                CHECK(got && strcmp(got, "CAL") == 0);
+                CHECK(cmd_rx_feed(&rx, '\n') == NULL);           // empty line: nothing
+                char edge[CMD_LINE_MAX];                         // exactly the limit - 1: kept
+                memset(edge, 'B', sizeof edge - 1);
+                edge[sizeof edge - 1] = '\0';
+                for (const char *p = edge; *p; p++) cmd_rx_feed(&rx, *p);
+                got = cmd_rx_feed(&rx, '\n');
+                CHECK(got && strlen(got) == CMD_LINE_MAX - 1);
+            }
             // The channel with the most chosen APs wins; on a tie, the strongest
             int hits[14] = {0}, best[14] = {0};
             CHECK(aps_best_channel(hits, best, 13) == 0);
