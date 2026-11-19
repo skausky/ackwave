@@ -240,7 +240,7 @@
             <button type="button" id="map-reset" class="ghost">Reset</button>
           </div>
         </div>
-        <p class="cap">Each oval is a link's 1st Fresnel zone, drawn to scale: a person inside it changes that link's signal the most (the dashed oval is the weaker 2nd zone). It pulses red while that link sees motion. Drag each dot to where the router or device really is; pinch or scroll to zoom, drag empty space to pan.</p>
+        <p class="cap">Each oval is a link's 1st Fresnel zone, drawn to scale: a person inside it changes that link's signal the most (the dashed oval is the weaker 2nd zone). It pulses red while that link sees motion. Drag each dot, and the board's square, to where it really is; pinch or scroll to zoom, drag empty space to pan.</p>
         <div class="map-stage"><canvas id="map-cv"></canvas><div class="overlay" id="map-msg"></div>
           <div class="map-hint" id="map-hint" hidden><span id="map-hint-text"></span><button type="button" id="map-hint-done">Done</button></div></div>
       </section>
@@ -268,7 +268,7 @@
       <section class="card map-layers">
         <div class="card-head"><h2>Pictures under the map</h2>
           <label class="btn-file"><input type="file" id="map-file" accept="image/png,image/jpeg,image/webp" hidden>Add a picture</label></div>
-        <p class="cap">Put your property under the links: first an outdoor picture (a satellite or drone screenshot, or the parcel outline), then floor plans on top (for example a LiDAR scan exported as a picture). <b>Scale</b> the first one: tap two points and type the real distance between them. <b>Align</b> each floor plan: tap two house corners on the plan, then the same two corners on the map. <b>Move</b> slides a picture so the board's square sits where the board really is. Pictures stay on this PC.</p>
+        <p class="cap">Put your property under the links: first an outdoor picture (a satellite or drone screenshot, or the parcel outline), then floor plans on top (for example a LiDAR scan exported as a picture). <b>Scale</b> the first one: tap two points and type the real distance between them. <b>Align</b> each floor plan: tap two house corners on the plan, then the same two corners on the map. <b>Move</b> slides a picture; drag the board's square to put the board where it really is. Pictures stay on this PC.</p>
         <ol class="layer-list" id="map-layer-list"></ol>
       </section>
     </div>

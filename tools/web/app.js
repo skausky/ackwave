@@ -192,7 +192,7 @@ function renderHeader(h) {
 // ---------------------------------------------------------------- light on motion
 function lightLast(l) {
   if (!l || !l.last) return '';
-  const when = new Date(l.last.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const when = clock(l.last.t, true);
   return `last call: "${l.last.what}" at ${when} · ${l.last.ok ? 'OK' : 'failed'} (${l.last.msg})`;
 }
 function renderLight(l) {
@@ -338,9 +338,8 @@ function fmtSpan(s) {               // a motion's length: '45 s', '3 min 20 s', 
   return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
 }
 function dayClock(t) {                     // "14:32", or "Tue 14:32" when not today
-  const d = new Date(t * 1000), today = new Date();
-  return d.toDateString() === today.toDateString() ? clock(t)
-    : `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${clock(t)}`;
+  const z = zp(t), now = zp(Date.now() / 1000);
+  return z.y === now.y && z.mo === now.mo && z.d === now.d ? clock(t) : `${DAY[z.wd]} ${clock(t)}`;
 }
 function renderWhereList() {
   const ev = whereEvents();
@@ -429,10 +428,33 @@ function timeTicks(t0, t1, px) {
   for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) out.push(t);
   return { ticks: out, step };
 }
+// Times are shown in the PC's time zone (the server says which), whatever
+// device views the page; the browser's own zone until it is known.
+let tzFmt = null, tzName = null, tzMemo = [NaN, null];
+function setTimeZone(name) {
+  if (name === tzName) return;
+  tzName = name; tzMemo = [NaN, null];
+  try {
+    tzFmt = new Intl.DateTimeFormat('en-US', { timeZone: name || undefined, hourCycle: 'h23', weekday: 'short',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch (e) { tzFmt = null; }                    // an unknown zone: the browser's
+}
+setTimeZone(null);
+const WD = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+function zp(t) {                                   // {y, mo, d, h, mi, s, wd} of wall time t in the PC's zone
+  const k = Math.floor(t);
+  if (tzMemo[0] === k) return tzMemo[1];
+  const o = {};
+  if (tzFmt) for (const { type, value } of tzFmt.formatToParts(new Date(k * 1000))) o[type] = value;
+  const d = new Date(k * 1000);
+  const z = tzFmt ? { y: +o.year, mo: +o.month, d: +o.day, h: +o.hour % 24, mi: +o.minute, s: +o.second, wd: WD[o.weekday] }
+    : { y: d.getFullYear(), mo: d.getMonth() + 1, d: d.getDate(), h: d.getHours(), mi: d.getMinutes(), s: d.getSeconds(), wd: d.getDay() };
+  tzMemo = [k, z];
+  return z;
+}
 function clock(t, withSec) {
-  const d = new Date(t * 1000);
-  const p = (n) => String(n).padStart(2, '0');
-  return withSec ? `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}` : `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const z = zp(t), p = (n) => String(n).padStart(2, '0');
+  return withSec ? `${p(z.h)}:${p(z.mi)}:${p(z.s)}` : `${p(z.h)}:${p(z.mi)}`;
 }
 
 // A plot frame: margins for y labels (left), threshold labels (right), time labels (bottom).
@@ -787,6 +809,7 @@ function frameLoop() {
 
 function renderSlow() {
   if (!slow) return;
+  setTimeZone(slow.tz || null);
   const n = slow.network;
   $('#net').textContent = n && n.ap_list && n.ap_list.length ? `${n.ap_list.length} chosen access point${n.ap_list.length > 1 ? 's' : ''}`
     : n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
@@ -1091,7 +1114,7 @@ function renderStats() {
   if (!stats) return;
   fillRows($('#sess-list'), stats.sessions.map((s) => ({
     cls: s.live ? 'cur' : '',
-    cells: [`${DAY[new Date(s.start * 1000).getDay()]} ${new Date(s.start * 1000).getDate()} ${clock(s.start)}`, fmtLen(s.end - s.start),
+    cells: [`${DAY[zp(s.start).wd]} ${zp(s.start).d} ${clock(s.start)}`, fmtLen(s.end - s.start),
       s.periods, fmtMin(s.motion_s), s.blips,
       s.live ? 'this session' : s.data_stopped ? `${s.name} · data stopped ${clock(s.data_stopped)}` : s.name],
   })), 'no sessions yet');
@@ -1463,8 +1486,8 @@ function renderActNow() {
     : '';
 }
 function localDay(t) {                   // YYYY-MM-DD of a wall time, in local time
-  const d = new Date(t * 1000), p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  const z = zp(t), p = (n) => String(n).padStart(2, '0');
+  return `${z.y}-${p(z.mo)}-${p(z.d)}`;
 }
 function fillList(ul, items, empty) {
   ul.replaceChildren(...(items.length ? items : [el('li', { className: 'muted', textContent: empty })]));

@@ -301,6 +301,12 @@ window.AckMap = (() => {
       return;
     }
     const n = tool ? null : hit(x, y);              // while scaling or aligning, taps mark points
+    if (!n && !tool && Math.hypot(X(0) - x, Y(0) - y) <= 18) {
+      // the board: everything is measured from it, so moving it shifts the rest the other way
+      drag = { board: true, x0: x, y0: y, vx: M.view.x, vy: M.view.y,
+        nodes: [...M.nodes.values()].map((m) => [m, m.x, m.y]), plans: M.plans.map((p) => [p, p.x, p.y]) };
+      return;
+    }
     drag = n ? { key: n.key } : { pan: true, x0: x, y0: y, vx: M.view.x, vy: M.view.y, tap: true };
   }
   function move(e) {
@@ -317,6 +323,12 @@ window.AckMap = (() => {
       n.x = wx; n.y = wy; n.placed = true;
       dirty = true;
       renderList();
+    } else if (drag.board) {
+      const dx = (x - drag.x0) / M.view.s, dy = (y - drag.y0) / M.view.s;
+      for (const [m, mx, my] of drag.nodes) { m.x = mx - dx; m.y = my - dy; }
+      for (const [p, px, py] of drag.plans) { p.x = px - dx; p.y = py - dy; }
+      M.view.x = drag.vx - dx; M.view.y = drag.vy - dy;   // the rest stays put on screen
+      dirty = true;
     } else if (drag.layer) {
       drag.layer.x = drag.lx + (x - drag.x0) / M.view.s;
       drag.layer.y = drag.ly + (y - drag.y0) / M.view.s;
@@ -331,7 +343,7 @@ window.AckMap = (() => {
   function up(e) {
     ptrs.delete(e.pointerId);
     if (drag && drag.pan && drag.tap && tool && e.type === 'pointerup') toolTap(...toWorld(...pos(e)));
-    if (drag && (drag.key || drag.pan || drag.layer)) scheduleSave();
+    if (drag && (drag.key || drag.pan || drag.layer || drag.board)) scheduleSave();
     drag = ptrs.size === 1 ? { pan: true, x0: [...ptrs.values()][0].x, y0: [...ptrs.values()][0].y, vx: M.view.x, vy: M.view.y } : null;
   }
 
@@ -380,7 +392,7 @@ window.AckMap = (() => {
   function setTool(t) {
     tool = t;
     const p = t && plan(t.id), nm = p ? `“${p.name}”` : '';
-    hint(!t ? '' : t.kind === 'move' ? `Drag to slide ${nm}. Tap Done when the board's square sits where the board really is.`
+    hint(!t ? '' : t.kind === 'move' ? `Drag to slide ${nm}. Tap Done when it lines up.`
       : t.kind === 'scale' ? (t.pts.length ? 'Now tap the second point.' : `Scale ${nm}: tap a point on it whose distance to another you know (a wall, a fence, the house).`)
         : ['Align: tap a house corner on the plan.', 'Tap a second corner on the plan, far from the first.',
           'Now tap where the first corner is on the map below.', 'And where the second corner is.'][t.pts.length]);

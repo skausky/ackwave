@@ -163,6 +163,32 @@ def strength(peak, on_short):
     return 'gentle' if r < 1 else 'moderate' if r < 1.8 else 'strong'
 
 
+def pc_timezone():
+    """The PC's time zone name (e.g. 'America/Chicago'), so every page shows
+    the PC's time whatever device views it; None if it can't be found."""
+    ok = lambda z: bool(z) and re.fullmatch(r'[A-Za-z0-9_+\-]+(/[A-Za-z0-9_+\-]+){0,2}', z) is not None
+    z = os.environ.get('TZ', '').lstrip(':')
+    if ok(z):
+        return z
+    try:
+        with open('/etc/timezone') as f:
+            z = f.read().strip()
+        if ok(z):
+            return z
+    except OSError:
+        pass
+    try:
+        z = os.path.realpath('/etc/localtime').split('zoneinfo/', 1)[1]
+        if ok(z):
+            return z
+    except (OSError, IndexError):
+        pass
+    return None
+
+
+PC_TZ = pc_timezone()
+
+
 def r2(x):
     return None if x is None else round(float(x), 2)
 
@@ -823,7 +849,7 @@ class Dashboard:
         with self.lock:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
-                       routers=self._routers(),
+                       routers=self._routers(), tz=PC_TZ,
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
                        thresholds=self._thresholds(), today=self._today_totals(),
                        radio=self._radio(), channel=s.channel[0] if s.channel else None,

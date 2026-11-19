@@ -614,6 +614,13 @@ def pages_and_debug(tmp):
     routers_named(d, tmp)
     assert sl['thresholds']['on_short'] == 2.8 and sl['thresholds']['short_gate'] == 1.2
     assert set(sl['today']) == {'periods', 'blips', 'motion_s'}
+    import web as webmod
+    assert sl['tz'] == webmod.PC_TZ, "pages show the PC's time zone"
+    os.environ['TZ'] = 'America/Chicago'
+    assert webmod.pc_timezone() == 'America/Chicago'
+    os.environ['TZ'] = 'x;alert(1)'
+    assert webmod.pc_timezone() != 'x;alert(1)', "a strange TZ is not passed on"
+    del os.environ['TZ']
     st = d.stats()
     assert st['sessions'][0]['live'] and st['sessions'][0]['periods'] == d.s.session_counts()[0]
 
