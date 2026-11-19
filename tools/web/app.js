@@ -278,10 +278,132 @@ function fmtAgo(s) {
 }
 
 function renderHome() {
+  // Where now: the links that see motion (with per-link analysis on)
+  const mv = ((slow && slow.radio) || []).filter((r) => r.moving).map((r) => r.label);
+  const wn = $('#home-where');
+  wn.hidden = !mv.length;
+  if (mv.length) wn.textContent = `Seen by ${mv.join(' · ')}`;
   const t = slow && slow.today;
   $('#home-n').textContent = t ? t.periods : '–';
   $('#home-min').textContent = t ? (t.motion_s / 60).toFixed(t.motion_s < 600 ? 1 : 0) : '–';
   $('#home-blips').textContent = t ? t.blips : '–';
+}
+
+// ---------------------------------------------------------------- where and when
+// The timeline from /api/timeline: one lane per link over the last hours,
+// and the same periods as a list (merged across links: one motion, the links
+// that saw it). Loaded on Home every 20 s and when the range changes.
+const where = { hours: 6, data: null, sel: null, timer: null };
+let whereHours = 6;
+try { whereHours = +localStorage.getItem('ackwave.where') || 6; } catch (e) { /* private mode */ }
+where.hours = [1, 6, 24, 168].includes(whereHours) ? whereHours : 6;
+async function loadWhere() {
+  try {
+    const r = await fetch(`/api/timeline?hours=${where.hours}`, { headers: { 'X-Ackwave': '1' } });
+    if (!r.ok) throw new Error(r.status);
+    where.data = await r.json();
+    $('#where-state').textContent = `updated ${clock(Date.now() / 1000)}`;
+  } catch (e) {
+    $('#where-state').textContent = 'could not load';
+  }
+  if (page === 'home') { drawWhere(); renderWhereList(); }
+}
+function whereRange(h) {
+  where.hours = h; where.sel = null;
+  try { localStorage.setItem('ackwave.where', String(h)); } catch (e) { /* private mode */ }
+  for (const b of $('#where-range').children) b.classList.toggle('on', +b.dataset.h === h);
+  loadWhere();
+}
+for (const b of $('#where-range').children) b.onclick = () => whereRange(+b.dataset.h);
+function whereEvents() {
+  // all lanes' periods merged into motions (gaps under 10 s join), newest first
+  const d = where.data;
+  if (!d) return [];
+  const name = Object.fromEntries(d.lanes.map((l) => [l.key, l.name]));
+  const ps = d.spans.slice().sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const [a, b, key, going] of ps) {
+    const e = out[out.length - 1];
+    if (e && a <= e.t1 + 10) {
+      e.t1 = Math.max(e.t1, b); e.keys.add(key); e.going = e.going || going;
+    } else out.push({ t0: a, t1: b, keys: new Set([key]), going });
+  }
+  for (const e of out) e.names = [...e.keys].sort((x, y) => (x === 'board' ? -1 : y === 'board' ? 1 : 0)).map((k) => name[k] || k);
+  return out.reverse();
+}
+function fmtSpan(s) {               // a motion's length: '45 s', '3 min 20 s', '1 h 5 min'
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 && s < 600 ? ` ${s % 60} s` : ''}`;
+  return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+}
+function dayClock(t) {                     // "14:32", or "Tue 14:32" when not today
+  const d = new Date(t * 1000), today = new Date();
+  return d.toDateString() === today.toDateString() ? clock(t)
+    : `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${clock(t)}`;
+}
+function renderWhereList() {
+  const ev = whereEvents();
+  $('#where-hint').hidden = !where.data || where.data.per_link;
+  fillList($('#where-list'), ev.slice(0, 60).map((e) => {
+    const li = el('li', { className: (e.going ? 'going' : '') + (where.sel === e.t0 ? ' on' : '') },
+      el('b', { textContent: dayClock(e.t0) }),
+      el('span', { textContent: e.going ? `${fmtSpan(e.t1 - e.t0)}, now` : fmtSpan(e.t1 - e.t0) }),
+      el('span', { className: 'who', textContent: e.names.join(' · ') }));
+    li.onclick = () => { where.sel = where.sel === e.t0 ? null : e.t0; drawWhere(); renderWhereList(); };
+    return li;
+  }), where.data ? 'no motion in this time' : 'loading…');
+}
+function drawWhere() {
+  const d = where.data, box = $('#where'), cv = box.querySelector('canvas');
+  if (!d) return;
+  const dpr = window.devicePixelRatio || 1;
+  const lanes = d.lanes, LH = 22, AX = 18, w = box.clientWidth, h = lanes.length * LH + AX;
+  const G = Math.min(150, Math.max(84, w * 0.2));             // label gutter
+  cv.style.height = `${h}px`;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const t0 = d.t0, t1 = d.t1, X = (t) => G + (t - t0) / (t1 - t0) * (w - G);
+  const row = Object.fromEntries(lanes.map((l, i) => [l.key, i]));
+  const sel = where.sel !== null ? whereEvents().find((e) => e.t0 === where.sel) : null;
+  if (sel) {                                                  // the period picked in the list
+    ctx.fillStyle = C.blue; ctx.globalAlpha = .25;
+    const xa = Math.max(G, X(sel.t0) - 3), xb = Math.min(w, X(sel.t1) + 3);
+    ctx.fillRect(xa, 0, Math.max(6, xb - xa), lanes.length * LH);
+    ctx.globalAlpha = 1;
+  }
+  ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  lanes.forEach((ln, i) => {
+    const y = i * LH;
+    ctx.fillStyle = C.grid; ctx.fillRect(G, y + 4, w - G, LH - 8);
+    ctx.fillStyle = ln.key === 'board' ? C.fg : C.muted;
+    let label = ln.name;
+    while (label.length > 3 && ctx.measureText(label).width > G - 10) label = label.slice(0, -2) + '…';
+    ctx.fillText(label, 0, y + LH / 2);
+  });
+  for (const [a, b, key] of d.spans) {
+    const i = row[key];
+    if (i === undefined) continue;
+    const xa = Math.max(G, X(a)), xb = Math.min(w, X(b));
+    if (xb < G || xa > w) continue;
+    ctx.fillStyle = key === 'board' ? C.motion : C.brief;
+    ctx.fillRect(xa, i * LH + 4, Math.max(2, xb - xa), LH - 8);   // at least 2 px: a short one still shows
+  }
+  ctx.font = FONT; ctx.fillStyle = C.muted; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+  const { ticks, step } = timeTicks(t0, t1, w - G);
+  for (const t of ticks) {
+    const x = X(t), label = step >= 86400 ? dayClock(t) : clock(t, step < 60), tw = ctx.measureText(label).width;
+    if (x - tw / 2 >= G && x + tw / 2 <= w) ctx.fillText(label, x, lanes.length * LH + 4);
+  }
+  ctx.textAlign = 'left';
+  hoverable('#where', { r: { l: G, r: w, t: 0, b: lanes.length * LH }, o: { t0, t1, y0: 0, y1: 1 } }, (t) => {
+    const tol = (t1 - t0) / (w - G) * 3;                      // 3 px either side: easy to hit with a finger
+    const saw = lanes.filter((ln) => d.spans.some(([a, b, k]) => k === ln.key && a - tol <= t && t <= b + tol));
+    return [saw.length ? `motion: ${saw.map((l) => l.name).join(', ')}` : 'no motion'];
+  });
 }
 
 // ---------------------------------------------------------------- canvas helpers
@@ -358,8 +480,10 @@ function hoverable(id, f, info) {
     const hide = () => { h.x = null; showHover(id); };
     box.addEventListener('pointermove', move);
     box.addEventListener('pointerdown', move);
-    box.addEventListener('pointerleave', hide);
-    box.addEventListener('pointercancel', hide);
+    // A mouse leaving hides the readout; a finger lifting keeps it (tap elsewhere hides it)
+    box.addEventListener('pointerleave', (e) => { if (e.pointerType !== 'touch') hide(); });
+    box.addEventListener('pointercancel', hide);    // the page started scrolling instead
+    document.addEventListener('pointerdown', (e) => { if (!box.contains(e.target)) hide(); });
   }
   h.f = f; h.info = info;
   showHover(id);
@@ -666,7 +790,7 @@ function renderSlow() {
   const n = slow.network;
   $('#net').textContent = n && n.ap_list && n.ap_list.length ? `${n.ap_list.length} chosen access point${n.ap_list.length > 1 ? 's' : ''}`
     : n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
-  if (page === 'home') { renderHome(); drawTimeline('#home-tl', true); }
+  if (page === 'home') { renderHome(); drawTimeline('#home-tl', true); drawWhere(); }
   else if (page === 'graphs') drawTimeline();
   else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderRouters(); renderDev(); renderAlerts(); }
   else if (page === 'map') window.AckMap.update(slow, fast && fast.header);
@@ -1405,6 +1529,8 @@ function route() {
   if (page === 'map') window.AckMap.show(); else window.AckMap.hide();
   clearInterval(statsTimer);
   if (page === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 60000); }
+  clearInterval(where.timer);
+  if (page === 'home') { whereRange(where.hours); where.timer = setInterval(loadWhere, 20000); }
   if (page === 'settings' && !netScanned && fast && fast.header.board_connected &&
       slow && slow.network && slow.network.state === 'idle') { netScanned = true; cmd({ cmd: 'scan' }); }
   renderPage();

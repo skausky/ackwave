@@ -419,3 +419,20 @@ table.kv td:nth-child(3) { color: var(--muted); font-size: 12px; }
   border-radius: 8px; padding: 7px 10px; }
 .home-act { margin-top: 2px; }
 .home-act b { color: var(--fg); }
+
+/* Where and when (Home): lanes per link over hours, and the periods as a list */
+.chart { touch-action: pan-y; }            /* a sideways drag reads the chart; up/down still scrolls */
+.chart.where { height: auto; min-height: 60px; }
+.chart.where canvas { position: static; height: auto; }
+.where-card { margin-top: var(--gap); }
+.where-list { list-style: none; margin: 10px 0 0; padding: 0; max-height: 340px; overflow-y: auto; }
+.where-list li { display: grid; grid-template-columns: 7.5em 5.5em 1fr; gap: 10px; padding: 8px 6px;
+  border-top: 1px solid var(--line); cursor: pointer; border-radius: 6px; }
+.where-list li:hover, .where-list li.on { background: var(--card2); }
+.where-list li .who { color: var(--muted); }
+.where-list li.going b { color: var(--motion); }
+.where-now { color: var(--brief); }
+@media (max-width: 560px) {
+  .where-list li { grid-template-columns: 1fr auto; }
+  .where-list li .who { grid-column: 1 / -1; }
+}

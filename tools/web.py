@@ -35,6 +35,7 @@ from collections import deque
 from activity import LABELS, Activities, label_info
 from analyze import MAX_APS, MotionDetector, open_port
 from breathing import Breathing
+from timeline import Timeline
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
@@ -171,6 +172,10 @@ class Dashboard:
         self.s, self.send, self.log_name, self.prefs = state, send, log_name, prefs
         state.devices.router_name = self._router_name   # nicknames on every page
         self.sessions = Sessions(sessions_dir) if sessions_dir else None
+        # Where and when motion happened, on disk (timeline.py): the periods
+        # still open are kept here until they end
+        self.timeline = Timeline(sessions_dir) if sessions_dir else None
+        self._open = {}                          # key -> [wall0, name]
         self.started = time.time()
         self._today = (0.0, None)                # (when, today's totals)
         # For the Debug page: recent board lines (not CSI), commands sent,
@@ -265,10 +270,43 @@ class Dashboard:
             while ln['hist'] and ln['hist'][0][0] < t - WINDOWS[-1]:
                 ln['hist'].popleft()
 
+    def _period(self, key, on, wall, name=''):
+        """A link's (or the board's) motion period opens or closes; a closed one
+        is filed in the timeline."""
+        if on and key not in self._open:
+            self._open[key] = [wall, name]
+        elif not on and key in self._open:
+            w0, nm = self._open.pop(key)
+            if self.timeline:
+                self.timeline.add(w0, max(w0, wall), key, nm)
+
+    def _board_period(self):
+        """The board's own verdict as timeline periods."""
+        s = self.s
+        if s.wall_off is None:
+            return
+        sp = s.motion_spans
+        on = bool(sp) and sp[-1][1] is None
+        if on:
+            self._period('board', True, s.wall(sp[-1][0]), 'Board')
+        elif 'board' in self._open:
+            end = sp[-1][1] if sp and sp[-1][1] is not None else None
+            self._period('board', False, s.wall(end) if end is not None else (s.last_wall or time.time()))
+
+    def _link_key(self, src):
+        if src < MAX_APS:
+            return f'ap:{src}'
+        return next((m for m, i in self.s.devices.poking.items() if i == src), None)
+
     def _link_change(self, src, change, t):
-        """A link's motion started (+1) or ended (-1): remembered for device links
-        (the router link is the board's own verdict, already in the history)."""
-        if not change or src < MAX_APS:
+        """A link's motion started (+1) or ended (-1): filed in the timeline, and
+        remembered for device links (Recent motion says where)."""
+        if not change:
+            return
+        key = self._link_key(src)
+        if key:
+            self._period(key, change > 0, self.s.wall(t), self.s.devices.link_label(src))
+        if src < MAX_APS:
             return
         w = self.s.wall(t)
         if change > 0:
@@ -285,6 +323,8 @@ class Dashboard:
         for e in self.link_events:
             if e[1] is None:
                 e[1] = max(e[0], self.s.last_wall or e[0])
+        for key in [k for k in self._open if k != 'board']:
+            self._period(key, False, self.s.last_wall or time.time())
         self.links.clear()
         self.csi_ts = None
 
@@ -391,6 +431,7 @@ class Dashboard:
         with self.lock:
             self.s.feed(line)
             self.version += 1
+            self._board_period()
             self._light_rule()
             if not line.startswith('CSI,'):
                 self._debug_line(line.rstrip('\r\n'))
@@ -920,6 +961,32 @@ class Dashboard:
             out.append(row)
         return out
 
+    def timeline_range(self, hours):
+        """Motion periods of the last `hours` (0.25-168), one lane per link:
+        the board's verdict first, then routers, then devices."""
+        hours = min(max(hours if math.isfinite(hours) else 24.0, 0.25), 168.0)
+        with self.lock:
+            now = self.s.last_wall or time.time()
+            t0 = now - hours * 3600
+            spans = [list(p) for p in self.timeline.read(t0, now)] if self.timeline else []
+            spans += [[w0, now, k, nm, True] for k, (w0, nm) in self._open.items() if w0 <= now]
+            names = {}
+            for p in spans:
+                names[p[2]] = p[3]                   # the newest name of each link
+            for k in names:                          # today's names win (a router renamed since)
+                if k.startswith('ap:'):
+                    names[k] = self._router_name(int(k[3:]))
+                elif k != 'board' and k in self.s.devices.devs:
+                    names[k] = self.s.devices.name(k) or names[k]
+            order = lambda k: (0 if k == 'board' else 1 if k.startswith('ap:') else 2, k)
+            lanes = [dict(key=k, name='Board' if k == 'board' else names[k])
+                     for k in sorted(names, key=order)]
+            if not any(l['key'] == 'board' for l in lanes):
+                lanes.insert(0, dict(key='board', name='Board'))
+            return dict(t0=r2(t0), t1=r2(now), hours=hours, lanes=lanes,
+                        spans=[[r2(p[0]), r2(p[1]), p[2], len(p) > 4] for p in spans],
+                        per_link=self.cfg['per_link'])
+
     def _router_name(self, idx):
         """A router's name for every page: your nickname for its BSSID, else
         'Router N' (N = its node + 1). Used by Devices.link_label."""
@@ -1275,6 +1342,12 @@ def make_handler(dash, allowed_hosts):
                     return self._reply(200, dash.stats())
                 if u.path == '/api/map':
                     return self._reply(200, dash.map_load())
+                if u.path == '/api/timeline':
+                    try:
+                        hours = float(parse_qs(u.query).get('hours', ['24'])[0])
+                    except ValueError:
+                        hours = 24.0
+                    return self._reply(200, dash.timeline_range(hours))
                 return self._reply(404, {'error': 'not found'})
             if u.path == '/snapshot':                # one-off (screenshots, debugging)
                 q = parse_qs(u.query)

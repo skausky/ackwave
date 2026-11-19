@@ -44,6 +44,7 @@
       <article class="card hero" id="hero">
         <div class="hero-top"><span class="state-dot" id="home-dot"></span><span class="hero-word" id="home-word">WAITING</span></div>
         <div class="hero-head" id="home-head">waiting for data…</div>
+        <div class="hero-sub where-now" id="home-where" hidden></div>
         <div class="hero-sub" id="home-since"></div>
         <div class="hero-sub muted home-act" id="home-act" hidden></div>
         <div class="hero-alert" id="home-alert" hidden></div>
@@ -81,6 +82,14 @@
         <div class="chart strip" id="home-tl"><canvas></canvas></div>
       </article>
     </div>
+    <article class="card where-card">
+      <div class="card-head"><h2>Where and when <span class="muted small" id="where-state"></span></h2>
+        <div class="seg" id="where-range"><button type="button" data-h="1">1 h</button><button type="button" data-h="6">6 h</button><button type="button" data-h="24">24 h</button><button type="button" data-h="168">7 days</button></div></div>
+      <p class="cap">One row per link: when each saw motion (red = the board's own verdict, orange = a router or device link). Drag across it to read the time; tap a period below for its details.</p>
+      <div class="chart where" id="where"><canvas></canvas></div>
+      <p class="muted small" id="where-hint" hidden>Only the board's verdict is shown: switch on per-link analysis (Links page) to also see which link saw each motion.</p>
+      <ol class="where-list" id="where-list"></ol>
+    </article>
   </section>
 
   <!-- ======================= GRAPHS ======================= -->
