@@ -32,6 +32,7 @@ import numpy as np
 
 from collections import deque
 
+from activity import LABELS, Activities, label_info
 from analyze import MAX_APS, MotionDetector, open_port
 from breathing import Breathing
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
@@ -64,6 +65,7 @@ LINK_MIN_RATE, LINK_OK_RATE = 15.0, 20.0
 LINK_EVENTS = 400                           # device-link motion periods remembered
 ALERT_MAX = 8                               # device links that may drive the alerts
 EXT_EVERY_S = 1.0                           # EXT,1 repeated this often (the board holds it 5 s)
+ACT_LABEL_RE = re.compile(r'[a-z0-9_]{1,24}')  # an activity's key (own names allowed)
 
 
 class LinkDetector:
@@ -219,6 +221,9 @@ class Dashboard:
             state.outbox.append('SENS')
         # Per-link analysis (experimental, off unless switched on): node -> analysers
         self.links = {}                          # src -> dict(br=Breathing, dop=Doppler, hist=deque, md)
+        # Activity recognition by example (activity.py): clips in sessions/activities.json
+        self.act = Activities(os.path.join(os.path.dirname(settings), 'activities.json') if settings else None)
+        self.act_log = deque(maxlen=300)         # [wall, state] each time the shown activity changes
         self.csi_ts = None                       # last CSI time seen with per-link on
         # When each device link saw motion, on the wall clock (survives board
         # restarts): [wall0, wall1 or None, node, name]. Says where a motion was.
@@ -227,6 +232,11 @@ class Dashboard:
 
     def _on_csi(self, d, t):
         """Every CSI packet (called inside State.feed, lock held)."""
+        r = self.act.feed(d, t)
+        if r is not None:
+            shown = r['state']
+            if not self.act_log or self.act_log[-1][1] != shown:
+                self.act_log.append([self.s.wall(t) if self.s.wall_off is not None else time.time(), shown])
         if not self.cfg['per_link']:
             return
         if self.csi_ts is not None and d['ts'] < self.csi_ts - 1_000_000:
@@ -607,6 +617,8 @@ class Dashboard:
                         return False, 'bad LED setting'
                     self.s.outbox.append(f"LEDSET,{c['mode']},{bright},{c['pattern']},{color.lstrip('#').lower()}")
                     msg = {'off': 'LED off', 'motion': 'LED: motion only', 'status': 'LED: status'}[c['mode']]
+            elif what.startswith('act_'):
+                return self._act_command(what, c)
             elif what == 'mode':
                 if c.get('mode') not in MODES:
                     return False, 'bad mode'
@@ -624,6 +636,72 @@ class Dashboard:
                 return False, 'unknown command'
             self._flush()
             return True, msg
+
+    def _act_command(self, what, c):
+        """Activity calibration commands (lock held). Work with demo data too."""
+        a = self.act
+        label = c.get('label')
+        if what in ('act_record', 'act_fix') and (not isinstance(label, str) or not ACT_LABEL_RE.fullmatch(label)):
+            return False, 'bad activity name (a-z, 0-9 and _ only)'
+        if what == 'act_record':
+            if self.s.wall_off is None:
+                return False, 'no data yet: wait for the board'
+            if a.rec is not None:
+                return False, 'already recording: wait for it or cancel'
+            info = label_info(label)
+            try:
+                delay = info['delay'] if c.get('delay') is None else float(c['delay'])
+                secs = info['secs'] if c.get('secs') is None else float(c['secs'])
+            except (TypeError, ValueError):
+                return False, 'bad timing'
+            if not (0 <= delay <= 60 and 6 <= secs <= 60):
+                return False, 'countdown 0-60 s, recording 6-60 s'
+            a.start(label, self.s.now, delay, secs)
+            return True, f"{info['name']}: recording starts in {delay:.0f} s"
+        if what == 'act_cancel':
+            a.cancel()
+            return True, 'recording cancelled'
+        if what == 'act_delete':
+            ok = a.delete(str(c.get('id', '')))
+            return (True, 'clip deleted') if ok else (False, 'no such clip')
+        if what == 'act_clear':
+            if label is not None and (not isinstance(label, str) or not ACT_LABEL_RE.fullmatch(label)):
+                return False, 'bad activity name'
+            n = sum(1 for x in a.clips if label is None or x['label'] == label)
+            a.clear(label)
+            return True, f"{n} clip{'s' if n != 1 else ''} deleted"
+        if what == 'act_fix':
+            clip = a.correct(label, self.s.now)
+            if clip is None:
+                return False, 'nothing recent to learn from (no usable data in the last 6 s)'
+            return True, f"Learned: that was {label_info(label)['name'].lower()} (clip of {len(clip['wins'])} windows)"
+        return False, 'unknown command'
+
+    def _activity_fast(self):
+        """The live activity, recording progress and recent events (4 times a second)."""
+        a, s = self.act, self.s
+        r = dict(a.result) if a.result else dict(state='uncalibrated' if not a.clips else 'no-data')
+        r.pop('scores', None) if r.get('state') in ('no-data',) else None
+        out = dict(now=r, recording=a.recording(s.now), saved=a.last_saved)
+        if s.wall_off is not None:
+            out['events'] = [dict(e, wall=r2(s.wall(e['t']))) for e in list(a.events)[-5:]]
+            if 't' in r:
+                r['wall'] = r2(s.wall(r['t']))
+        return out
+
+    def _activity_slow(self):
+        """Clips by activity, the label list and the recent changes (once a second)."""
+        a = self.act
+        labels = a.labels()
+        known = [dict(key=k, name=v['name'], kind=v['kind'], hint=v['hint'], delay=v['delay'], secs=v['secs'],
+                      **{kk: vv for kk, vv in labels.get(k, {}).items() if kk in ('clips', 'last', 'chs')})
+                 for k, v in LABELS.items()]
+        own = [dict(key=k, name=v['name'], kind=v['kind'], hint='', delay=3, secs=10, clips=v['clips'],
+                    last=v['last'], chs=v['chs']) for k, v in labels.items() if k not in LABELS]
+        clips = [dict(id=c['id'], label=c['label'], name=label_info(c['label'])['name'], t=r2(c['t']), ch=c['ch'],
+                      source=c.get('source', 'recorded'), windows=len(c['wins'])) for c in reversed(a.clips)]
+        return dict(labels=known + own, clips=clips[:100], log=[[r2(w), st] for w, st in list(self.act_log)[-40:]],
+                    channel=a.feat.ch)
 
     def _save_settings(self):
         if self.settings_path:
@@ -659,7 +737,7 @@ class Dashboard:
             s = self.s
             br, hist, dop = self._pick(link)
             out = dict(header=self._header(br, dop), have_time=s.wall_off is not None,
-                       settings=self.cfg)
+                       settings=self.cfg, activity=self._activity_fast())
             if s.wall_off is None:
                 return out
             t1 = max(s.now, win)
@@ -678,7 +756,8 @@ class Dashboard:
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
                        thresholds=self._thresholds(), today=self._today_totals(),
-                       radio=self._radio(), channel=s.channel[0] if s.channel else None)
+                       radio=self._radio(), channel=s.channel[0] if s.channel else None,
+                       act=self._activity_slow())
             if s.wall_off is None:
                 return out
             t1 = max(s.now, win)

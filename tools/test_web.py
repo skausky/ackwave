@@ -502,10 +502,10 @@ def pages_and_debug(tmp):
     # Names from the network (devices, networks, labels) only ever go in as text
     for bad in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval('):
         assert bad not in js and bad not in mapjs, bad
-    routes = ['home', 'graphs', 'stats', 'links', 'map', 'debug', 'settings']
+    routes = ['home', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings']
     for r in routes:
         assert f'data-page="{r}"' in html and f'href="#/{r}"' in html, r
-    assert "const ROUTES = ['home', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];" in js
+    assert "const ROUTES = ['home', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];" in js
     assert '<script src="/map.js"></script>' in html and 'localStorage' not in mapjs, "the layout lives on the PC"
     assert 'data-page="train"' not in html and 'data-page="ai"' not in html, "no placeholder pages"
     assert js.count('new EventSource(') == 1, "one live connection for every page"

@@ -383,3 +383,38 @@ table.kv td:nth-child(3) { color: var(--muted); font-size: 12px; }
   border: 1px solid #2a3542; background: #0d1116; color: var(--fg); font: inherit; }
 .field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 #light-last.err { color: var(--motion); }
+
+/* ---------- Activity page ---------- */
+.act-now { --c: var(--muted); }
+.act-now[data-state="known"] { --c: var(--still); }
+.act-now[data-state="unknown"] { --c: var(--brief); }
+.act-word { font-size: 34px; font-weight: 700; color: var(--c); margin: 6px 0 2px; letter-spacing: .01em; }
+.act-sub { min-height: 1.4em; }
+.act-fix, .act-pick { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.act-pick { flex-direction: column; align-items: flex-start; }
+.act-pick-list button { font-size: 13px; padding: 4px 11px; border-radius: 999px; }
+.act-events { margin-top: 14px; }
+.act-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; font-size: 13px; }
+.act-list li span { color: var(--muted); margin-right: 8px; font-variant-numeric: tabular-nums; }
+.act-rec-label { font-size: 22px; font-weight: 700; margin-top: 6px; }
+.act-rec-hint { margin: 2px 0 10px; }
+.act-rec-phase { display: flex; justify-content: space-between; margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+.act-rec[data-phase="countdown"] .meter-fill { background: var(--brief); }
+.act-rec[data-phase="recording"] .meter-fill { background: var(--motion); }
+.act-rec[data-phase="recording"] { border-color: rgba(255,90,79,.45); }
+.act-fix[hidden], .act-pick[hidden], #act-rec-live[hidden], #act-rec-idle[hidden] { display: none; }
+.act-cal { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.act-cal li { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card2); }
+.act-cal .act-name { font-weight: 650; }
+.act-cal .act-name i { font-style: normal; font-weight: 400; color: var(--muted); font-size: 12px; }
+.act-cal .act-hint { grid-column: 1; font-size: 12px; color: var(--muted); }
+.act-cal .act-info { grid-column: 1; font-size: 12px; color: var(--muted); }
+.act-cal .act-info.warn { color: var(--brief); }
+.act-cal .act-btns { grid-column: 2; grid-row: 1 / span 3; display: flex; flex-direction: column; gap: 6px; }
+.act-cal li.has .act-info { color: var(--still); }
+.act-own { display: flex; gap: 8px; margin-top: 12px; }
+.act-own input { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--card2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 10px; }
+.home-act { margin-top: 2px; }
+.home-act b { color: var(--fg); }

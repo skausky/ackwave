@@ -15,7 +15,7 @@ const C = {
   cal: css('--cal'), long: css('--long'), blue: css('--blue'), card: css('--card'), card2: css('--card2'),
 };
 const FONT = '11px ui-sans-serif, system-ui, sans-serif';
-const ROUTES = ['home', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];
+const ROUTES = ['home', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];
 
 let win = 30, paused = false, es = null;
 let link = null;                         // per-link focus for breathing / Doppler (null = router)
@@ -637,6 +637,8 @@ function drawTimeline(id = '#timeline', compact = false) {
 function renderFast() {
   if (!fast) return;
   renderHeader(fast.header);
+  renderActHome();
+  if (page === 'activity') renderActNow();
   if (page === 'map') window.AckMap.update(null, fast.header);   // the board's verdict pulses the router link
   if (!paused) drawLive(true);
 }
@@ -669,6 +671,7 @@ function renderSlow() {
   else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderDev(); renderAlerts(); }
   else if (page === 'map') window.AckMap.update(slow, fast && fast.header);
   else if (page === 'debug') renderRaw();
+  else if (page === 'activity') renderActCal();
   else if (page === 'settings') { renderNet(); renderSound(); renderSens(); renderThresholds(); renderLed(); }
   if (page !== 'links') syncLinkFocus();
 }
@@ -1242,6 +1245,123 @@ function renderDev() {
   }
 }
 
+// ---------------------------------------------------------------- activity
+// Activity recognition by example (tools/activity.py): record a short clip of
+// each activity; the live verdict is the activity whose clips look closest,
+// or "unknown" when none does. ✓ / ✗ keep the last 6 s as another example.
+const ACT_STATES = {
+  uncalibrated: ['Not calibrated', 'record a clip of each activity below to start'],
+  'no-data': ['No data', 'waiting for the router link'],
+  unknown: ['Unknown', 'nothing looks like your clips'],
+};
+const ACT_WHY = {
+  'weak link': 'the router link is too weak to judge', starting: 'collecting the first seconds',
+  'router glitch': 'the router changed its signal: ignored', 'nothing close': 'nothing looks like your clips',
+  changing: 'changing…', 'no states calibrated': 'only moments are calibrated: add a state (empty, still, walking)',
+};
+let actPicking = false;
+function actName(key) {
+  const l = slow && slow.act && slow.act.labels.find((x) => x.key === key);
+  return l ? l.name : key.replace(/_/g, ' ');
+}
+function renderActHome() {
+  const a = fast.activity, e = $('#home-act');
+  const n = a && a.now;
+  if (!n || ['uncalibrated', 'no-data'].includes(n.state)) { e.hidden = true; return; }
+  e.hidden = false;
+  e.replaceChildren('Activity: ', el('b', { textContent: n.name || ACT_STATES[n.state]?.[0] || n.state }),
+    n.conf ? ` · ${n.conf} match` : '');
+}
+function renderActNow() {
+  const a = fast.activity;
+  if (!a) return;
+  const n = a.now || { state: 'uncalibrated' };
+  const known = !ACT_STATES[n.state];
+  $('#act-now').dataset.state = known ? 'known' : n.state;
+  $('#act-word').textContent = known ? (n.name || n.state) : ACT_STATES[n.state][0];
+  $('#act-sub').textContent = known
+    ? `${n.conf === 'close' ? 'close match' : 'likely'} · ${n.dist}× the usual difference`
+    : (ACT_WHY[n.why] || ACT_STATES[n.state][1]);
+  $('#act-meta').textContent = n.rate ? `${n.rate} ACK/s · ch ${n.ch}` : '';
+  $('#act-fix').hidden = actPicking || !(known || n.state === 'unknown');
+  $('#act-yes').hidden = !known;
+  $('#act-pick').hidden = !actPicking;
+  fillList($('#act-events'), (a.events || []).slice().reverse().map((ev) =>
+    el('li', {}, el('span', { textContent: clock(ev.wall, true) }), ev.name)), 'none yet');
+  // recording card
+  const r = a.recording, card = $('#act-rec-card');
+  card.dataset.phase = r ? r.phase : '';
+  $('#act-rec-idle').hidden = !!r;
+  $('#act-rec-live').hidden = !r;
+  $('#act-cancel').hidden = !r;
+  if (r) {
+    const info = slow && slow.act && slow.act.labels.find((x) => x.key === r.label);
+    $('#act-rec-label').textContent = actName(r.label);
+    $('#act-rec-hint').textContent = info ? info.hint : '';
+    $('#act-rec-phase').textContent = r.phase === 'countdown' ? 'Get ready…' : 'Recording';
+    $('#act-rec-left').textContent = `${Math.ceil(r.left)} s`;
+    const frac = r.phase === 'countdown' ? 0 : 1 - r.left / r.total;
+    $('#act-rec-bar').style.width = `${Math.round(100 * Math.min(1, Math.max(0, frac)))}%`;
+  }
+  const sv = a.saved;
+  $('#act-saved').textContent = sv && Date.now() / 1000 - sv.t < 60
+    ? (sv.ok ? `Saved a clip of ${actName(sv.label).toLowerCase()} (${sv.windows} windows).`
+      : `Nothing usable was recorded for ${actName(sv.label).toLowerCase()}: was the router link weak? Try again.`)
+    : '';
+}
+function localDay(t) {                   // YYYY-MM-DD of a wall time, in local time
+  const d = new Date(t * 1000), p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function fillList(ul, items, empty) {
+  ul.replaceChildren(...(items.length ? items : [el('li', { className: 'muted', textContent: empty })]));
+}
+function renderActCal() {
+  const a = slow.act;
+  if (!a) return;
+  $('#act-ch').textContent = a.channel ? `router link on channel ${a.channel}` : '';
+  const recording = fast && fast.activity && fast.activity.recording;
+  $('#act-labels').replaceChildren(...a.labels.map((l) => {
+    const chWarn = l.clips && a.channel && l.chs && l.chs.length && !l.chs.includes(a.channel);
+    const info = l.clips
+      ? `${l.clips} clip${l.clips > 1 ? 's' : ''} · last ${fmtAgo(Date.now() / 1000 - l.last)} ago${chWarn ? ' · on another channel: record again here' : ''}`
+      : 'not recorded yet';
+    const rec = el('button', { type: 'button', textContent: 'Record', disabled: !!recording,
+      onclick: () => cmd({ cmd: 'act_record', label: l.key }) });
+    const clr = el('button', { type: 'button', className: 'ghost', textContent: 'Clear', hidden: !l.clips,
+      onclick: () => { if (confirm(`Delete every clip of ${l.name.toLowerCase()}?`)) cmd({ cmd: 'act_clear', label: l.key }); } });
+    return el('li', { className: l.clips ? 'has' : '' },
+      el('div', { className: 'act-name' }, l.name, l.kind === 'event' ? el('i', { textContent: ' · moment' }) : null),
+      el('div', { className: 'act-btns' }, rec, clr),
+      l.hint ? el('div', { className: 'act-hint', textContent: l.hint }) : null,
+      el('div', { className: 'act-info' + (chWarn ? ' warn' : ''), textContent: info }));
+  }));
+  fillRows($('#act-log'), a.log.slice().reverse().map(([w, st]) =>
+    [clock(w, true), ACT_STATES[st] ? ACT_STATES[st][0] : actName(st)]), 'nothing yet');
+  fillRows($('#act-clips'), a.clips.map((c) => [`${dayLabel(localDay(c.t))} ${clock(c.t, false)}`,
+    c.name, c.ch ?? '–', c.source,
+    el('button', { type: 'button', className: 'ghost', textContent: 'Delete',
+      onclick: () => cmd({ cmd: 'act_delete', id: c.id }) })]), 'no clips yet');
+  // the ✗ list: every activity that has clips
+  const have = a.labels.filter((l) => l.clips && l.kind === 'state');
+  $('#act-pick-list').replaceChildren(...have.map((l) => el('button', { type: 'button', textContent: l.name,
+    onclick: () => { actPicking = false; cmd({ cmd: 'act_fix', label: l.key }); } })),
+    el('button', { type: 'button', className: 'ghost', textContent: 'Cancel', onclick: () => { actPicking = false; renderActNow(); } }));
+}
+$('#act-yes').onclick = () => {
+  const n = fast && fast.activity && fast.activity.now;
+  if (n && n.state && !ACT_STATES[n.state]) cmd({ cmd: 'act_fix', label: n.state });
+};
+$('#act-no').onclick = () => { actPicking = true; if (slow) renderActCal(); renderActNow(); };
+$('#act-cancel').onclick = () => cmd({ cmd: 'act_cancel' });
+$('#act-clear').onclick = () => { if (confirm('Delete every activity clip? It will have to be calibrated again.')) cmd({ cmd: 'act_clear' }); };
+$('#act-own').onsubmit = (e) => {
+  e.preventDefault();
+  const key = $('#act-own-name').value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 24);
+  if (!key) { toast('type a name first', true); return; }
+  cmd({ cmd: 'act_record', label: key });
+};
+
 // ---------------------------------------------------------------- pages
 function route() {
   const name = (location.hash.match(/^#\/(\w+)/) || [])[1];
@@ -1322,7 +1442,7 @@ $('#tail-filter').addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.target.closest('input, textarea') || document.querySelector('dialog[open]') || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;
-  const pages = { h: 'home', g: 'graphs', s: 'stats', l: 'links', d: 'debug' };
+  const pages = { h: 'home', a: 'activity', g: 'graphs', s: 'stats', l: 'links', d: 'debug' };
   if (k === ' ' && page === 'graphs') { e.preventDefault(); togglePause(); }
   else if (k === '1' || k === '2' || k === '3') setWin([30, 120, 600][+k - 1]);
   else if (k === 'c') $('#btn-cal').click();
