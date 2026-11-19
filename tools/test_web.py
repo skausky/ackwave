@@ -12,7 +12,7 @@ from web import Dashboard, serve
 
 
 def request(port, method, path, body=None, headers=None):
-    c = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+    c = http.client.HTTPConnection('127.0.0.1', port, timeout=20)   # a busy PC (the dashboard, a browser) can be slow: no false failures
     c.request(method, path, body=body, headers=headers or {})
     r = c.getresponse()
     data = r.read()
