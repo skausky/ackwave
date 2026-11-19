@@ -466,3 +466,14 @@ body.simple .nav a[data-adv] { display: none; }
 .layer-list label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
 .layer-list input[type=range] { width: 110px; }
 .layer-list button.on { border-color: var(--accent); color: var(--accent); }
+
+/* Home: the Map page's map, view only, beside the status */
+.home-map-card { display: flex; flex-direction: column; }
+.home-map-slot { flex: 1; min-height: 340px; position: relative; }
+.home-map-slot .map-stage { height: 100%; min-height: 340px; }
+.home-row { margin-top: var(--gap); }
+.home-row + .card { margin-top: var(--gap); }
+@media (max-width: 1000px) { .home-map-slot, .home-map-slot .map-stage { min-height: 300px; height: 52vh; } }
+
+.hero-breath { margin: 10px 0 2px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.hero-breath b { font-size: 18px; }

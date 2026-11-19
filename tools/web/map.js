@@ -32,6 +32,9 @@ window.AckMap = (() => {
   // (x, y) + rotate(rot) * (u, v) * w / iw.
   const PLAN_IDS = ['p1', 'p2', 'p3', 'p4'];
   let tool = null;                          // {kind: 'move'|'scale'|'align', id, pts: [], step}
+  let readOnly = false;                     // on Home: look, pan and zoom; nothing is moved or saved
+  let stageMark = null;                     // where the map lives on the Map page (it visits Home)
+  let pageView = null, homeFit = false;     // the Map page's view, kept while Home fits its own
   let radio = [], channel = 6, boardMotion = false;
   let loaded = false, visible = false, raf = 0, saveTimer = 0, dirty = true;
   let cv, ctx, W = 0, H = 0, dpr = 1;
@@ -102,12 +105,13 @@ window.AckMap = (() => {
     dirty = true;
   }
   function zoomAt(px, py, k) {
+    if (!M.view) return;
     const [wx, wy] = toWorld(px, py);
     M.view.s = Math.min(2000, Math.max(2, M.view.s * k));
     M.view.x = wx - (px - W / 2) / M.view.s;
     M.view.y = wy - (py - H / 2) / M.view.s;
     dirty = true;
-    scheduleSave();
+    if (!readOnly) scheduleSave();
   }
 
   // ---------- drawing ----------
@@ -295,6 +299,10 @@ window.AckMap = (() => {
       drag = { pinch: true, dist: Math.hypot(a.x - b.x, a.y - b.y) };
       return;
     }
+    if (readOnly) {                                // Home: pan only
+      drag = { pan: true, x0: x, y0: y, vx: M.view.x, vy: M.view.y };
+      return;
+    }
     if (tool && tool.kind === 'move') {
       const p = plan(tool.id);
       drag = { layer: p, x0: x, y0: y, lx: p.x, ly: p.y };
@@ -343,7 +351,7 @@ window.AckMap = (() => {
   function up(e) {
     ptrs.delete(e.pointerId);
     if (drag && drag.pan && drag.tap && tool && e.type === 'pointerup') toolTap(...toWorld(...pos(e)));
-    if (drag && (drag.key || drag.pan || drag.layer || drag.board)) scheduleSave();
+    if (!readOnly && drag && (drag.key || drag.pan || drag.layer || drag.board)) scheduleSave();
     drag = ptrs.size === 1 ? { pan: true, x0: [...ptrs.values()][0].x, y0: [...ptrs.values()][0].y, vx: M.view.x, vy: M.view.y } : null;
   }
 
@@ -379,6 +387,7 @@ window.AckMap = (() => {
       p.img = await createImageBitmap(await r.blob());
       p.iw = p.img.width; p.ih = p.img.height;
     } catch (e) { p.img = null; p.missing = true; }
+    if (readOnly && visible) fit();                 // Home: show the whole property once it loads
     dirty = true;
     renderLayers();
   }
@@ -505,6 +514,7 @@ window.AckMap = (() => {
     } catch (e) { /* start fresh */ }
     loaded = true;
     syncControls();
+    if (readOnly) fit();
     dirty = true;
     renderList();
   }
@@ -533,14 +543,32 @@ window.AckMap = (() => {
     cv.addEventListener('pointercancel', up);
     cv.addEventListener('wheel', (e) => { e.preventDefault(); const [x, y] = pos(e); zoomAt(x, y, Math.exp(-e.deltaY * 0.0015)); }, { passive: false });
     window.addEventListener('resize', () => { if (visible) resize(); });
+    // the map moves between Home and the Map page, and cards settle after layout:
+    // redraw at the box's real size whenever it changes, so it never stretches
+    if (window.ResizeObserver) new ResizeObserver(() => { if (visible) resize(); }).observe(cv.parentElement);
   }
 
   let started = false;
   return {
+    // Put the map in another box (Home, view only), or back on the Map page (null)
+    mount(sel, ro) {
+      if (!started) { init(); started = true; }
+      const stage = cv.parentElement;
+      if (!stageMark) { stageMark = document.createComment('map stage'); stage.after(stageMark); }
+      const box = sel ? document.querySelector(sel) : null;
+      if (box && stage.parentElement !== box) box.append(stage);
+      if (!box && stage.nextSibling !== stageMark) stageMark.before(stage);
+      if (ro && !readOnly) { pageView = M.view && { ...M.view }; homeFit = true; }   // Home: its own view
+      if (!ro && readOnly && pageView) { M.view = pageView; pageView = null; }       // back: the page's view
+      readOnly = !!ro;
+      if (readOnly && tool) setTool(null);
+      dirty = true;
+    },
     show() {
       if (!started) { init(); started = true; }
       visible = true;
       resize();
+      if (homeFit && loaded) { fit(); homeFit = false; }
       if (!loaded) load();
       if (!raf) raf = requestAnimationFrame(loop);
     },

@@ -59,7 +59,7 @@ def dashboard():
     assert lines and all(set(x) == {'t0', 't1', 'key', 'name'} for x in lines)
     # silly ranges are clamped, never an error
     assert d.timeline_range(float('nan'))['hours'] == 24 and d.timeline_range(1e9)['hours'] == 168
-    assert d.timeline_range(-5)['hours'] == 0.25
+    assert d.timeline_range(-5)['hours'] == 30 / 3600 and d.timeline_range(0.5)['hours'] == 0.5
     # no sessions folder (file input): nothing on disk, still answers
     d2 = Dashboard(State(60))
     assert d2.timeline_range(1)['spans'] == []

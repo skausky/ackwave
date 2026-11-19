@@ -173,6 +173,12 @@ function renderHeader(h) {
     e.querySelector('.detail').textContent = t.detail;
   }
   renderRecent(h.recent);
+  // Breathing on Home: the router link's, and each link's own (per-link analysis)
+  const bt = h.tiles.breathing, per = ((slow && slow.radio) || []).filter((r) => r.breathing && !r.ap);
+  $('#home-breath-val').textContent = bt.value;
+  $('#home-breath-val').style.color = bt.color;
+  $('#home-breath-sub').textContent = [`router · ${bt.detail}`,
+    ...per.map((r) => `${r.label} ${Math.round(r.breathing.rate)}/min (${r.breathing.level})`)].join(' · ');
   const al = $('#home-alert'), names = h.alerting || [];
   al.hidden = !names.length;
   if (names.length) al.textContent = `Alert: motion near ${names.join(' + ')} (device link${names.length > 1 ? 's' : ''})`;
@@ -296,7 +302,8 @@ function renderHome() {
 const where = { hours: 6, data: null, sel: null, timer: null };
 let whereHours = 6;
 try { whereHours = +localStorage.getItem('ackwave.where') || 6; } catch (e) { /* private mode */ }
-where.hours = [1, 6, 24, 168].includes(whereHours) ? whereHours : 6;
+const WHERE_HOURS = [0.008333, 0.083333, 0.5, 1, 6, 24, 168];   // 30 s, 5 min, 30 min, 1 h, 6 h, 24 h, 7 days
+where.hours = WHERE_HOURS.includes(whereHours) ? whereHours : 6;
 async function loadWhere() {
   try {
     const r = await fetch(`/api/timeline?hours=${where.hours}`, { headers: { 'X-Ackwave': '1' } });
@@ -313,6 +320,8 @@ function whereRange(h) {
   try { localStorage.setItem('ackwave.where', String(h)); } catch (e) { /* private mode */ }
   for (const b of $('#where-range').children) b.classList.toggle('on', +b.dataset.h === h);
   loadWhere();
+  clearInterval(where.timer);                       // short ranges move quickly: refresh them more often
+  if (page === 'home') where.timer = setInterval(loadWhere, h < 0.1 ? 2000 : h <= 1 ? 5000 : 20000);
 }
 for (const b of $('#where-range').children) b.onclick = () => whereRange(+b.dataset.h);
 function whereEvents() {
@@ -785,7 +794,7 @@ function renderFast() {
   renderHeader(fast.header);
   renderActHome();
   if (page === 'activity') renderActNow();
-  if (page === 'map') window.AckMap.update(null, fast.header);   // the board's verdict pulses the router link
+  if (page === 'map' || page === 'home') window.AckMap.update(null, fast.header);   // the board's verdict pulses the router link
   if (!paused) drawLive(true);
 }
 
@@ -813,7 +822,7 @@ function renderSlow() {
   const n = slow.network;
   $('#net').textContent = n && n.ap_list && n.ap_list.length ? `${n.ap_list.length} chosen access point${n.ap_list.length > 1 ? 's' : ''}`
     : n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
-  if (page === 'home') { renderHome(); drawTimeline('#home-tl', true); drawWhere(); }
+  if (page === 'home') { renderHome(); drawTimeline('#home-tl', true); drawWhere(); window.AckMap.update(slow, fast && fast.header); }
   else if (page === 'graphs') drawTimeline();
   else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderRouters(); renderDev(); renderAlerts(); }
   else if (page === 'map') window.AckMap.update(slow, fast && fast.header);
@@ -1549,11 +1558,14 @@ function route() {
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   document.body.dataset.page = page;
-  if (page === 'map') window.AckMap.show(); else window.AckMap.hide();
+  // The map you set up on the Map page also shows on Home, view only
+  if (page === 'map') { window.AckMap.mount(null, false); window.AckMap.show(); }
+  else if (page === 'home') { window.AckMap.mount('#home-map-slot', true); window.AckMap.show(); }
+  else window.AckMap.hide();
   clearInterval(statsTimer);
   if (page === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 60000); }
   clearInterval(where.timer);
-  if (page === 'home') { whereRange(where.hours); where.timer = setInterval(loadWhere, 20000); }
+  if (page === 'home') whereRange(where.hours);
   if (page === 'settings' && !netScanned && fast && fast.header.board_connected &&
       slow && slow.network && slow.network.state === 'idle') { netScanned = true; cmd({ cmd: 'scan' }); }
   renderPage();

@@ -1039,13 +1039,16 @@ class Dashboard:
                 f = md.det.floor
                 row.update(state=st, moving=st == 'motion',
                            activity=r2(ms / f) if ms is not None and f > 0 and st in ('motion', 'still') else None)
+                b = ln['br'].last                    # its own breathing, when it finds one
+                if b is not None and b['level'] != 'none':
+                    row['breathing'] = dict(rate=r2(b['rate']), level=b['level'])
             out.append(row)
         return out
 
     def timeline_range(self, hours):
-        """Motion periods of the last `hours` (0.25-168), one lane per link:
+        """Motion periods of the last `hours` (30 s to 7 days), one lane per link:
         the board's verdict first, then routers, then devices."""
-        hours = min(max(hours if math.isfinite(hours) else 24.0, 0.25), 168.0)
+        hours = min(max(hours if math.isfinite(hours) else 24.0, 30 / 3600), 168.0)   # 30 s to 7 days
         with self.lock:
             now = self.s.last_wall or time.time()
             t0 = now - hours * 3600

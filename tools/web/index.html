@@ -61,36 +61,41 @@
           <div class="stat"><b id="home-min">–</b><span>minutes of motion</span></div>
           <div class="stat"><b id="home-blips">–</b><span>brief blips</span></div>
         </div>
+        <div class="hero-breath" id="home-breath" title="Breathing found in the signal over the last 40 s (someone still near a link)"><span class="muted">Breathing</span> <b id="home-breath-val">…</b> <span class="muted" id="home-breath-sub"></span></div>
         <div class="hero-row bottom">
           <span class="health" id="home-link" title="Link health"><i></i><span></span></span>
           <button id="btn-cal" class="primary" title="Measure the quiet level again (step away for 5 s)">Recalibrate</button>
         </div>
       </article>
-      <article class="card chart-card live-card">
-        <div class="card-head"><h2>Live signal <span class="muted small">× quiet level · <span id="home-live-win">last 30 s</span></span></h2><span class="live-tag"><i></i>live</span></div>
-        <p class="cap">How much the Wi-Fi signal between the board and the router is changing; 1 = a quiet room. Motion starts when a coloured line crosses the red dotted line (×2.8), or the white one crosses its own (×1.4).</p>
-        <div class="chart" id="home-live"><canvas></canvas><div class="overlay" id="home-live-msg"></div></div>
-      </article>
-    </div>
-    <div class="row2">
-      <article class="card recent">
-        <div class="card-head"><h2>Recent motion</h2><span class="muted small">newest first</span></div>
-        <ol id="recent"><li class="muted">none yet</li></ol>
-      </article>
-      <article class="card chart-card">
-        <div class="card-head"><h2>This session</h2><div class="chips" id="home-counts"></div></div>
-        <p class="cap">Red = motion, orange ticks = brief blips (often noise), grey = calibrating.</p>
-        <div class="chart strip" id="home-tl"><canvas></canvas></div>
+      <article class="card home-map-card" id="home-map-card">
+        <div class="card-head"><h2>Live map <span class="muted small">lights up where the motion is</span></h2><a href="#/map" class="muted small">Edit on the Map page</a></div>
+        <div class="home-map-slot" id="home-map-slot"></div>
       </article>
     </div>
     <article class="card where-card">
       <div class="card-head"><h2>Where and when <span class="muted small" id="where-state"></span></h2>
-        <div class="seg" id="where-range"><button type="button" data-h="1">1 h</button><button type="button" data-h="6">6 h</button><button type="button" data-h="24">24 h</button><button type="button" data-h="168">7 days</button></div></div>
+        <div class="seg" id="where-range"><button type="button" data-h="0.008333">30 s</button><button type="button" data-h="0.083333">5 min</button><button type="button" data-h="0.5">30 min</button><button type="button" data-h="1">1 h</button><button type="button" data-h="6">6 h</button><button type="button" data-h="24">24 h</button><button type="button" data-h="168">7 days</button></div></div>
       <p class="cap">One row per link: when each saw motion (red = the board's own verdict, orange = a router or device link). Drag across it to read the time; tap a period below for its details.</p>
       <div class="chart where" id="where"><canvas></canvas></div>
       <p class="muted small" id="where-hint" hidden>Only the board's verdict is shown: switch on per-link analysis (Links page) to also see which link saw each motion.</p>
       <ol class="where-list" id="where-list"></ol>
     </article>
+    <div class="row2 home-row">
+      <article class="card chart-card live-card">
+        <div class="card-head"><h2>Live signal <span class="muted small">× quiet level · <span id="home-live-win">last 30 s</span></span></h2><span class="live-tag"><i></i>live</span></div>
+        <p class="cap">How much the Wi-Fi signal between the board and the router is changing; 1 = a quiet room. Motion starts when a coloured line crosses the red dotted line (×2.8), or the white one crosses its own (×1.4).</p>
+        <div class="chart" id="home-live"><canvas></canvas><div class="overlay" id="home-live-msg"></div></div>
+      </article>
+      <article class="card recent">
+        <div class="card-head"><h2>Recent motion</h2><span class="muted small">newest first</span></div>
+        <ol id="recent"><li class="muted">none yet</li></ol>
+      </article>
+    </div>
+    <article class="card chart-card">
+        <div class="card-head"><h2>This session</h2><div class="chips" id="home-counts"></div></div>
+        <p class="cap">Red = motion, orange ticks = brief blips (often noise), grey = calibrating.</p>
+        <div class="chart strip" id="home-tl"><canvas></canvas></div>
+      </article>
   </section>
 
   <!-- ======================= GRAPHS ======================= -->
