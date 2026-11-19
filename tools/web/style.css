@@ -477,3 +477,7 @@ body.simple .nav a[data-adv] { display: none; }
 
 .hero-breath { margin: 10px 0 2px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
 .hero-breath b { font-size: 18px; }
+
+.act-axes { margin-top: 6px; font-size: 15px; }
+.act-axes b { color: var(--fg); }
+.act-trust { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }

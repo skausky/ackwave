@@ -1485,6 +1485,16 @@ function renderActNow() {
     ? `${n.conf === 'close' ? 'close match' : 'likely'} · ${n.dist}× the usual difference`
     : (ACT_WHY[n.why] || ACT_STATES[n.state][1]);
   $('#act-meta').textContent = n.rate ? `${n.rate} ACK/s · ch ${n.ch}` : '';
+  // the two answers: movement (from how the signal moves) and posture (where a still body is)
+  const ax = $('#act-axes'), hasAxes = 'movement' in n;
+  ax.hidden = !hasAxes;
+  if (hasAxes) {
+    const PN = { away: 'away', standing: 'standing', sitting: 'sitting', lying: 'lying' };
+    ax.replaceChildren('Movement: ', el('b', { textContent: n.movement || '?' }), ' · Posture: ',
+      el('b', { textContent: n.posture ? PN[n.posture] : '?' }),
+      el('span', { className: 'muted small', textContent: n.posture ? '' : !n.posture_here
+        ? '  (no posture clips here yet)' : '  (not sure)' }));
+  }
   $('#act-fix').hidden = actPicking || !(known || n.state === 'unknown');
   $('#act-yes').hidden = !known;
   $('#act-pick').hidden = !actPicking;
@@ -1522,6 +1532,12 @@ function renderActCal() {
   const a = slow.act;
   if (!a) return;
   $('#act-ch').textContent = a.channel ? `router link on channel ${a.channel}` : '';
+  // which postures your clips showed can be trusted (tested on your own clips)
+  const pc = a.posture_check || {}, keys = Object.keys(pc);
+  $('#act-trust').textContent = !keys.length ? 'Postures: record two of sitting, lying, standing or empty (still) to tell them apart.'
+    : 'Postures shown: ' + (a.posture_ok.length ? a.posture_ok.join(', ') : 'none yet') +
+      (keys.filter((k) => !a.posture_ok.includes(k)).length
+        ? ` · need more clips: ${keys.filter((k) => !a.posture_ok.includes(k)).map((k) => `${k} (${pc[k][1] ? Math.round(100 * pc[k][0] / pc[k][1]) + '% right' : 'never picked'})`).join(', ')}` : '');
   const recording = fast && fast.activity && fast.activity.recording;
   $('#act-labels').replaceChildren(...a.labels.map((l) => {
     const chWarn = l.clips && a.channel && l.chs && l.chs.length && !l.chs.includes(a.channel);
@@ -1557,6 +1573,9 @@ $('#act-yes').onclick = () => {
 };
 $('#act-no').onclick = () => { actPicking = true; if (slow) renderActCal(); renderActNow(); };
 $('#act-cancel').onclick = () => cmd({ cmd: 'act_cancel' });
+$('#act-moved').onclick = () => {
+  if (confirm('Did you move the board or the router? Movement keeps working; postures (sitting, lying…) need a short new clip of each here.')) cmd({ cmd: 'act_moved' });
+};
 $('#act-clear').onclick = () => { if (confirm('Delete every activity clip? It will have to be calibrated again.')) cmd({ cmd: 'act_clear' }); };
 $('#act-own').onsubmit = (e) => {
   e.preventDefault();

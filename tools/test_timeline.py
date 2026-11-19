@@ -83,6 +83,15 @@ def activity_periods():
     r = d.timeline_range(1)
     assert [l['key'] for l in r['lanes']][:2] == ['board', 'activity']
     assert {s[4] for s in r['spans'] if s[2] == 'activity'} >= {'Walking', 'Sitting', 'Still'}
+    # "I moved the board or router": a new placement, kept in the settings
+    ok, msg = d.command({'cmd': 'act_moved'})
+    assert ok and d.cfg['act_place'] == 1 and 'posture' in msg
+    with open(os.path.join(tmp, 'dashboard.json')) as f:
+        assert json.load(f)['act_place'] == 1
+    d2 = Dashboard(State(60), sessions_dir=tmp, settings=os.path.join(tmp, 'dashboard.json'))
+    assert d2.cfg['act_place'] == 1, "remembered"
+    sl = d2.slow(30)['act']
+    assert {'place', 'posture_check', 'posture_ok'} <= set(sl)
 
 
 if __name__ == '__main__':

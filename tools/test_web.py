@@ -37,7 +37,7 @@ def main():
     assert len(blob) < 400_000, len(blob)
     assert f['header']['badge']['word'] in ('STILL', 'MOTION', 'CALIBRATING')
     assert f['score']['series'] and f['window'][1] > f['window'][0]
-    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}}
+    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'act_place': 0}
     assert sent[:2] == ['SOUND', 'SENS'], "asks the board for its buzzer and threshold settings"
     assert sl['timeline']['end'] >= sl['timeline']['start']
     f600 = dash.fast(600)
@@ -129,7 +129,7 @@ def main():
     # Per-link mode: off by default; once on, each ACK link gets its own analysis
     assert dash.command({'cmd': 'settings', 'per_link': True})[0]
     assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {
-        'per_link': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {},
+        'per_link': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'act_place': 0,
         'light': {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120}}
     for line in lines[half:]:
         dash.feed(line)

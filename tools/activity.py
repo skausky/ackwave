@@ -81,10 +81,54 @@ LABELS = {
     'lie_down':    dict(kind='event', name='Lying down', hint='Lie down once while it records.', delay=3, secs=10),
     'get_up_bed':  dict(kind='event', name='Getting out of bed', hint='Get up from lying once while it records.',
                         delay=3, secs=10),
+    'standing':    dict(kind='state', name='Standing', hint='Stand where you usually stand and keep still.', delay=3, secs=10),
+    'sitting_moving': dict(kind='state', name='Sitting, moving', hint='Sit and move about in your seat (typing, eating, '
+                           'gesturing).', delay=3, secs=10),
+    'lying_moving': dict(kind='state', name='Lying, moving', hint='Lie down and shift or turn over now and then.',
+                         delay=3, secs=10),
 }
+
+# Two answers at once: each activity says what it means for the posture (where a
+# still body is: compared only at the same placement) and for the movement (how
+# the signal moves: compared across placements, so it survives moving the board).
+# None = says nothing about that one (your own activities say nothing).
+AXES = {
+    'empty': ('away', 'still'), 'still': (None, 'still'), 'standing': ('standing', 'still'),
+    'sitting': ('sitting', 'still'), 'lying': ('lying', 'still'), 'walking': ('standing', 'walking'),
+    'sitting_moving': ('sitting', 'moving'), 'lying_moving': ('lying', 'moving'),
+    'standing_moving': ('standing', 'moving'), 'moving': (None, 'moving'),
+}
+# a posture and a movement together, as the label you would record for it
+_KEY = {('sitting', 'still'): 'sitting', ('lying', 'still'): 'lying', ('standing', 'still'): 'standing'}
+POSTURE_NAMES = {'away': 'Away', 'standing': 'Standing', 'sitting': 'Sitting', 'lying': 'Lying'}
+MOVE_NAMES = {'still': 'still', 'moving': 'moving', 'walking': 'walking'}
+POSTURE_X = 1.6                   # a posture this far (in shape units) from every clip: not sure
+POSTURE_MARGIN = 0.25             # ...or not this much closer than the next posture: not shown
+POSTURE_TRUST = 0.8               # a posture is shown only if, tested on your own clips, its guesses
+POSTURE_MIN_GUESSES = 15          # were right this often (and it was guessed at least this many times)
+
+
+def combined(posture, movement):
+    """(key, name) of a posture and a movement together: ('sitting_moving',
+    'Sitting · moving'), ('walking', 'Walking'), ('empty', 'Empty')."""
+    if posture == 'away':
+        return 'empty', 'Empty'
+    if movement == 'walking':
+        return 'walking', 'Walking'
+    if posture and movement:
+        return (_KEY.get((posture, movement), f'{posture}_{movement}'),
+                f'{POSTURE_NAMES[posture]} · {MOVE_NAMES[movement]}')
+    if movement:
+        return movement, MOVE_NAMES[movement].capitalize()
+    return posture, POSTURE_NAMES[posture]
 
 
 def label_info(label):
+    if label not in LABELS and isinstance(label, str):   # a posture and movement together
+        for p in POSTURE_NAMES:
+            for m in MOVE_NAMES:
+                if label == f'{p}_{m}':
+                    return dict(kind='state', name=combined(p, m)[1], hint='', delay=3, secs=10)
     return LABELS.get(label, dict(kind='state', name=label.replace('_', ' ').capitalize(), hint='', delay=3,
                                   secs=10))
 
@@ -236,6 +280,9 @@ class Activities:
         self.feat = Features()
         self.rec = None                  # recording in progress: dict(label, start, end, wins)
         self.recent = deque(maxlen=6)    # the last matches (for smoothing)
+        self.recent_pm = (deque(maxlen=6), deque(maxlen=6))   # the same for posture, movement
+        self.place = None                # where the board and router are now (the dashboard sets it)
+        self.posture_check, self.posture_ok = {}, set()   # _self_test: which postures can be shown
         self.result = None               # the latest verdict (dict)
         self.events = deque(maxlen=50)   # dict(t, label, dist): events seen
         self._event_hold = 0.0
@@ -283,7 +330,7 @@ class Activities:
                 if w.get('ok') and not w.get('glitch')]
         if not wins:
             return None
-        c = dict(id=f"{int((t or self.clock()) * 1000):x}{len(self.clips):02x}", label=label,
+        c = dict(id=f"{int((t or self.clock()) * 1000):x}{len(self.clips):02x}", label=label, place=self.place,
                  kind=label_info(label)['kind'], t=t or self.clock(), ch=ch, source=source, wins=wins)
         self.clips.append(c)
         mine = [x for x in self.clips if x['label'] == label]
@@ -370,7 +417,10 @@ class Activities:
                  lab=np.array([labs.index(c['label']) for _i, c, _w in rows]),
                  clip=np.array([i for i, _c, _w in rows]),
                  ch=np.array([-1 if c['ch'] is None else c['ch'] for _i, c, _w in rows]),
-                 t=np.array([w.get('t', 0) for _i, _c, w in rows], float), labs=labs)
+                 t=np.array([w.get('t', 0) for _i, _c, w in rows], float), labs=labs,
+                 post=np.array([AXES.get(c['label'], (None, None))[0] or '' for _i, c, _w in rows]),
+                 move=np.array([AXES.get(c['label'], (None, None))[1] or '' for _i, c, _w in rows]),
+                 place=[c.get('place') for _i, c, _w in rows])
         # how much each number varies within the same activity (averaged over
         # activities): pooling all windows would let the most uniform activity
         # (a still room) set the scale and blow every other difference up
@@ -406,7 +456,44 @@ class Activities:
                 near.append(k * float(dist[cand].min()))
         if near:
             self._scale['typ'] = max(float(np.median(near)), 0.3)
+        self._self_test()
         return self._scale
+
+    def _self_test(self):
+        """Which postures can be trusted: each still or fidgeting window of a
+        posture clip is guessed from the *other* clips (same channel); a posture
+        is trusted when its guesses were right at least POSTURE_TRUST of the
+        time. Stored as self.posture_check = {posture: (right, guessed)}."""
+        m, sc = self._mat, self._scale
+        self.posture_check, self.posture_ok = {}, set()
+        if m is None:
+            return
+        cand = (m['post'] != '') & (m['move'] != 'walking')
+        idx = np.flatnonzero(cand)
+        if len(set(m['post'][idx])) < 2:
+            return
+        guessed, right = {}, {}
+        for r in idx[:: max(1, len(idx) // 400)]:             # at most ~400 windows: quick
+            pool = cand & (m['clip'] != m['clip'][r]) & (m['ch'] == m['ch'][r])
+            if len(set(m['post'][pool])) < 2:
+                continue
+            d = np.mean(np.abs(m['shape'] - m['shape'][r]), 1) / sc['shape']
+            scores = {}
+            for v in set(m['post'][pool]):
+                x = d[pool & (m['post'] == v)]
+                k = min(K, x.size)
+                scores[v] = float(np.partition(x, k - 1)[:k].mean())
+            best = min(scores, key=scores.get)
+            second = sorted(scores.values())[1]
+            if scores[best] > POSTURE_X or (second - scores[best]) / (second + 1e-9) < POSTURE_MARGIN:
+                continue                                     # it would not be shown anyway
+            guessed[best] = guessed.get(best, 0) + 1
+            right[best] = right.get(best, 0) + (best == m['post'][r])
+        for v in sorted(set(m['post'][idx])):
+            g, ok = guessed.get(v, 0), right.get(v, 0)
+            self.posture_check[v] = (ok, g)
+            if g >= POSTURE_MIN_GUESSES and ok >= POSTURE_TRUST * g:
+                self.posture_ok.add(v)
 
     def _dists(self, dyn, shape, ch):
         """Distance from one window to every clip window (an array, in _mat's order)."""
@@ -466,6 +553,12 @@ class Activities:
         return self.result
 
     def _verdict(self, w):
+        r = self._verdict1(w)
+        if w.get('ok') and not w.get('glitch') and self.clips and any(c['label'] in AXES for c in self.clips):
+            r = self._with_axes(r, w)
+        return r
+
+    def _verdict1(self, w):
         base = dict(t=w['t'], ch=w['ch'], rate=round(w['rate']))
         if not self.clips:
             return dict(base, state='uncalibrated')
@@ -503,6 +596,83 @@ class Activities:
         conf = 'close' if best <= 1.5 * typ and margin > 0.2 else 'likely'
         return dict(base, state=top, name=label_info(top)['name'], conf=conf, dist=round(best / typ, 2),
                     scores=self._rounded(scores))
+
+    def _here(self, m, ch):
+        """Which clip windows were recorded at the current placement (and channel).
+        Clips from before placements were kept count as here until the board is
+        first marked as moved."""
+        legacy = self.place is None or self.place.endswith('|0')
+        return np.array([(p == self.place) if p else legacy for p in m['place']]) & (m['ch'] == (-1 if ch is None else ch))
+
+    def _axes(self, w):
+        """(posture, movement): each the best value and whether it is a match,
+        or None. Movement compares how the signal moves, against every clip;
+        posture compares where a still body is (the channel's shape), only
+        against clips recorded here."""
+        m, sc = self._mat, self._scale
+        if m is None:
+            return None, None
+        dd = (m['dyn'] - np.asarray(w['dyn'], float)) / sc['sd']
+        dyn = np.sqrt(np.mean(dd * dd, 1))
+        out = []
+        for col, dist, lim in (('move', dyn, UNKNOWN_X * sc['typ']), ('post', None, POSTURE_X)):
+            if col == 'post':
+                # a walking body has no one place: posture comes from still or fidgeting clips,
+                # and only when there are two postures to tell apart
+                here = self._here(m, w['ch']) & (m['post'] != '') & (m['move'] != 'walking')
+                if len(set(m['post'][here])) < 2:
+                    out.append(None)
+                    continue
+                dist = np.full(len(m['post']), np.inf)
+                dist[here] = np.mean(np.abs(m['shape'][here] - np.asarray(w['shape'], float)), 1) / sc['shape']
+            vals = sorted({v for v in m[col] if v})
+            scores = {}
+            for v in vals:
+                d = dist[(m[col] == v) & np.isfinite(dist)]
+                if d.size:
+                    k = min(K, d.size)
+                    scores[v] = float(np.partition(d, k - 1)[:k].mean())
+            if not scores:
+                out.append(None)
+                continue
+            best = min(scores, key=scores.get)
+            ok = scores[best] <= lim
+            if col == 'post' and len(scores) > 1:     # posture is hard: only when it clearly wins
+                second = sorted(scores.values())[1]
+                ok = ok and (second - scores[best]) / (second + 1e-9) >= POSTURE_MARGIN
+                ok = ok and best in self.posture_ok   # ...and your clips showed it can be trusted
+            out.append((best, ok))
+        return out[1], out[0]
+
+    def _vote(self, dq, got):
+        """Smooth one axis like the main verdict: a value shows once it has most
+        of the last few windows."""
+        dq.append(got[0] if got and got[1] else None)
+        votes = [x for x in dq if x is not None]
+        top = max(set(votes), key=votes.count) if votes else None
+        return top if top is not None and votes.count(top) >= max(2, len(dq) // 2) else None
+
+    def _with_axes(self, r, w):
+        """Add posture and movement to a verdict; their combination names it
+        (e.g. 'Sitting · moving') when the movement is known."""
+        try:
+            post, move = self._axes(w)
+        except (ValueError, KeyError):
+            return r
+        p = self._vote(self.recent_pm[0], post)
+        mv = self._vote(self.recent_pm[1], move)
+        r['posture'] = p
+        r['movement'] = mv
+        r['posture_here'] = post is not None          # False: no posture clips at this placement yet
+        if mv and r['state'] not in ('uncalibrated', 'no-data') and self.events_only is False:
+            key, name = combined(p, mv)
+            if r['state'] == 'unknown' or key != r['state']:
+                r['label_only'] = r['state']          # what the single-label match said
+            r['state'], r['name'] = key, name
+            r.setdefault('conf', 'likely')
+        return r
+
+    events_only = False                           # (all clips are moments: no posture or movement)
 
     @staticmethod
     def _rounded(scores):

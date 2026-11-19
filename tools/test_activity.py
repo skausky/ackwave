@@ -253,8 +253,55 @@ def dashboard():
     print("dashboard: record, cancel, delete, clear; payloads are JSON")
 
 
+def posture_and_movement():
+    """Two answers at once: movement (how the signal moves) from every clip,
+    posture (where a still body is) only from clips recorded at this placement
+    and only once the clips show it can be trusted. After 'I moved the board',
+    movement keeps working and posture says it doesn't know."""
+    rng = np.random.default_rng(7)
+    a = Activities(None)
+    a.place = 'R|6|0'
+    sit = 20 + 8 * np.sin(np.arange(64) / 3.0)                 # two body positions: two channel shapes
+    lie = 20 + 8 * np.sin(np.arange(64) / 3.0 + 1.3)
+    t = 0.0
+    for label, base, motion in (('sitting', sit, None), ('lying', lie, None), ('sitting', sit, None),
+                                ('lying', lie, None), ('walking', sit, lambda x: 0.08), ('walking', sit, lambda x: 0.08)):
+        synthetic(a, 22, t, rng, base=base, motion=motion)     # the 20 s window settles first
+        a.start(label, t + 22, delay=0, secs=12)
+        synthetic(a, 12.5, t + 22, rng, base=base, motion=motion)
+        t += 40
+    assert [c['label'] for c in a.clips] == ['sitting', 'lying', 'sitting', 'lying', 'walking', 'walking']
+    assert all(c['place'] == 'R|6|0' for c in a.clips), "clips remember where they were recorded"
+    a._scale = None
+    a._prep()
+    assert a.posture_ok == {'sitting', 'lying'}, a.posture_check
+
+    def verdicts(base, motion=None, secs=25):
+        nonlocal t
+        out = synthetic(a, secs, t, rng, base=base, motion=motion)
+        t += secs + 1
+        return out[-10:]
+    v = verdicts(lie)
+    assert all(r.get('posture') == 'lying' and r.get('movement') == 'still' for r in v[-5:]), v[-5:]
+    assert v[-1]['state'] == 'lying' and v[-1]['name'] == 'Lying · still'
+    v = verdicts(sit)
+    assert v[-1]['posture'] == 'sitting' and v[-1]['name'] == 'Sitting · still', v[-1]
+    v = verdicts(sit, motion=lambda x: 0.08)
+    assert v[-1]['movement'] == 'walking' and v[-1]['state'] == 'walking', v[-1]
+    # the board moved: a new placement; posture has no clips here, movement still works
+    a.place = 'R|6|1'
+    other = 20 + 8 * np.sin(np.arange(64) / 2.0)
+    v = verdicts(other)
+    assert v[-1]['movement'] == 'still' and v[-1]['posture'] is None and not v[-1]['posture_here'], v[-1]
+    assert v[-1]['name'] == 'Still'
+    v = verdicts(other, motion=lambda x: 0.08)
+    assert v[-1]['movement'] == 'walking', v[-1]
+    print("posture and movement: both learned; after a move, movement still works and posture waits")
+
+
 def main():
     features_basics()
+    posture_and_movement()
     real_captures()
     unknown_and_weak()
     moments()

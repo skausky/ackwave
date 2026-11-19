@@ -218,7 +218,7 @@ class Dashboard:
         self.lock = threading.Lock()
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
-        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={})   # sound, sens: kept on the board; None = its own
+        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, act_place=0)   # sound, sens: kept on the board; None = its own
         # Device links that drive the alerts (light, buzzer, LED) besides the board:
         # src -> True once that link's slow window confirmed its current motion
         self.confirmed = {}
@@ -236,6 +236,9 @@ class Dashboard:
                 if isinstance(al, list) and len(al) <= ALERT_MAX and all(
                         isinstance(k, str) and MAC_RE.fullmatch(k) for k in al):
                     self.cfg['alerts'] = [k.lower() for k in al]
+                ap = got.get('act_place')
+                if isinstance(ap, int) and not isinstance(ap, bool) and 0 <= ap < 10 ** 6:
+                    self.cfg['act_place'] = ap
                 rn = got.get('router_names')
                 if isinstance(rn, dict) and len(rn) <= ROUTER_NAMES_MAX:
                     self.cfg['router_names'] = {k.lower(): v for k, v in rn.items()
@@ -276,6 +279,11 @@ class Dashboard:
 
     def _on_csi(self, d, t):
         """Every CSI packet (called inside State.feed, lock held)."""
+        # where the board and router are: the router heard most (by its address),
+        # the channel, and how often you said you moved them. Posture clips only
+        # count at the placement they were recorded at.
+        src = self.act.feat.src
+        self.act.place = f"{self.s.nodes.get(src, src)}|{d['ch']}|{self.cfg['act_place']}"
         r = self.act.feed(d, t)
         if r is not None:
             self._act_period(r['state'], self.s.wall(t) if self.s.wall_off is not None else time.time())
@@ -778,6 +786,11 @@ class Dashboard:
                 return False, 'countdown 0-60 s, recording 6-60 s'
             a.start(label, self.s.now, delay, secs)
             return True, f"{info['name']}: recording starts in {delay:.0f} s"
+        if what == 'act_moved':
+            self.cfg['act_place'] += 1
+            self._save_settings()
+            return True, ('Noted: the board or router moved. Movement keeps working; record a short '
+                          'still clip of each posture here (sitting, lying, standing) to see postures again')
         if what == 'act_cancel':
             a.cancel()
             return True, 'recording cancelled'
@@ -822,7 +835,9 @@ class Dashboard:
                       source=c.get('source', 'recorded'), windows=len(c['wins'])) for c in reversed(a.clips)]
         return dict(labels=known + own, clips=clips[:100], log=[[r2(a), r2(b), st] for a, b, st in list(self.act_log)[-39:]]
                     + ([[r2(self.act_cur[0]), None, self.act_cur[1]]] if self.act_cur else []),
-                    channel=a.feat.ch)
+                    channel=a.feat.ch, place=a.place,
+                    posture_check={k: list(v) for k, v in a.posture_check.items()},
+                    posture_ok=sorted(a.posture_ok))
 
     def _save_settings(self):
         if self.settings_path:
