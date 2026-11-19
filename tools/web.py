@@ -50,6 +50,9 @@ STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/map.js': ('map.js', 'text/javascript; charset=utf-8')}
 MAP_MAX = 256 * 1024                        # the Map page's saved layout (no pictures): bytes
 MAP_NODES = 64
+PLAN_MAX = 12 * 1024 * 1024                 # one map picture (satellite, floor plan): bytes
+PLAN_IDS = ('p1', 'p2', 'p3', 'p4')         # up to 4 picture layers, bottom first
+PLAN_MAGIC = ((b'\x89PNG\r\n\x1a\n', 'image/png'), (b'\xff\xd8\xff', 'image/jpeg'))
 MAP_UNITS, MAP_ENVS = ('ft', 'm'), ('outdoor', 'open', 'home', 'cluttered')
 FAST_S, SLOW_S, DEBUG_S = 0.25, 1.0, 2.0     # update periods of the three event types
 TAIL_N = 250                                # board lines kept for the Debug page (not CSI)
@@ -895,6 +898,58 @@ class Dashboard:
     def _map_path(self):
         return os.path.join(os.path.dirname(self.settings_path), 'map.json') if self.settings_path else None
 
+    def _plan_path(self, pid):
+        return os.path.join(os.path.dirname(self.settings_path), f'map-{pid}.img') if self.settings_path else None
+
+    @staticmethod
+    def plan_type(data):
+        """The picture's type from its first bytes (PNG, JPEG or WebP), else None."""
+        for magic, ctype in PLAN_MAGIC:
+            if data.startswith(magic):
+                return ctype
+        if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            return 'image/webp'
+        return None
+
+    def plan_save(self, pid, data):
+        """Store (or with empty data, delete) map picture `pid`; (ok, message)."""
+        if pid not in PLAN_IDS:
+            return False, 'bad picture slot'
+        p = self._plan_path(pid)
+        if not p:
+            return False, 'nowhere to save the picture (no sessions folder)'
+        if not data:
+            try:
+                os.remove(p)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                return False, f'could not remove the picture ({e.strerror})'
+            return True, 'picture removed'
+        if len(data) > PLAN_MAX:
+            return False, 'picture too big (12 MB at most)'
+        if not self.plan_type(data):
+            return False, 'not a PNG, JPEG or WebP picture'
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p + '.tmp', 'wb') as f:
+                f.write(data)
+            os.replace(p + '.tmp', p)
+        except OSError as e:
+            return False, f'could not save the picture ({e.strerror})'
+        return True, 'picture saved'
+
+    def plan_load(self, pid):
+        """(bytes, content type) of map picture `pid`, or None."""
+        p = self._plan_path(pid) if pid in PLAN_IDS else None
+        try:
+            with open(p, 'rb') as f:
+                data = f.read(PLAN_MAX + 1)
+        except (OSError, TypeError):
+            return None
+        ctype = self.plan_type(data)
+        return (data, ctype) if ctype and len(data) <= PLAN_MAX else None
+
     def map_load(self):
         """The saved layout ({} if none or unreadable)."""
         p = self._map_path()
@@ -1301,6 +1356,21 @@ def clean_map(m):
             if 'placed' in n:
                 c['placed'] = bool(n['placed'])
             out['nodes'].append(c)
+    if 'plans' in m:                            # picture layers: where each sits, in metres
+        plans = m['plans']
+        if not isinstance(plans, list) or len(plans) > len(PLAN_IDS):
+            raise ValueError('bad picture layers')
+        out['plans'], seen = [], set()
+        for p in plans:
+            if not isinstance(p, dict) or p.get('id') not in PLAN_IDS or p['id'] in seen:
+                raise ValueError('bad picture layer')
+            seen.add(p['id'])
+            c = dict(id=p['id'], x=_num(p.get('x'), -100000, 100000), y=_num(p.get('y'), -100000, 100000),
+                     w=_num(p.get('w'), 0.1, 100000), rot=_num(p.get('rot', 0), -7, 7),
+                     opacity=_num(p.get('opacity', 1), 0, 1), hidden=bool(p.get('hidden', False)))
+            if 'name' in p:
+                c['name'] = _text(p['name'])
+            out['plans'].append(c)
     return out
 
 
@@ -1342,6 +1412,11 @@ def make_handler(dash, allowed_hosts):
                     return self._reply(200, dash.stats())
                 if u.path == '/api/map':
                     return self._reply(200, dash.map_load())
+                if u.path == '/api/plan':
+                    got = dash.plan_load(parse_qs(u.query).get('id', [''])[0])
+                    if not got:
+                        return self._reply(404, {'error': 'no picture'})
+                    return self._reply(200, got[0], got[1])
                 if u.path == '/api/timeline':
                     try:
                         hours = float(parse_qs(u.query).get('hours', ['24'])[0])
@@ -1424,6 +1499,17 @@ def make_handler(dash, allowed_hosts):
                 except ValueError:
                     return self._reply(400, {'ok': False, 'msg': 'bad request'})
                 ok, msg = dash.map_save(m)
+                return self._reply(200 if ok else 400, {'ok': ok, 'msg': msg})
+            if path == '/api/plan':                   # a map picture: raw bytes, empty = remove
+                try:
+                    n = int(self.headers.get('Content-Length') or 0)
+                except ValueError:
+                    return self._reply(400, {'ok': False, 'msg': 'bad request'})
+                if n > PLAN_MAX:
+                    self.close_connection = True      # don't read 12+ MB just to refuse it
+                    return self._reply(413, {'ok': False, 'msg': 'picture too big (12 MB at most)'})
+                ok, msg = dash.plan_save(parse_qs(urlparse(self.path).query).get('id', [''])[0],
+                                         self.rfile.read(n) if n else b'')
                 return self._reply(200 if ok else 400, {'ok': ok, 'msg': msg})
             if path != '/cmd':
                 return self._reply(404, {'ok': False, 'msg': 'not found'})

@@ -436,3 +436,33 @@ table.kv td:nth-child(3) { color: var(--muted); font-size: 12px; }
   .where-list li { grid-template-columns: 1fr auto; }
   .where-list li .who { grid-column: 1 / -1; }
 }
+
+/* Simple mode (the default): Graphs, Links and Debug are in Advanced mode */
+body.simple .nav a[data-adv] { display: none; }
+.nav-adv { display: flex; align-items: center; gap: 10px; color: var(--muted); background: none; border: 0;
+  font: inherit; cursor: pointer; border-radius: 8px; }
+.nav-adv svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8;
+  stroke-linecap: round; stroke-linejoin: round; }
+.nav-adv[aria-pressed="true"] { color: var(--accent); }
+.nav-adv:hover { background: var(--card2); color: var(--fg); }
+@media (min-width: 900px) { .nav-adv { margin-top: auto; padding: 10px 12px; } }
+@media (max-width: 899.98px) {
+  .nav-adv { flex: 1 1 0; min-width: 0; flex-direction: column; gap: 2px; padding: 6px 0; font-size: 9.5px; }
+}
+
+/* Map pictures (satellite, floor plans) and the step-by-step hint over the map */
+.map-stage { position: relative; }
+.map-hint { position: absolute; left: 10px; right: 10px; top: 10px; display: flex; gap: 10px; align-items: center;
+  padding: 8px 10px; border-radius: 10px; background: rgba(13,17,22,.92); border: 1px solid var(--accent); }
+.map-hint[hidden] { display: none; }
+.map-hint span { flex: 1; }
+.map-layers { grid-column: 1 / -1; }
+.btn-file { display: inline-flex; align-items: center; padding: 6px 12px; border-radius: 8px; cursor: pointer;
+  background: var(--card2); border: 1px solid var(--line); }
+.btn-file:hover { border-color: var(--accent); }
+.layer-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.layer-list li { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.layer-list .lname { font-weight: 600; min-width: 8em; flex: 1 1 10em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layer-list label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+.layer-list input[type=range] { width: 110px; }
+.layer-list button.on { border-color: var(--accent); color: var(--accent); }

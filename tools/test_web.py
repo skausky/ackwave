@@ -371,6 +371,37 @@ def main():
             assert st == 400, bad
         st, body = request(port, 'GET', '/api/map', headers={'X-Ackwave': '1'})
         assert json.loads(body) == got, "a refused save changes nothing"
+        # Pictures under the map (satellite, floor plans): raw bytes per slot, checked by content
+        png = b'\x89PNG\r\n\x1a\n' + b'\0' * 64
+        st, _ = request(port, 'GET', '/api/plan?id=p1', headers={'X-Ackwave': '1'})
+        assert st == 404, "no picture yet"
+        st, body = request(port, 'POST', '/api/plan?id=p1', png, {'X-Ackwave': '1'})
+        assert st == 200 and json.loads(body)['ok'], body
+        st, body = request(port, 'GET', '/api/plan?id=p1', headers={'X-Ackwave': '1'})
+        assert st == 200 and body == png
+        for data, why in ((b'<svg onload=alert(1)>', 'not a picture'), (b'GIF89a' + b'\0' * 20, 'not a PNG/JPEG/WebP')):
+            st, _ = request(port, 'POST', '/api/plan?id=p2', data, {'X-Ackwave': '1'})
+            assert st == 400, why
+        st, _ = request(port, 'POST', '/api/plan?id=../x', png, {'X-Ackwave': '1'})
+        assert st == 400, "only the four slots"
+        st, _ = request(port, 'POST', '/api/plan?id=p2', png, {})
+        assert st == 403, "upload without the dashboard header refused"
+        st, _ = request(port, 'GET', '/api/plan?id=p1')
+        assert st == 403, "picture without the dashboard header refused"
+        ok, msg = dash.plan_save('p3', b'\xff\xd8\xff' + b'\0' * (12 * 1024 * 1024))
+        assert not ok and 'too big' in msg
+        layer = {'id': 'p1', 'name': 'satellite', 'x': -20, 'y': -15.5, 'w': 60, 'rot': 0.1, 'opacity': 0.8}
+        st, body = request(port, 'POST', '/api/map', json.dumps(dict(got, plans=[layer])), hdr)
+        assert st == 200, body
+        st, body = request(port, 'GET', '/api/map', headers={'X-Ackwave': '1'})
+        assert json.loads(body)['plans'] == [dict(layer, hidden=False)]
+        for bad in ([dict(layer, id='p9')], [layer, layer], [dict(layer, w=0)], [dict(layer, opacity=2)], 'x'):
+            st, _ = request(port, 'POST', '/api/map', json.dumps(dict(got, plans=bad)), hdr)
+            assert st == 400, bad
+        st, body = request(port, 'POST', '/api/plan?id=p1', b'', {'X-Ackwave': '1'})
+        assert st == 200 and json.loads(body)['ok']
+        st, _ = request(port, 'GET', '/api/plan?id=p1', headers={'X-Ackwave': '1'})
+        assert st == 404, "removed"
         st, _ = request(port, 'GET', '/api/nope', headers={'X-Ackwave': '1'})
         assert st == 404
         st, _ = request(port, 'GET', '/', headers={'Host': 'evil.example:80'})

@@ -1537,6 +1537,19 @@ function route() {
 }
 function go(name) { location.hash = `#/${name}`; }
 
+// Simple mode (default) hides the Graphs, Links and Debug pages from the
+// menu; Advanced shows them. Remembered per browser.
+function setAdvanced(on, save = true) {
+  document.body.classList.toggle('simple', !on);
+  $('#btn-adv').setAttribute('aria-pressed', String(on));
+  if (save) try { localStorage.setItem('ackwave.advanced', on ? '1' : '0'); } catch (e) { /* private mode */ }
+  if (!on && document.querySelector(`#nav a[data-route="${page}"][data-adv]`)) go('home');
+}
+$('#btn-adv').onclick = () => setAdvanced(document.body.classList.contains('simple'));
+let advSaved = null;
+try { advSaved = localStorage.getItem('ackwave.advanced'); } catch (e) { /* private mode */ }
+setAdvanced(advSaved === '1', false);
+
 // ---------------------------------------------------------------- controls
 function setWinButtons(w) {
   win = w;
