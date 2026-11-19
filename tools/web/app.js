@@ -174,7 +174,7 @@ function renderHeader(h) {
   }
   renderRecent(h.recent);
   // Breathing on Home: the router link's, and each link's own (per-link analysis)
-  const bt = h.tiles.breathing, per = ((slow && slow.radio) || []).filter((r) => r.breathing && !r.ap);
+  const bt = h.tiles.breathing, per = ((slow && slow.radio) || []).filter((r) => r.breathing && r.key !== 'ap:0');
   $('#home-breath-val').textContent = bt.value;
   $('#home-breath-val').style.color = bt.color;
   $('#home-breath-sub').textContent = [`router · ${bt.detail}`,
@@ -313,7 +313,7 @@ async function loadWhere() {
   } catch (e) {
     $('#where-state').textContent = 'could not load';
   }
-  if (page === 'home') { drawWhere(); renderWhereList(); }
+  if (page === 'home') { drawWhere(); renderWhereList(); renderActList(); }
 }
 function whereRange(h) {
   where.hours = h; where.sel = null;
@@ -332,6 +332,7 @@ function whereEvents() {
   const ps = d.spans.slice().sort((a, b) => a[0] - b[0]);
   const out = [];
   for (const [a, b, key, going] of ps) {
+    if (key === 'activity') continue;              // activities have their own list
     const e = out[out.length - 1];
     if (e && a <= e.t1 + 10) {
       e.t1 = Math.max(e.t1, b); e.keys.add(key); e.going = e.going || going;
@@ -361,6 +362,15 @@ function renderWhereList() {
     li.onclick = () => { where.sel = where.sel === e.t0 ? null : e.t0; drawWhere(); renderWhereList(); };
     return li;
   }), where.data ? 'no motion in this time' : 'loading…');
+}
+function renderActList() {
+  const d = where.data;
+  const acts = d ? d.spans.filter((p) => p[2] === 'activity').sort((x, y) => y[0] - x[0]) : [];
+  fillList($('#home-acts'), acts.slice(0, 60).map(([a, b, , going, name]) =>
+    el('li', { className: going ? 'going' : '' }, el('b', { textContent: dayClock(a) }),
+      el('span', { textContent: going ? `${fmtSpan(b - a)}, now` : fmtSpan(b - a) }),
+      el('span', { className: 'who', textContent: name }))),
+  !d ? 'loading…' : 'none in this time (record activities on the Activity page)');
 }
 function drawWhere() {
   const d = where.data, box = $('#where'), cv = box.querySelector('canvas');
@@ -397,8 +407,14 @@ function drawWhere() {
     if (i === undefined) continue;
     const xa = Math.max(G, X(a)), xb = Math.min(w, X(b));
     if (xb < G || xa > w) continue;
-    ctx.fillStyle = key === 'board' ? C.motion : C.brief;
+    ctx.fillStyle = key === 'board' ? C.motion : key === 'activity' ? C.blue : C.brief;
     ctx.fillRect(xa, i * LH + 4, Math.max(2, xb - xa), LH - 8);   // at least 2 px: a short one still shows
+  }
+  ctx.font = '11px ui-sans-serif, system-ui, sans-serif'; ctx.fillStyle = C.bg || '#0d1116';
+  for (const [a, b, key, , name] of d.spans) {    // an activity's name, where it fits
+    if (key !== 'activity' || row[key] === undefined) continue;
+    const xa = Math.max(G, X(a)), xb = Math.min(w, X(b));
+    if (xb - xa > ctx.measureText(name).width + 8) ctx.fillText(name, xa + 4, row[key] * LH + LH / 2 + 1);
   }
   ctx.font = FONT; ctx.fillStyle = C.muted; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
   const { ticks, step } = timeTicks(t0, t1, w - G);
@@ -409,8 +425,9 @@ function drawWhere() {
   ctx.textAlign = 'left';
   hoverable('#where', { r: { l: G, r: w, t: 0, b: lanes.length * LH }, o: { t0, t1, y0: 0, y1: 1 } }, (t) => {
     const tol = (t1 - t0) / (w - G) * 3;                      // 3 px either side: easy to hit with a finger
-    const saw = lanes.filter((ln) => d.spans.some(([a, b, k]) => k === ln.key && a - tol <= t && t <= b + tol));
-    return [saw.length ? `motion: ${saw.map((l) => l.name).join(', ')}` : 'no motion'];
+    const saw = lanes.filter((ln) => ln.key !== 'activity' && d.spans.some(([a, b, k]) => k === ln.key && a - tol <= t && t <= b + tol));
+    const act = d.spans.find(([a, b, k]) => k === 'activity' && a <= t && t <= b);
+    return [saw.length ? `motion: ${saw.map((l) => l.name).join(', ')}` : 'no motion', act && `activity: ${act[4]}`];
   });
 }
 
@@ -1521,8 +1538,9 @@ function renderActCal() {
       l.hint ? el('div', { className: 'act-hint', textContent: l.hint }) : null,
       el('div', { className: 'act-info' + (chWarn ? ' warn' : ''), textContent: info }));
   }));
-  fillRows($('#act-log'), a.log.slice().reverse().map(([w, st]) =>
-    [clock(w, true), ACT_STATES[st] ? ACT_STATES[st][0] : actName(st)]), 'nothing yet');
+  fillRows($('#act-log'), a.log.slice().reverse().map(([w0, w1, st]) =>
+    [clock(w0, true), ACT_STATES[st] ? ACT_STATES[st][0] : actName(st),
+      w1 ? fmtSpan(w1 - w0) : `${fmtSpan(Date.now() / 1000 - w0)}, now`]), 'nothing yet');
   fillRows($('#act-clips'), a.clips.map((c) => [`${dayLabel(localDay(c.t))} ${clock(c.t, false)}`,
     c.name, c.ch ?? '–', c.source,
     el('button', { type: 'button', className: 'ghost', textContent: 'Delete',

@@ -75,7 +75,7 @@
     <article class="card where-card">
       <div class="card-head"><h2>Where and when <span class="muted small" id="where-state"></span></h2>
         <div class="seg" id="where-range"><button type="button" data-h="0.008333">30 s</button><button type="button" data-h="0.083333">5 min</button><button type="button" data-h="0.5">30 min</button><button type="button" data-h="1">1 h</button><button type="button" data-h="6">6 h</button><button type="button" data-h="24">24 h</button><button type="button" data-h="168">7 days</button></div></div>
-      <p class="cap">One row per link: when each saw motion (red = the board's own verdict, orange = a router or device link). Drag across it to read the time; tap a period below for its details.</p>
+      <p class="cap">One row per link: when each saw motion (red = the board's own verdict, orange = a router or device link; blue = the activity it recognised). Drag across it to read the time; tap a period below for its details.</p>
       <div class="chart where" id="where"><canvas></canvas></div>
       <p class="muted small" id="where-hint" hidden>Only the board's verdict is shown: switch on per-link analysis (Links page) to also see which link saw each motion.</p>
       <ol class="where-list" id="where-list"></ol>
@@ -91,11 +91,17 @@
         <ol id="recent"><li class="muted">none yet</li></ol>
       </article>
     </div>
-    <article class="card chart-card">
+    <div class="row2 home-row">
+      <article class="card">
+        <div class="card-head"><h2>Recent activities</h2><span class="muted small">same time as Where and when</span></div>
+        <ol class="where-list" id="home-acts"></ol>
+      </article>
+      <article class="card chart-card">
         <div class="card-head"><h2>This session</h2><div class="chips" id="home-counts"></div></div>
         <p class="cap">Red = motion, orange ticks = brief blips (often noise), grey = calibrating.</p>
         <div class="chart strip" id="home-tl"><canvas></canvas></div>
       </article>
+    </div>
   </section>
 
   <!-- ======================= GRAPHS ======================= -->
@@ -357,7 +363,7 @@
     <section class="row2">
       <article class="card">
         <div class="card-head"><h2>Recent changes</h2></div>
-        <div class="table-wrap short"><table><thead><tr><th>Time</th><th>Activity</th></tr></thead><tbody id="act-log"></tbody></table></div>
+        <div class="table-wrap short"><table><thead><tr><th>Started</th><th>Activity</th><th>For</th></tr></thead><tbody id="act-log"></tbody></table></div>
       </article>
       <article class="card">
         <div class="card-head"><h2>Clips</h2><button type="button" id="act-clear" class="ghost">Delete all</button></div>

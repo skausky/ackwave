@@ -231,7 +231,9 @@ window.AckMap = (() => {
         ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2);
         ctx.strokeStyle = alpha(color, 0.8); ctx.lineWidth = 1.2; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
       }
-      label(x, y + 15, r.label, r.rssi !== null && r.rssi !== undefined ? `${r.rssi} dBm` : null, css('--fg'));
+      const sub = [r.rssi !== null && r.rssi !== undefined ? `${r.rssi} dBm` : '',
+        r.breathing ? `breathing ${Math.round(r.breathing.rate)}/min` : ''].filter(Boolean).join(' · ');
+      label(x, y + 15, r.label, sub || null, css('--fg'));
     }
     $('#map-msg').textContent = L.length ? '' : 'Waiting for live links: the router appears once the board hears it.';
   }

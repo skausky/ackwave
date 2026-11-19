@@ -71,6 +71,8 @@ ALERT_MAX = 8                               # device links that may drive the al
 EXT_EVERY_S = 1.0                           # EXT,1 repeated this often (the board holds it 5 s)
 ACT_LABEL_RE = re.compile(r'[a-z0-9_]{1,24}')  # an activity's key (own names allowed)
 ROUTER_NAME_MAX, ROUTER_NAMES_MAX = 24, 32    # nicknames you give routers (by BSSID)
+ACT_HOLD_S = 3.0                              # an activity counts once it lasts this long (no flicker)
+ACT_NOT_KEPT = ('uncalibrated', 'no-data', 'unknown')   # shown, but not filed in the timeline
 
 
 class LinkDetector:
@@ -263,7 +265,9 @@ class Dashboard:
         self.links = {}                          # src -> dict(br=Breathing, dop=Doppler, hist=deque, md)
         # Activity recognition by example (activity.py): clips in sessions/activities.json
         self.act = Activities(os.path.join(os.path.dirname(settings), 'activities.json') if settings else None)
-        self.act_log = deque(maxlen=300)         # [wall, state] each time the shown activity changes
+        self.act_log = deque(maxlen=300)         # [wall0, wall1, state] activity periods, oldest first
+        self.act_cur = None                      # [wall0, state]: the activity now (once it held ACT_HOLD_S)
+        self.act_cand = None                     # [wall0, state]: a different one, not held long enough yet
         self.csi_ts = None                       # last CSI time seen with per-link on
         # When each device link saw motion, on the wall clock (survives board
         # restarts): [wall0, wall1 or None, node, name]. Says where a motion was.
@@ -274,9 +278,7 @@ class Dashboard:
         """Every CSI packet (called inside State.feed, lock held)."""
         r = self.act.feed(d, t)
         if r is not None:
-            shown = r['state']
-            if not self.act_log or self.act_log[-1][1] != shown:
-                self.act_log.append([self.s.wall(t) if self.s.wall_off is not None else time.time(), shown])
+            self._act_period(r['state'], self.s.wall(t) if self.s.wall_off is not None else time.time())
         if not self.cfg['per_link']:
             return
         if self.csi_ts is not None and d['ts'] < self.csi_ts - 1_000_000:
@@ -298,6 +300,29 @@ class Dashboard:
             ln['hist'].append((t, r))
             while ln['hist'] and ln['hist'][0][0] < t - WINDOWS[-1]:
                 ln['hist'].popleft()
+
+    def _act_period(self, st, w):
+        """The activity verdict (every 0.5 s) as periods: a new one starts only
+        after it held ACT_HOLD_S, so a second of 'unknown' between two walks
+        doesn't split the walk. Finished periods go in the log and, when they
+        are a real activity, in the timeline."""
+        cur = self.act_cur
+        if cur is None:
+            self.act_cur = [w, st]
+            return
+        if st == cur[1]:
+            self.act_cand = None
+            return
+        if self.act_cand is None or self.act_cand[1] != st:
+            self.act_cand = [w, st]
+            return
+        if w - self.act_cand[0] < ACT_HOLD_S:
+            return
+        w0, w1 = cur[0], self.act_cand[0]
+        self.act_log.append([w0, w1, cur[1]])
+        if cur[1] not in ACT_NOT_KEPT and self.timeline and w1 > w0:
+            self.timeline.add(w0, w1, 'activity', cur[1])
+        self.act_cur, self.act_cand = self.act_cand, None
 
     def _period(self, key, on, wall, name=''):
         """A link's (or the board's) motion period opens or closes; a closed one
@@ -795,7 +820,8 @@ class Dashboard:
                     last=v['last'], chs=v['chs']) for k, v in labels.items() if k not in LABELS]
         clips = [dict(id=c['id'], label=c['label'], name=label_info(c['label'])['name'], t=r2(c['t']), ch=c['ch'],
                       source=c.get('source', 'recorded'), windows=len(c['wins'])) for c in reversed(a.clips)]
-        return dict(labels=known + own, clips=clips[:100], log=[[r2(w), st] for w, st in list(self.act_log)[-40:]],
+        return dict(labels=known + own, clips=clips[:100], log=[[r2(a), r2(b), st] for a, b, st in list(self.act_log)[-39:]]
+                    + ([[r2(self.act_cur[0]), None, self.act_cur[1]]] if self.act_cur else []),
                     channel=a.feat.ch)
 
     def _save_settings(self):
@@ -1054,21 +1080,27 @@ class Dashboard:
             t0 = now - hours * 3600
             spans = [list(p) for p in self.timeline.read(t0, now)] if self.timeline else []
             spans += [[w0, now, k, nm, True] for k, (w0, nm) in self._open.items() if w0 <= now]
+            if self.act_cur and self.act_cur[1] not in ACT_NOT_KEPT and self.act_cur[0] <= now:
+                spans.append([self.act_cur[0], now, 'activity', self.act_cur[1], True])
             names = {}
             for p in spans:
                 names[p[2]] = p[3]                   # the newest name of each link
+            names.pop('activity', None)              # one lane, its periods carry their own names
+            if any(p[2] == 'activity' for p in spans):
+                names['activity'] = 'Activity'
             for k in names:                          # today's names win (a router renamed since)
                 if k.startswith('ap:'):
                     names[k] = self._router_name(int(k[3:]))
                 elif k != 'board' and k in self.s.devices.devs:
                     names[k] = self.s.devices.name(k) or names[k]
-            order = lambda k: (0 if k == 'board' else 1 if k.startswith('ap:') else 2, k)
+            order = lambda k: (0 if k == 'board' else 1 if k == 'activity' else 2 if k.startswith('ap:') else 3, k)
             lanes = [dict(key=k, name='Board' if k == 'board' else names[k])
                      for k in sorted(names, key=order)]
             if not any(l['key'] == 'board' for l in lanes):
                 lanes.insert(0, dict(key='board', name='Board'))
             return dict(t0=r2(t0), t1=r2(now), hours=hours, lanes=lanes,
-                        spans=[[r2(p[0]), r2(p[1]), p[2], len(p) > 4] for p in spans],
+                        spans=[[r2(p[0]), r2(p[1]), p[2], len(p) > 4,
+                                label_info(p[3])['name'] if p[2] == 'activity' else p[3]] for p in spans],
                         per_link=self.cfg['per_link'])
 
     def _router_name(self, idx):

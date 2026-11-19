@@ -1,7 +1,8 @@
 """Where and when motion happened, kept on disk (sessions/timeline-YYYY-MM-DD.jsonl).
 
 One line per finished motion period of one link: the board's own verdict
-('board'), a router link ('ap:<n>') or a poked device's link (its MAC):
+('board'), a router link ('ap:<n>'), a poked device's link (its MAC), or a
+recognised activity ('activity', its name says which):
 
     {"t0": 1795100000.1, "t1": 1795100012.6, "key": "board", "name": "Board"}
 
@@ -17,7 +18,7 @@ import time
 from datetime import datetime, timedelta
 
 FILE_RE = re.compile(r'timeline-(\d{4}-\d{2}-\d{2})\.jsonl$')
-KEY_RE = re.compile(r'board|ap:[0-7]|[0-9a-f]{2}(:[0-9a-f]{2}){5}')
+KEY_RE = re.compile(r'board|activity|ap:[0-7]|[0-9a-f]{2}(:[0-9a-f]{2}){5}')   # activity: name = what it was
 MAX_SPAN_S = 24 * 3600            # a period longer than this is cut (a stuck verdict)
 MAX_RANGE_S = 7 * 24 * 3600       # the longest range read at once
 NAME_MAX = 40

@@ -65,7 +65,28 @@ def dashboard():
     assert d2.timeline_range(1)['spans'] == []
 
 
+def activity_periods():
+    """The activity verdict flickers (walking, a second of unknown, walking):
+    the history keeps whole periods, and only real activities are filed."""
+    tmp = tempfile.mkdtemp()
+    d = Dashboard(State(60), sessions_dir=tmp, settings=os.path.join(tmp, 'dashboard.json'))
+    w = time.time() - 600
+    seq = (['walking'] * 20 + ['unknown'] * 3 + ['walking'] * 20 + ['sitting'] * 30
+           + ['unknown'] * 12 + ['still'] * 10)                     # one verdict every 0.5 s
+    for i, st in enumerate(seq):
+        d._act_period(st, w + i * 0.5)
+    log = [(st, round(b - a, 1)) for a, b, st in d.act_log]
+    assert log == [('walking', 21.5), ('sitting', 15.0), ('unknown', 6.0)], log
+    assert d.act_cur[1] == 'still'
+    got = [(p[2], p[3]) for p in d.timeline.read(w - 1, w + 100)]
+    assert got == [('activity', 'walking'), ('activity', 'sitting')], got   # no 'unknown' on disk
+    r = d.timeline_range(1)
+    assert [l['key'] for l in r['lanes']][:2] == ['board', 'activity']
+    assert {s[4] for s in r['spans'] if s[2] == 'activity'} >= {'Walking', 'Sitting', 'Still'}
+
+
 if __name__ == '__main__':
     store()
+    activity_periods()
     dashboard()
     print("TIMELINE TESTS PASSED")
