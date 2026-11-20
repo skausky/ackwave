@@ -11,18 +11,18 @@ test: test-c test-py
 test-c: build-host/test_core
 	./build-host/test_core
 
-build-host/test_core: test/test_core.c main/csi_core.h
+build-host/test_core: test/test_core.c test/aes128.h main/csi_core.h main/seal.h
 	@mkdir -p build-host
 	$(CC) $(CFLAGS) test/test_core.c -o $@ -lm
 
-build-host/score_lines: test/score_lines.c main/csi_core.h
+build-host/score_lines: test/score_lines.c main/csi_core.h main/seal.h
 	@mkdir -p build-host
 	$(CC) $(CFLAGS) test/score_lines.c -o $@ -lm
 
 test-py: build-host/score_lines
 	cd tools && $(PY) test_pipeline.py && $(PY) test_probe_report.py && \
 		$(PY) test_gui.py && $(PY) test_record.py && $(PY) test_history.py && \
-		$(PY) test_devices.py && $(PY) test_doppler.py && $(PY) test_breathing.py && $(PY) test_stats.py && $(PY) test_light.py && $(PY) test_web.py && $(PY) test_activity.py && $(PY) test_timeline.py
+		$(PY) test_devices.py && $(PY) test_doppler.py && $(PY) test_breathing.py && $(PY) test_stats.py && $(PY) test_light.py && $(PY) test_web.py && $(PY) test_activity.py && $(PY) test_timeline.py && $(PY) test_keys.py
 
 demo:
 	$(PY) tools/fake_csi.py | $(PY) tools/analyze.py -

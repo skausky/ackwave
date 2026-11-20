@@ -3,6 +3,7 @@
 //      -Imain test/test_core.c -o test_core && ./test_core)
 #include <stdlib.h>
 #include "csi_core.h"
+#include "aes128.h"
 
 static int passes = 0, fails = 0;
 #define CHECK(c) do { if (c) passes++; else { fails++; \
@@ -1062,6 +1063,8 @@ int main(void) {
     static seen_list_t fz_seen;
     node_table_t fz_nodes = {0};
     node_add(&fz_nodes, AP1);
+    static const uint8_t FZK[16] = {7};
+    aes128_t fz_key; aes128_init(&fz_key, FZK);
     for (int it = 0; it < 200000; it++) {
         int len = rand() % 300;
         uint8_t *buf = malloc(len ? len : 1);
@@ -1074,7 +1077,8 @@ int main(void) {
         seen_note(&fz_seen, &fz_nodes, buf, len, -50, (uint32_t)it);
         if (len) buf[0] = 0xD0;                               // ...and as a peer's hello
         if (len >= 32 && (it & 8)) memcpy(buf + 24, HELLO_MAGIC, sizeof HELLO_MAGIC);
-        { hello_t fh; parse_hello(buf, len, &fh); }
+        { hello_t fh; sat_report_t fr;
+          if (parse_hello(buf, len, &fh) && fh.sealed) hello_open(buf, aes128_block, &fz_key, &fr); }
         free(buf);
         fuzzed++;
     }
@@ -1083,35 +1087,137 @@ int main(void) {
     {   // Other ackwave boards: hello frames, the peer list, their poke addresses
         const uint8_t B1[6] = {0x24,0x0a,0xc4,0x11,0x22,0x30}, B2[6] = {0x24,0x0a,0xc4,0x11,0x22,0x40};
         const uint8_t PLUG[6] = {0x50,0x02,0x91,0x0a,0x0b,0x0c};
+        // AES and CCM against independent references (FIPS-197; RFC 3610 #1;
+        // Python's cryptography AESCCM for a hello-shaped message)
+        static const uint8_t FK[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+        aes128_t ak; aes128_init(&ak, FK);
+        uint8_t blk[16], fips_in[16];
+        for (int i = 0; i < 16; i++) fips_in[i] = (uint8_t)(i * 0x11);
+        aes128_block(&ak, fips_in, blk);
+        static const uint8_t FIPS[16] = {0x69,0xc4,0xe0,0xd8,0x6a,0x7b,0x04,0x30,0xd8,0xcd,0xb7,0x80,0x70,0xb4,0xc5,0x5a};
+        CHECK(memcmp(blk, FIPS, 16) == 0);
+        {
+            uint8_t k[16], n[13] = {0,0,0,3,2,1,0,0xa0,0xa1,0xa2,0xa3,0xa4,0xa5}, ad[8], m[23], out[31], back[23];
+            for (int i = 0; i < 16; i++) k[i] = (uint8_t)(0xc0 + i);
+            for (int i = 0; i < 8; i++) ad[i] = (uint8_t)i;
+            for (int i = 0; i < 23; i++) m[i] = (uint8_t)(8 + i);
+            static const uint8_t RFC1[31] = {0x58,0x8c,0x97,0x9a,0x61,0xc6,0x63,0xd2,0xf0,0x66,0xd0,0xc2,0xc0,0xf9,
+                0x89,0x80,0x6d,0x5f,0x6b,0x61,0xda,0xc3,0x84,0x17,0xe8,0xd1,0x2c,0xfd,0xf9,0x26,0xe0};
+            aes128_t rk; aes128_init(&rk, k);
+            ccm_seal(aes128_block, &rk, n, ad, 8, m, 23, out);
+            CHECK(memcmp(out, RFC1, 31) == 0);
+            CHECK(ccm_open(aes128_block, &rk, n, ad, 8, out, 23, back) && memcmp(back, m, 23) == 0);
+            out[30] ^= 1; CHECK(!ccm_open(aes128_block, &rk, n, ad, 8, out, 23, back)); out[30] ^= 1;
+            out[3] ^= 1;  CHECK(!ccm_open(aes128_block, &rk, n, ad, 8, out, 23, back) && back[0] == 0); out[3] ^= 1;
+            ad[2] ^= 1;   CHECK(!ccm_open(aes128_block, &rk, n, ad, 8, out, 23, back)); ad[2] ^= 1;
+            uint8_t n2[13], ad2[29], m2[10], o2[18];
+            for (int i = 0; i < 13; i++) n2[i] = (uint8_t)(0x10 + i);
+            for (int i = 0; i < 29; i++) ad2[i] = (uint8_t)(0x40 + i);
+            for (int i = 0; i < 10; i++) m2[i] = (uint8_t)(0x60 + i);
+            static const uint8_t PY[18] = {0x1c,0x80,0x12,0x22,0xdc,0x39,0x88,0xb3,0xd3,0x30,0x7c,0x4c,0x26,0x0d,
+                0xba,0xf0,0xde,0x4d};
+            ccm_seal(aes128_block, &ak, n2, ad2, 29, m2, 10, o2);
+            CHECK(memcmp(o2, PY, 18) == 0);
+            uint8_t m3[40], o3[48];
+            for (int i = 0; i < 40; i++) m3[i] = (uint8_t)i;
+            static const uint8_t PY3[48] = {0x7c,0xe0,0x72,0x42,0xbc,0x59,0xe8,0xd3,0xb3,0x50,0x42,0x9a,0x23,0x0a,
+                0x62,0x8e,0x3a,0xc2,0x47,0x6a,0x6b,0x82,0x88,0x3d,0x25,0x54,0x00,0xc8,0x92,0xa5,0x9b,0x5c,0x25,
+                0x5b,0xbd,0xfd,0x05,0xb5,0x82,0xbd,0xd4,0x82,0x49,0x25,0x49,0xb2,0xfb,0xc1};
+            ccm_seal(aes128_block, &ak, n2, NULL, 0, m3, 40, o3);
+            CHECK(memcmp(o3, PY3, 48) == 0);                  // no associated data, 3 blocks
+        }
+
         uint8_t h[HELLO_LEN];
         hello_t hl;
-        sat_report_t rp = { .seq = 0x1234, .flags = REP_MOTION | REP_CALIBRATED, .k_short = 77,
-                            .k_long = 255, .acks = 96, .rssi = -57, .n_dev = 3, .up_s = 0x01020304 };
-        build_hello(h, B1, AP1, 6, &rp);
+        sat_report_t rp = { .seq = 0x123456, .flags = REP_MOTION | REP_CALIBRATED, .k_short = 77,
+                            .k_long = 255, .acks = 96, .rssi = -57, .n_dev = 3, .up_s = 0x01020304 }, got;
+        CHECK(build_hello(h, B1, AP1, 6, &rp, 42, aes128_block, &ak) == HELLO_LEN);
         uint8_t *hp = malloc(HELLO_LEN);                     // exact size: ASan catches over-reads
         memcpy(hp, h, HELLO_LEN);
         CHECK(parse_hello(hp, HELLO_LEN, &hl) && memcmp(hl.mac, B1, 6) == 0 &&
-              memcmp(hl.bssid, AP1, 6) == 0 && hl.ch == 6 && hl.has_report);
-        CHECK(hl.rep.seq == 0x1234 && hl.rep.flags == (REP_MOTION | REP_CALIBRATED) &&
-              hl.rep.k_short == 77 && hl.rep.k_long == 255 && hl.rep.acks == 96 &&
-              hl.rep.rssi == -57 && hl.rep.n_dev == 3 && hl.rep.up_s == 0x01020304);
+              memcmp(hl.bssid, AP1, 6) == 0 && hl.ch == 6 && hl.sealed && hl.boot == 42 && hl.seq == 0x123456);
+        CHECK(hello_open(hp, aes128_block, &ak, &got));
+        CHECK(got.seq == 0x123456 && got.flags == (REP_MOTION | REP_CALIBRATED) &&
+              got.k_short == 77 && got.k_long == 255 && got.acks == 96 &&
+              got.rssi == -57 && got.n_dev == 3 && got.up_s == 0x01020304);
         CHECK(!parse_hello(hp, 39, &hl));                    // short
-        CHECK(parse_hello(hp, 51, &hl) && !hl.has_report);   // cut report: peer only
+        CHECK(parse_hello(hp, HELLO_LEN - 1, &hl) && !hl.sealed);   // cut: a peer, no report
         free(hp);
-        h[32] = 1;                                           // a version 1 board (no report)
-        CHECK(parse_hello(h, HELLO_V1_LEN, &hl) && !hl.has_report && hl.ch == 6);
-        CHECK(parse_hello(h, HELLO_LEN, &hl) && !hl.has_report);
-        h[32] = HELLO_VERSION;
+        {   // nothing readable, nothing changeable
+            static const uint8_t OTHER[16] = {9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9};
+            aes128_t bk; aes128_init(&bk, OTHER);
+            CHECK(!hello_open(h, aes128_block, &bk, &got));             // another key
+            bool leak = false;                                           // the plain bytes aren't on air
+            for (int i = 47; i < 57; i++) leak |= h[i] == 77 && h[i + 1] == 255;
+            CHECK(!leak);
+            const int at[] = {10, 15, 24, 33, 34, 40, 44, 46, 47, 56, 57, 64};   // sender, magic, channel,
+            for (unsigned i = 0; i < sizeof at / sizeof at[0]; i++) {           // router, boot, seq, report, tag
+                h[at[i]] ^= 0x04;
+                CHECK(!hello_open(h, aes128_block, &ak, &got));
+                h[at[i]] ^= 0x04;
+            }
+            CHECK(hello_open(h, aes128_block, &ak, &got));
+        }
+        CHECK(build_hello(h, B1, AP1, 6, &rp, 42, NULL, NULL) == HELLO_V1_LEN);   // no key: no report
+        CHECK(parse_hello(h, HELLO_V1_LEN, &hl) && !hl.sealed && hl.version == 1 && hl.ch == 6);
+        h[32] = 2;                                           // version 2 (report in the clear): not used
+        CHECK(parse_hello(h, HELLO_LEN, &hl) && !hl.sealed);
+        h[32] = 1;
         CHECK(!parse_hello(NULL, HELLO_LEN, &hl));
         h[28] ^= 1; CHECK(!parse_hello(h, HELLO_LEN, &hl)); h[28] ^= 1;   // not ours
         h[0] = 0x80; CHECK(!parse_hello(h, HELLO_LEN, &hl)); h[0] = 0xD0; // a beacon
         h[10] |= 1; CHECK(!parse_hello(h, HELLO_LEN, &hl)); h[10] &= 0xFE; // group sender
-        build_hello(h, B1, NULL, 3, &rp);                    // no router found yet: zeros
+        build_hello(h, B1, NULL, 3, NULL, 0, NULL, NULL);    // no router found yet: zeros
         CHECK(parse_hello(h, HELLO_LEN, &hl) && hl.ch == 3 && hl.bssid[0] == 0 && hl.bssid[5] == 0);
         beacon_info_t hb; parse_beacon(h, HELLO_LEN, "MyNetwork", &hb);
         CHECK(!hb.ssid_match);                               // never mistaken for our router
         CHECK(rep_k(0.5f, 1.0f) == 25 && rep_k(1.0f, 1.0f) == 50 && rep_k(9.0f, 1.0f) == 255);
         CHECK(rep_k(1.0f, 0.0f) == 0 && rep_k(-1.0f, 1.0f) == 0 && rep_k(0.0f / 0.0f, 1.0f) == 0);
+
+        // Replays: only newer (boot, seq) passes; a new boot is always newer
+        CHECK(replay_newer(5, 1, 4, 999) && replay_newer(5, 11, 5, 10));
+        CHECK(!replay_newer(5, 10, 5, 10) && !replay_newer(5, 9, 5, 10) && !replay_newer(4, 999, 5, 1));
+        CHECK(replay_newer(1, 1, 0, 0));                     // the first report from a new key
+
+        // KEY and PEERKEY from the PC
+        uint8_t kk[16], km[6];
+        CHECK(parse_key("KEY", kk) == KEY_QUERY && parse_key("KEY\r\n", kk) == KEY_QUERY);
+        CHECK(parse_key("KEY,clear", kk) == KEY_CLEAR);
+        CHECK(parse_key("KEY,000102030405060708090a0b0c0d0E0F", kk) == KEY_SET && kk[0] == 0 && kk[15] == 15);
+        CHECK(parse_key("KEY,00000000000000000000000000000000", kk) == KEY_BAD);   // all zero
+        CHECK(parse_key("KEY,000102030405060708090a0b0c0d0e", kk) == KEY_BAD);     // short
+        CHECK(parse_key("KEY,000102030405060708090a0b0c0d0e0f00", kk) == KEY_BAD); // long
+        CHECK(parse_key("KEY,0g0102030405060708090a0b0c0d0e0f", kk) == KEY_BAD);
+        CHECK(parse_key("KEYS", kk) == KEY_BAD && parse_key("KEY,", kk) == KEY_BAD);
+        CHECK(parse_peerkey("PEERKEY", km, kk) == PK_QUERY && parse_peerkey("PEERKEY,clear", km, kk) == PK_CLEAR_ALL);
+        char pl_[96], b1s[18], gs[18];                         // addresses built here: no MAC literals in git
+        snprintf(b1s, sizeof b1s, "%02x:%02x:%02x:%02x:%02x:%02x", B1[0], B1[1], B1[2], B1[3], B1[4], B1[5]);
+        snprintf(gs, sizeof gs, "%02x%s", B1[0] | 1, b1s + 2);           // a group address
+#define PK(fmt, ...) (snprintf(pl_, sizeof pl_, fmt, __VA_ARGS__), parse_peerkey(pl_, km, kk))
+        CHECK(PK("PEERKEY,%s,%s", b1s, "000102030405060708090a0b0c0d0e0f") == PK_SET &&
+              memcmp(km, B1, 6) == 0 && kk[1] == 1);
+        CHECK(PK("PEERKEY,%s,clear", b1s) == PK_CLEAR_ONE);
+        CHECK(PK("PEERKEY,%s,%s", gs, "000102030405060708090a0b0c0d0e0f") == PK_BAD);        // group
+        CHECK(PK("PEERKEY,%.14s,%s", b1s, "000102030405060708090a0b0c0d0e0f") == PK_BAD);    // cut
+        CHECK(PK("PEERKEY,%s", b1s) == PK_BAD);
+        CHECK(PK("PEERKEY,%s,00", b1s) == PK_BAD);
+#undef PK
+        CHECK(parse_peerkey("PEERKEYX", km, kk) == PK_BAD && parse_key("PEERKEY", kk) == KEY_BAD);
+        {
+            peer_keys_t pkt; memset(&pkt, 0, sizeof pkt);
+            uint8_t key1[16] = {1}, key2[16] = {2};
+            int i1 = peer_key_set(&pkt, B1, key1);
+            pkt.k[i1].boot = 7; pkt.k[i1].seq = 99;
+            CHECK(i1 >= 0 && peer_key_find(&pkt, B1) == i1);
+            CHECK(peer_key_set(&pkt, B1, key1) == i1 && pkt.k[i1].seq == 99);   // same key: counters kept
+            CHECK(peer_key_set(&pkt, B1, key2) == i1 && pkt.k[i1].seq == 0 && pkt.k[i1].key[0] == 2);
+            for (int j = 1; j < MAX_PEERS; j++) {
+                uint8_t m[6]; memcpy(m, B2, 6); m[5] = (uint8_t)j;
+                CHECK(peer_key_set(&pkt, m, key1) >= 0);
+            }
+            uint8_t m9[6]; memcpy(m9, B2, 6); m9[5] = 0x99;
+            CHECK(peer_key_set(&pkt, m9, key1) == -1 && peer_key_find(&pkt, m9) == -1);   // 8 at most
+        }
 
         peer_list_t pl; memset(&pl, 0, sizeof pl);
         int k = peer_note(&pl, B1, AP1, 6, -50, 1000);

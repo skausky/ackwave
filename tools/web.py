@@ -36,6 +36,7 @@ from activity import LABELS, Activities, label_info
 from analyze import MAX_APS, MotionDetector, open_port, parse_line
 from breathing import Breathing
 from timeline import Timeline
+from keys import SECRET_RE, Pairing, new_secret, redact
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
@@ -223,7 +224,7 @@ class Dashboard:
         self.lock = threading.Lock()
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
-        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, board_names={}, act_place=0)   # sound, sens: kept on the board; None = its own
+        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, board_names={}, act_place=0, hub=None)   # sound, sens: kept on the board; None = its own
         # Device links that drive the alerts (light, buzzer, LED) besides the board:
         # src -> True once that link's slow window confirmed its current motion
         self.confirmed = {}
@@ -266,6 +267,13 @@ class Dashboard:
                 self.cfg['sens'] = state.sens_want
         except (ValueError, TypeError):
             pass
+        # Keys for the boards' sealed reports (keys.py): one secret, kept like the light URLs
+        sec = got.get('board_secret')
+        self.board_secret = sec if isinstance(sec, str) and SECRET_RE.fullmatch(sec) else None
+        self.pair = Pairing(self.board_secret)
+        hub = got.get('hub')
+        if isinstance(hub, str) and MAC_RE.fullmatch(hub):
+            self.cfg['hub'] = hub.lower()
         # Light on motion: web hooks called when motion starts / the room goes still
         self.light = Light(got.get('light') if isinstance(got.get('light'), dict) else None,
                            call=light_call, run=light_run)
@@ -383,6 +391,25 @@ class Dashboard:
         self.sats[d['mac']] = d
         self._period('sat:' + d['mac'], d['motion'] and d['calibrated'], now, self.board_label(d['mac']))
 
+    def _hub_boards(self):
+        """The other boards the hub should hold keys for: those it hears on our router."""
+        return [m for m, dv in self.s.devices.devs.items() if dv.board and dv.same]
+
+    def _pair_cmds(self):
+        """Hand the connected board its key and, if it is the hub, its boards' keys."""
+        if not self.send or not self.pair.me or not self.settings_path:
+            return
+        changed = False
+        if not self.board_secret:
+            self.board_secret = self.pair.secret = new_secret()
+            changed = True
+        if not self.cfg['hub']:                      # the first board ever connected is the hub
+            self.cfg['hub'] = self.pair.me
+            changed = True
+        if changed:
+            self._save_settings()
+        self.s.outbox += self.pair.commands(self.pair.me == self.cfg['hub'], self._hub_boards(), time.time())
+
     def _sats_gone(self):
         """A board that went quiet: its open motion period ends when it was last heard."""
         now = time.time()
@@ -391,9 +418,15 @@ class Dashboard:
                 self._period('sat:' + mac, False, d['at'])
 
     def _boards(self):
-        """The other boards, as the hub hears them (their hellos)."""
+        """The other boards, as the hub hears them (their hellos). A board heard
+        but sending no report yet still needs its key: plug it in here once."""
         now = time.time()
         out = []
+        for mac in sorted(set(self._hub_boards()) - set(self.sats)):
+            dv = self.s.devices.devs[mac]
+            out.append(dict(mac=mac, name=self.board_label(mac), nick=self.cfg['board_names'].get(mac, ''),
+                            state='unpaired', level=0, weak=False, acks=0, router_rssi=0, links=0, up_s=0,
+                            heard_s=round(now - dv.last_heard, 1), rssi=dv.rssi, since=None))
         for mac, d in sorted(self.sats.items()):
             gone = now - d['at'] > SAT_GONE_S
             out.append(dict(mac=mac, name=self.board_label(mac), nick=self.cfg['board_names'].get(mac, ''),
@@ -543,6 +576,8 @@ class Dashboard:
         with self.lock:
             if line.startswith('SAT,'):
                 self._sat(line)
+            if self.pair.feed(line) or line.startswith('ME,'):
+                self._pair_cmds()
             self.s.feed(line)
             self.version += 1
             self._board_period()
@@ -636,10 +671,10 @@ class Dashboard:
             try:
                 self.send(cmd)
             except Exception as e:
-                print(f"command not sent ({cmd[:40]!r}): {e}", file=sys.stderr)
-                self.refused.append((self._now(), f'not sent: {e}'[:120], cmd))
+                print(f"command not sent ({redact(cmd)[:40]!r}): {e}", file=sys.stderr)
+                self.refused.append((self._now(), f'not sent: {e}'[:120], redact(cmd)))
                 continue
-            self.sent_cmds.append((self._now(), cmd))
+            self.sent_cmds.append((self._now(), redact(cmd)))
 
     # ---------- commands from the page ----------
     def command(self, c):
@@ -919,7 +954,7 @@ class Dashboard:
                 fd = os.open(self.settings_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 os.fchmod(fd, 0o600)                 # an older file may have been readable
                 with os.fdopen(fd, 'w') as f:
-                    json.dump(dict(self.cfg, light=self.light.config()), f)
+                    json.dump(dict(self.cfg, light=self.light.config(), board_secret=self.board_secret), f)
             except OSError:
                 pass
 
@@ -963,6 +998,7 @@ class Dashboard:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        routers=self._routers(), boards=self._boards(), tz=PC_TZ,
+                       pairing=self.pair.status(self.pair.me == self.cfg['hub'], self._hub_boards()),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
                        thresholds=self._thresholds(), today=self._today_totals(),
                        radio=self._radio(), channel=s.channel[0] if s.channel else None,

@@ -489,6 +489,7 @@ body.simple .nav a[data-adv] { display: none; }
 .board-tile.motion { --c: var(--motion); border-color: rgba(255,90,79,.45); }
 .board-tile.calibrating { --c: var(--cal); }
 .board-tile.gone { --c: var(--scan); opacity: .6; }
+.board-tile.unpaired { --c: var(--brief); }
 .board-tile .name { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .board-tile .name > span { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .board-tile .name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

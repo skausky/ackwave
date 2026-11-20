@@ -15,6 +15,9 @@
 #include "driver/rmt_tx.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
+#include "mbedtls/aes.h"
+#include "mbedtls/sha256.h"
+#include "freertos/semphr.h"
 #include "csi_core.h"
 
 // The network to watch is chosen at run time (`./csi network`: SCAN, then
@@ -109,9 +112,81 @@ static poke_gate_t gate;          // which APs / devices are worth poking
 static seen_list_t seen;          // devices heard on our network
 static peer_list_t peers;         // other ackwave boards heard (under seen_mux too)
 static sat_report_t my_rep;       // what our hellos say (under seen_mux; print_task fills it)
-static volatile uint32_t hello_soon;   // our verdict changed: say it now
-typedef struct { uint8_t mac[6]; int8_t rssi; sat_report_t rep; } sat_rx_t;
-static QueueHandle_t sat_q;       // other boards' reports, printed by the control task
+typedef struct { uint8_t f[HELLO_LEN]; int8_t rssi; } sat_rx_t;
+static QueueHandle_t sat_q;       // other boards' sealed hellos: opened and printed by the control task
+
+// Keys (from the PC over USB, saved): our own seals our reports; the hub
+// also holds its boards' keys (PEERKEY) to open theirs. key_lock guards them;
+// AES runs only in tasks (poke and control), never in the Wi-Fi callback.
+static mbedtls_aes_context key_ctx, peer_ctx[MAX_PEERS];
+static bool have_key;
+static uint8_t key_fp[4];          // fingerprint the PC compares with its own
+static peer_keys_t pkeys;          // under key_lock
+static SemaphoreHandle_t key_lock;
+static uint32_t boot_id;           // boot counter (saved, +1 per start): with seq, the nonce
+static void nvs_put(const char *key, const void *v, size_t n);
+static bool nvs_take(const char *key, void *v, size_t n);
+#define MACF "%02x:%02x:%02x:%02x:%02x:%02x"
+#define MACA(m) (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]
+
+static void aes_block(void *ctx, const uint8_t in[16], uint8_t out[16]) {
+    mbedtls_aes_crypt_ecb(ctx, MBEDTLS_AES_ENCRYPT, in, out);
+}
+
+// Fingerprint = first 4 bytes of SHA-256("ackwave-key" + key): says which key
+// without giving it away. tools/web.py computes the same.
+static void key_fingerprint(const uint8_t *k, uint8_t fp[4]) {
+    uint8_t h[32], buf[11 + 16];
+    memcpy(buf, "ackwave-key", 11);
+    memcpy(buf + 11, k, 16);
+    mbedtls_sha256(buf, sizeof buf, h, 0);
+    memcpy(fp, h, 4);
+    memset(buf, 0, sizeof buf);
+}
+
+static void key_apply(const uint8_t *k) {
+    xSemaphoreTake(key_lock, portMAX_DELAY);
+    have_key = k != NULL;
+    if (k) {
+        mbedtls_aes_setkey_enc(&key_ctx, k, 128);
+        key_fingerprint(k, key_fp);
+    }
+    xSemaphoreGive(key_lock);
+}
+
+// The boards' keys and their newest boots are saved together ("pkeys"), so
+// after a restart the hub still refuses recordings of an earlier boot.
+// Written when a key changes or a board restarts, never per report.
+static void pkeys_save(void) {             // with key_lock held
+    static peer_keys_t t;
+    t = pkeys;
+    for (int i = 0; i < MAX_PEERS; i++) t.k[i].seq = 0;
+    nvs_put("pkeys", &t, sizeof t);
+    memset(&t, 0, sizeof t);
+}
+
+static void pkeys_load(void) {
+    if (!nvs_take("pkeys", &pkeys, sizeof pkeys)) memset(&pkeys, 0, sizeof pkeys);
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (pkeys.k[i].used) mbedtls_aes_setkey_enc(&peer_ctx[i], pkeys.k[i].key, 128);
+}
+
+// PEERKEY,<mac>,<fingerprint> per board key held (none: no line)
+static void print_peerkeys(void) {
+    xSemaphoreTake(key_lock, portMAX_DELAY);
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (pkeys.k[i].used) {
+            uint8_t fp[4];
+            key_fingerprint(pkeys.k[i].key, fp);
+            printf("PEERKEY," MACF ",%02x%02x%02x%02x\n", MACA(pkeys.k[i].mac), fp[0], fp[1], fp[2], fp[3]);
+        }
+    xSemaphoreGive(key_lock);
+}
+
+static void print_key(void) {
+    if (have_key) printf("KEY,%02x%02x%02x%02x\n", key_fp[0], key_fp[1], key_fp[2], key_fp[3]);
+    else printf("KEY,none\n");
+}
 static portMUX_TYPE seen_mux = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t q;
 static uint8_t my_mac[6];
@@ -213,7 +288,8 @@ static void print_aps(void) {
 }
 
 static volatile uint32_t n_poke, n_tx_err, n_ack, n_ap, n_drop, n_qfull, n_reply;
-static volatile uint32_t n_lost;                 // CSI lines not sent: USB buffer full (print_task only)
+static volatile uint32_t n_lost;
+static uint32_t n_badseal, n_replay;             // reports that didn't open (wrong key, forged) / not newer                 // CSI lines not sent: USB buffer full (print_task only)
 
 static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static inline uint32_t now_us(void) { return (uint32_t)esp_timer_get_time(); }
@@ -592,9 +668,9 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         peer_note(&peers, pmac, hl.bssid, pkt->rx_ctrl.channel, rssi, now_ms());
         if (fresh) seen_forget_peer(&seen, pmac);
         taskEXIT_CRITICAL(&seen_mux);
-        if (hl.has_report && sat_q) {
-            sat_rx_t r = { .rssi = (int8_t)rssi, .rep = hl.rep };
-            memcpy(r.mac, pmac, 6);
+        if (hl.sealed && sat_q) {
+            sat_rx_t r = { .rssi = (int8_t)rssi };
+            memcpy(r.f, pkt->payload, HELLO_LEN);
             xQueueSend(sat_q, &r, 0);              // full: this one is skipped, the next comes in 1 s
         }
         int dn = node_find(&nodes, pmac);          // poked like a device: its signal and channel
@@ -679,7 +755,7 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
 static void poke_task(void *arg) {
     uint8_t frame[NULL_FRAME_LEN], hello[HELLO_LEN];
     int rr[2] = {0, 0}, slot = 0;
-    uint32_t next_hello = 0, last_hello = 0;
+    uint32_t next_hello = 0;
     TickType_t wake = xTaskGetTickCount();
     TickType_t period = pdMS_TO_TICKS(500 / POKE_HZ);
     if (period == 0) period = 1;
@@ -691,19 +767,21 @@ static void poke_task(void *arg) {
         // Once a second a device slot says hello to the other boards
         // (only once our router is found, so the channel is the right one)
         uint32_t tn = now_ms();
-        if (devs && node_count(&nodes) > 0 && (deadline_passed(tn, next_hello) ||
-            (hello_soon && older_than(tn, last_hello, HELLO_SOON_MS)))) {
-            next_hello = tn + HELLO_EVERY_MS;
-            last_hello = tn;
-            hello_soon = 0;
+        if (devs && node_count(&nodes) > 0 && deadline_passed(tn, next_hello)) {
+            next_hello = tn + HELLO_EVERY_MS;           // fixed: a change never sends sooner
             sat_report_t r;
             taskENTER_CRITICAL(&seen_mux);
-            my_rep.seq++;
+            bool wrap = ++my_rep.seq > HELLO_SEQ_MAX;
+            if (wrap) my_rep.seq = 1;
             my_rep.up_s = (uint32_t)(esp_timer_get_time() / 1000000);
             r = my_rep;
             taskEXIT_CRITICAL(&seen_mux);
-            build_hello(hello, my_mac, nodes.mac[0], cur_ch, &r);
-            esp_wifi_80211_tx(WIFI_IF_STA, hello, sizeof hello, true);
+            if (wrap) { boot_id++; nvs_put("boot", &boot_id, sizeof boot_id); }   // ~97 days at 2/s
+            xSemaphoreTake(key_lock, portMAX_DELAY);
+            int hn = build_hello(hello, my_mac, nodes.mac[0], cur_ch, &r, boot_id,
+                                 have_key ? aes_block : NULL, &key_ctx);
+            xSemaphoreGive(key_lock);
+            esp_wifi_80211_tx(WIFI_IF_STA, hello, hn, true);
             continue;
         }
         int target = next_poke_target(&nodes, node_ch, cur_ch, &rr[devs], &gate, devs);
@@ -761,9 +839,6 @@ static bool seen_has(const uint8_t *mac) {
     taskEXIT_CRITICAL(&seen_mux);
     return found;
 }
-
-#define MACF "%02x:%02x:%02x:%02x:%02x:%02x"
-#define MACA(m) (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]
 
 static bool peer_has(const uint8_t *mac) {
     taskENTER_CRITICAL(&seen_mux);
@@ -835,7 +910,8 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
-    int snd, smode, svol, shz, sens, sx, na, ledc, ext;
+    int snd, smode, svol, shz, sens, sx, na, ledc, ext, kc, pk;
+    uint8_t newkey[16], pmac[6];
     ap_list_t new_aps;
     led_cfg_t new_led;
     if (glide_ms > 0) {
@@ -869,6 +945,43 @@ static void run_cmd(const char *line) {
             buzzer_stop();               // cut whatever is playing
         }
         print_sound();
+    } else if ((kc = parse_key(line, newkey)) != KEY_BAD) {
+        if (kc == KEY_SET) {
+            uint8_t back[16];
+            nvs_put("key", newkey, 16);
+            if (nvs_take("key", back, sizeof back) && memcmp(back, newkey, 16) == 0) key_apply(newkey);
+            else printf("KEY,error,not-saved\n");
+            memset(back, 0, sizeof back);
+        } else if (kc == KEY_CLEAR) {
+            nvs_put("key", NULL, 0);
+            key_apply(NULL);
+        }
+        memset(newkey, 0, sizeof newkey);
+        print_key();
+    } else if ((pk = parse_peerkey(line, pmac, newkey)) != PK_BAD) {
+        xSemaphoreTake(key_lock, portMAX_DELAY);
+        int i = peer_key_find(&pkeys, pmac);
+        bool changed = false, full = false;
+        if (pk == PK_SET) {
+            bool same = i >= 0 && memcmp(pkeys.k[i].key, newkey, 16) == 0;
+            i = peer_key_set(&pkeys, pmac, newkey);
+            full = i < 0;
+            if (!full && !same) {
+                mbedtls_aes_setkey_enc(&peer_ctx[i], newkey, 128);
+                changed = true;
+            }
+        } else if (pk == PK_CLEAR_ONE && i >= 0) {
+            memset(&pkeys.k[i], 0, sizeof pkeys.k[i]);
+            changed = true;
+        } else if (pk == PK_CLEAR_ALL) {
+            memset(&pkeys, 0, sizeof pkeys);
+            changed = true;
+        }
+        if (changed) pkeys_save();
+        xSemaphoreGive(key_lock);
+        memset(newkey, 0, sizeof newkey);
+        printf("PEERKEYS,%s\n", full ? "full" : changed ? "saved" : "unchanged");
+        print_peerkeys();
     } else if ((ext = parse_ext(line)) >= 0) {
         ext_until_ms = ext ? (clock_ms() + EXT_HOLD_MS) | 1 : 0;   // print_task reports changes
     } else if ((ledc = parse_led(line, &new_led)) != LED_BAD) {
@@ -1080,11 +1193,29 @@ static void control_task(void *arg) {
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
         poll_cmds();
         // SAT,<mac>,<rssi>,<seq>,<flags>,<k_short>,<k_long>,<acks>,<router rssi>,<links>,<up_s>
+        // Only reports sealed with our key, and never one heard before
         sat_rx_t sr;
-        while (sat_q && xQueueReceive(sat_q, &sr, 0) == pdTRUE)
-            printf("SAT," MACF ",%d,%u,%u,%u,%u,%u,%d,%u,%" PRIu32 "\n", MACA(sr.mac), sr.rssi,
-                   sr.rep.seq, sr.rep.flags, sr.rep.k_short, sr.rep.k_long, sr.rep.acks,
-                   sr.rep.rssi, sr.rep.n_dev, sr.rep.up_s);
+        while (sat_q && xQueueReceive(sat_q, &sr, 0) == pdTRUE) {
+            hello_t hh;
+            sat_report_t rp;
+            if (!parse_hello(sr.f, HELLO_LEN, &hh)) continue;
+            xSemaphoreTake(key_lock, portMAX_DELAY);
+            int ki = peer_key_find(&pkeys, hh.mac);       // not one of ours: not read
+            bool ok = ki >= 0 && hello_open(sr.f, aes_block, &peer_ctx[ki], &rp);
+            bool fresh = ok && replay_newer(hh.boot, hh.seq, pkeys.k[ki].boot, pkeys.k[ki].seq);
+            if (fresh) {
+                bool rebooted = hh.boot != pkeys.k[ki].boot;
+                pkeys.k[ki].boot = hh.boot;
+                pkeys.k[ki].seq = hh.seq;
+                if (rebooted) pkeys_save();
+            }
+            xSemaphoreGive(key_lock);
+            if (ki >= 0 && !ok) n_badseal++;
+            if (ok && !fresh) n_replay++;
+            if (!fresh) continue;
+            printf("SAT," MACF ",%d,%" PRIu32 ",%u,%u,%u,%u,%d,%u,%" PRIu32 "\n", MACA(hh.mac), sr.rssi,
+                   rp.seq, rp.flags, rp.k_short, rp.k_long, rp.acks, rp.rssi, rp.n_dev, rp.up_s);
+        }
         led_update(!my_ssid[0] && !aps.n); // no network chosen yet: yellow
 
         for (int n = node_count(&nodes); printed < n; printed++) {
@@ -1129,6 +1260,10 @@ static void control_task(void *arg) {
 #endif
             print_devices();
             print_peers();
+            print_peerkeys();                // then KEY, which closes the list for the PC
+            print_key();
+            if (n_badseal || n_replay)
+                printf("SEAL,%" PRIu32 ",%" PRIu32 "\n", n_badseal, n_replay);
             print_network();
             print_aps();
             print_led();
@@ -1281,7 +1416,6 @@ static void print_task(void *arg) {
             md_max_scores(&det, p.ts, &ms, &ml);
             printf("STATE,%" PRId64 ",%s,%d,%d\n", p.ts, change > 0 ? "motion" : "still",
                    (int)(ms * 1000), (int)(ml * 1000));
-            hello_soon = 1;                  // the other boards hear it at once
             beep_at = change > 0 ? p.ts + (int64_t)BEEP_AFTER_MS * 1000 : -1;
             if (change < 0 && beeped && snd_mode != SND_OFF) {
                 tune_t t = tune_motion(false);
@@ -1358,6 +1492,17 @@ void app_main(void) {
     int16_t ss;
     if (nvs_take("sens", &ss, sizeof ss) && ss >= SENS_MIN && ss <= SENS_MAX) saved_sens = ss;
 
+    key_lock = xSemaphoreCreateMutex();
+    configASSERT(key_lock);
+    mbedtls_aes_init(&key_ctx);
+    for (int i = 0; i < MAX_PEERS; i++) mbedtls_aes_init(&peer_ctx[i]);
+    if (!nvs_take("boot", &boot_id, sizeof boot_id)) boot_id = 0;
+    boot_id++;                               // every start: a new nonce space, newer than any recording
+    nvs_put("boot", &boot_id, sizeof boot_id);
+    pkeys_load();
+    uint8_t k[16];
+    if (nvs_take("key", k, sizeof k)) key_apply(k);
+    memset(k, 0, sizeof k);
     gate_init(&gate);
     gate.keep_far = aps.n > 0;             // chosen one by one: never skipped as "far"
     devs_load();                           // the devices it poked before (saved)

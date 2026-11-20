@@ -7,6 +7,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <math.h>
+#include "seal.h"
 
 #define CSI_MAX_LEN 384
 #define MAX_APS     8                     // APs learned from beacons: nodes 0..7
@@ -493,6 +494,14 @@ static inline int parse_sound(const char *line, int *mode, int *vol, int *hz) {
 
 // SENS, SENS,default or SENS,<on_long x 100>: returns SENS_QUERY, SENS_DEFAULT
 // or SENS_SET (with *x100 = 110-300), or SENS_BAD
+// KEY: report whether the board has its key (KEY,none or KEY,<fingerprint>)
+// KEY,<32 hex>: set it (saved); KEY,clear: forget it (the board then sends no
+// reports). Parsed with PEERKEY below.
+enum { KEY_BAD = -1, KEY_QUERY = 0, KEY_SET, KEY_CLEAR };
+static inline int hexval(char c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10
+         : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
 enum { SENS_BAD = -1, SENS_QUERY = 0, SENS_SET, SENS_DEFAULT };
 #define SENS_MIN 110
 #define SENS_MAX 300
@@ -704,21 +713,26 @@ static inline int poke_ta_node(const uint8_t me[6], const uint8_t *dmac) {
 // anything, so two boards give a link across the rooms between them.
 // The hello carries no network name, but it is not encrypted: anyone nearby
 // with a sniffer could read whether a board sees motion.
-#define HELLO_LEN    54
-#define HELLO_V1_LEN 40         // version 1: no report
-#define HELLO_EVERY_MS 1000
-#define HELLO_SOON_MS  100      // a verdict change goes out this soon (not sooner)
-#define MAX_PEERS    8
+#define HELLO_LEN    65         // with a sealed report (version 3)
+#define HELLO_V1_LEN 40         // no report: version 1, or a board without the key
+#define HELLO_EVERY_MS 500      // a fixed rate, motion or not: the timing says nothing
+#define MAX_PEERS    8          // boards one board lists, and keys a hub holds
 #define PEER_GONE_MS 10000      // not heard this long: forgotten
 static const uint8_t HELLO_MAGIC[8] = { 127, 0x02, 0xAC, 0x57, 'A', 'C', 'K', 'W' };  // vendor action, made-up local OUI
-#define HELLO_VERSION 2
+#define HELLO_VERSION 3
+#define HELLO_SEQ_MAX 0xFFFFFFu // 24 bits; then the boot counter goes up, so a nonce is never reused
+#define REPORT_LEN   10         // sealed: flags, k_short, k_long, acks, rssi, n_dev, up_s
+#define HELLO_AAD_LEN 29        // sender MAC + bytes 24..46 (magic .. seq), checked by the tag
 
-// What a board says about itself in each hello (version 2), so the board on
-// the PC's USB (the hub) shows every board. Scores are relative to the
-// board's own thresholds: 50 = at the threshold, capped at 255.
+// What a board says about itself in each hello, so the board on the PC's
+// USB (the hub) shows every board. Scores are relative to the board's own
+// thresholds: 50 = at the threshold, capped at 255. Sealed with AES-CCM
+// (seal.h) under the board's own key, which the PC derives for it; the hub
+// holds the keys of its boards (PEERKEY). A forged, altered or replayed
+// report is refused. Without a key a board sends no report.
 enum { REP_MOTION = 1, REP_CALIBRATED = 2, REP_WEAK = 4 };
 typedef struct {
-    uint16_t seq;               // +1 per hello: the hub prints each one once
+    uint32_t seq;               // 24 bits, +1 per hello; with the boot counter it is the nonce
     uint8_t  flags;             // REP_*
     uint8_t  k_short, k_long;   // score / threshold x50
     uint8_t  acks;              // router ACKs/s (capped)
@@ -730,8 +744,9 @@ typedef struct {
 typedef struct {
     uint8_t mac[6], bssid[6];
     int ch;
-    bool has_report;            // version 2 or later
-    sat_report_t rep;
+    int version;
+    bool sealed;                // version 3 with a report: hello_open() reads it
+    uint32_t boot, seq;
 } hello_t;
 
 static inline uint8_t rep_k(float score, float threshold) {
@@ -740,28 +755,50 @@ static inline uint8_t rep_k(float score, float threshold) {
     return k >= 255.0f ? 255 : (uint8_t)k;
 }
 
+// Nonce = sender MAC, boot counter, seq (13 bytes): unique per hello for one key
+static inline void hello_nonce(const uint8_t *f, uint8_t n[CCM_NONCE]) {
+    memcpy(n, f + 10, 6);
+    memcpy(n + 6, f + 40, 7);
+}
+static inline void hello_aad(const uint8_t *f, uint8_t a[HELLO_AAD_LEN]) {
+    memcpy(a, f + 10, 6);
+    memcpy(a + 6, f + 24, 23);
+}
+
 // Action frame: addr1 = broadcast, addr2 = me (real MAC), addr3 = broadcast;
-// body = magic, version, channel, the router's BSSID (all zero: none yet), report
-static inline void build_hello(uint8_t out[HELLO_LEN], const uint8_t me[6],
-                               const uint8_t *bssid, int ch, const sat_report_t *r) {
+// body = magic, version, channel, the router's BSSID (all zero: none yet).
+// With a key (enc != NULL) and a report: boot id, seq, the sealed report.
+// Returns the frame's length.
+static inline int build_hello(uint8_t out[HELLO_LEN], const uint8_t me[6], const uint8_t *bssid,
+                              int ch, const sat_report_t *r, uint32_t boot,
+                              aes_block_fn enc, void *key) {
     memset(out, 0, HELLO_LEN);
     out[0] = 0xD0;                                       // management, action
     memset(out + 4, 0xFF, 6);
     memcpy(out + 10, me, 6);
     memset(out + 16, 0xFF, 6);
     memcpy(out + 24, HELLO_MAGIC, sizeof HELLO_MAGIC);
-    out[32] = HELLO_VERSION;
     out[33] = (uint8_t)ch;
     if (bssid) memcpy(out + 34, bssid, 6);
-    uint8_t *b = out + 40;                               // little-endian, no padding
-    b[0] = (uint8_t)r->seq; b[1] = (uint8_t)(r->seq >> 8);
-    b[2] = r->flags; b[3] = r->k_short; b[4] = r->k_long; b[5] = r->acks;
-    b[6] = (uint8_t)r->rssi; b[7] = r->n_dev;
-    for (int i = 0; i < 4; i++) b[8 + i] = (uint8_t)(r->up_s >> (8 * i));
-    out[52] = out[53] = 0;                               // spare
+    if (!r || !enc) {
+        out[32] = 1;
+        return HELLO_V1_LEN;
+    }
+    out[32] = HELLO_VERSION;
+    for (int i = 0; i < 4; i++) out[40 + i] = (uint8_t)(boot >> (8 * i));
+    for (int i = 0; i < 3; i++) out[44 + i] = (uint8_t)(r->seq >> (8 * i));
+    uint8_t m[REPORT_LEN] = { r->flags, r->k_short, r->k_long, r->acks, (uint8_t)r->rssi, r->n_dev,
+                              (uint8_t)r->up_s, (uint8_t)(r->up_s >> 8), (uint8_t)(r->up_s >> 16),
+                              (uint8_t)(r->up_s >> 24) };
+    uint8_t n[CCM_NONCE], a[HELLO_AAD_LEN];
+    hello_nonce(out, n);
+    hello_aad(out, a);
+    ccm_seal(enc, key, n, a, HELLO_AAD_LEN, m, REPORT_LEN, out + 47);
+    return HELLO_LEN;
 }
 
-// f = frame without FCS. True if it is a peer's hello (any version)
+// f = frame without FCS. True if it is a peer's hello (any version). Older
+// versions' reports (version 2 sent them in the clear) are not used.
 static inline bool parse_hello(const uint8_t *f, int len, hello_t *h) {
     if (!f || len < HELLO_V1_LEN || f[0] != 0xD0 ||
         memcmp(f + 24, HELLO_MAGIC, sizeof HELLO_MAGIC) != 0 || f[32] < 1 || (f[10] & 0x01))
@@ -770,15 +807,113 @@ static inline bool parse_hello(const uint8_t *f, int len, hello_t *h) {
     memcpy(h->mac, f + 10, 6);
     memcpy(h->bssid, f + 34, 6);
     h->ch = f[33];
-    if (f[32] >= 2 && len >= 52) {
-        const uint8_t *b = f + 40;
-        h->has_report = true;
-        h->rep.seq = (uint16_t)(b[0] | b[1] << 8);
-        h->rep.flags = b[2]; h->rep.k_short = b[3]; h->rep.k_long = b[4]; h->rep.acks = b[5];
-        h->rep.rssi = (int8_t)b[6]; h->rep.n_dev = b[7];
-        h->rep.up_s = (uint32_t)b[8] | (uint32_t)b[9] << 8 | (uint32_t)b[10] << 16 | (uint32_t)b[11] << 24;
+    h->version = f[32];
+    if (f[32] >= 3 && len >= HELLO_LEN) {
+        h->sealed = true;
+        h->boot = (uint32_t)f[40] | (uint32_t)f[41] << 8 | (uint32_t)f[42] << 16 | (uint32_t)f[43] << 24;
+        h->seq = (uint32_t)f[44] | (uint32_t)f[45] << 8 | (uint32_t)f[46] << 16;
     }
     return true;
+}
+
+// The sealed report of a version 3 hello (f, at least HELLO_LEN bytes).
+// False if the key differs or anything was changed.
+static inline bool hello_open(const uint8_t *f, aes_block_fn enc, void *key, sat_report_t *r) {
+    uint8_t n[CCM_NONCE], a[HELLO_AAD_LEN], m[REPORT_LEN];
+    hello_nonce(f, n);
+    hello_aad(f, a);
+    if (!ccm_open(enc, key, n, a, HELLO_AAD_LEN, f + 47, REPORT_LEN, m)) return false;
+    r->seq = (uint32_t)f[44] | (uint32_t)f[45] << 8 | (uint32_t)f[46] << 16;
+    r->flags = m[0]; r->k_short = m[1]; r->k_long = m[2]; r->acks = m[3];
+    r->rssi = (int8_t)m[4]; r->n_dev = m[5];
+    r->up_s = (uint32_t)m[6] | (uint32_t)m[7] << 8 | (uint32_t)m[8] << 16 | (uint32_t)m[9] << 24;
+    return true;
+}
+
+// Replays: a recorded hello sent again must not count. The boot counter is
+// saved on each board and goes up at every start, so (boot, seq) only ever
+// grows: per board, only a report newer than the last one accepted passes.
+// The hub saves each board's boot (replay_save), so after the hub restarts a
+// recording from an earlier boot is still refused. Called only for reports
+// whose seal opened (the counters are checked by the tag).
+static inline bool replay_newer(uint32_t boot, uint32_t seq, uint32_t last_boot, uint32_t last_seq) {
+    return boot > last_boot || (boot == last_boot && seq > last_seq);
+}
+
+// ---------- Keys (from the PC, over USB) ----------
+//   KEY,<32 hex>           this board's own key (seals its reports)
+//   PEERKEY,<mac>,<32 hex> another board's key (the hub opens its reports); 8 at most
+//   PEERKEY,<mac>,clear    forget one;  PEERKEY,clear  forget all
+typedef struct {
+    uint8_t  mac[6];
+    uint8_t  key[16];
+    uint32_t boot, seq;         // the newest report accepted from it
+    bool     used;
+} peer_key_t;
+typedef struct { peer_key_t k[MAX_PEERS]; } peer_keys_t;
+
+static inline int peer_key_find(const peer_keys_t *t, const uint8_t mac[6]) {
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (t->k[i].used && memcmp(t->k[i].mac, mac, 6) == 0) return i;
+    return -1;
+}
+
+// Adds or replaces a board's key. A new key starts its replay counters over.
+// Returns the slot, or -1 when 8 other boards already have keys.
+static inline int peer_key_set(peer_keys_t *t, const uint8_t mac[6], const uint8_t key[16]) {
+    int i = peer_key_find(t, mac);
+    if (i >= 0 && memcmp(t->k[i].key, key, 16) == 0) return i;
+    for (int j = 0; i < 0 && j < MAX_PEERS; j++)
+        if (!t->k[j].used) i = j;
+    if (i < 0) return -1;
+    memset(&t->k[i], 0, sizeof t->k[i]);
+    memcpy(t->k[i].mac, mac, 6);
+    memcpy(t->k[i].key, key, 16);
+    t->k[i].used = true;
+    return i;
+}
+
+// A MAC at p, anything may follow it
+static inline bool parse_mac_at(const char *p, uint8_t mac[6]) {
+    for (int i = 0; i < 6; i++) {
+        int hi = hexval(p[3 * i]), lo = hi < 0 ? -1 : hexval(p[3 * i + 1]);
+        if (hi < 0 || lo < 0 || (i < 5 && p[3 * i + 2] != ':')) return false;
+        mac[i] = (uint8_t)(hi << 4 | lo);
+    }
+    return !(mac[0] & 1);
+}
+
+static inline bool parse_hex16(const char *p, uint8_t key[16]) {
+    uint8_t any = 0;
+    for (int i = 0; i < 16; i++) {
+        int hi = hexval(p[2 * i]), lo = hi < 0 ? -1 : hexval(p[2 * i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        key[i] = (uint8_t)(hi << 4 | lo);
+        any |= key[i];
+    }
+    return any != 0 && (!p[32] || p[32] == '\r' || p[32] == '\n');   // all zero: never a real key
+}
+
+enum { PK_BAD = -1, PK_QUERY = 0, PK_SET, PK_CLEAR_ONE, PK_CLEAR_ALL };
+static inline int parse_peerkey(const char *line, uint8_t mac[6], uint8_t key[16]) {
+    if (strncmp(line, "PEERKEY", 7) != 0) return PK_BAD;
+    const char *p = line + 7;
+    if (!*p || *p == '\r' || *p == '\n') return PK_QUERY;
+    if (*p++ != ',') return PK_BAD;
+    if (strncmp(p, "clear", 5) == 0 && (!p[5] || p[5] == '\r' || p[5] == '\n')) return PK_CLEAR_ALL;
+    if (!parse_mac_at(p, mac) || p[17] != ',') return PK_BAD;
+    p += 18;
+    if (strncmp(p, "clear", 5) == 0 && (!p[5] || p[5] == '\r' || p[5] == '\n')) return PK_CLEAR_ONE;
+    return parse_hex16(p, key) ? PK_SET : PK_BAD;
+}
+
+static inline int parse_key(const char *line, uint8_t key[16]) {
+    if (strncmp(line, "KEY", 3) != 0) return KEY_BAD;
+    const char *p = line + 3;
+    if (!*p || *p == '\r' || *p == '\n') return KEY_QUERY;
+    if (*p++ != ',') return KEY_BAD;
+    if (strncmp(p, "clear", 5) == 0 && (!p[5] || p[5] == '\r' || p[5] == '\n')) return KEY_CLEAR;
+    return parse_hex16(p, key) ? KEY_SET : KEY_BAD;
 }
 
 typedef struct {
