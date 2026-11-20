@@ -1355,7 +1355,8 @@ class Dashboard:
             rows.append(dict(mac=r['mac'], name=r['name'], rssi=r['rssi'], tx=r['tx'],
                              rate=round(r['rate'] * 60), heard=fmt_age(r['heard']) + ' ago',
                              why=r['why'], link=r['link'], poked=r['poked'], picked=r['picked'],
-                             status=r['status'], ap=r['ap'], router=r['router']))
+                             status=r['status'], ap=r['ap'], router=r['router'],
+                             board=r['board']))
         return dict(mode=dv.mode, modes=list(MODES), rows=rows, max=MAX_DEVS,
                     poking=len(dv.poking), seen=dv.board_seen)
 

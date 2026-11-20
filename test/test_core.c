@@ -1072,10 +1072,70 @@ int main(void) {
         if (len) buf[0] = 0x88;                               // same bytes as a data frame
         if (len >= 16 && (it & 2)) memcpy(buf + ((it & 4) ? 4 : 10), AP1, 6);  // "our" BSSID
         seen_note(&fz_seen, &fz_nodes, buf, len, -50, (uint32_t)it);
+        if (len) buf[0] = 0xD0;                               // ...and as a peer's hello
+        if (len >= 32 && (it & 8)) memcpy(buf + 24, HELLO_MAGIC, sizeof HELLO_MAGIC);
+        { uint8_t m[6], bs[6]; int c; parse_hello(buf, len, m, bs, &c); }
         free(buf);
         fuzzed++;
     }
     printf("fuzz: %d random frames parsed without crashing\n", fuzzed);
+
+    {   // Other ackwave boards: hello frames, the peer list, their poke addresses
+        const uint8_t B1[6] = {0x24,0x0a,0xc4,0x11,0x22,0x30}, B2[6] = {0x24,0x0a,0xc4,0x11,0x22,0x40};
+        const uint8_t PLUG[6] = {0x50,0x02,0x91,0x0a,0x0b,0x0c};
+        uint8_t h[HELLO_LEN], mac[6], bs[6];
+        int ch = 0;
+        build_hello(h, B1, AP1, 6);
+        uint8_t *hp = malloc(HELLO_LEN);                     // exact size: ASan catches over-reads
+        memcpy(hp, h, HELLO_LEN);
+        CHECK(parse_hello(hp, HELLO_LEN, mac, bs, &ch) && memcmp(mac, B1, 6) == 0 &&
+              memcmp(bs, AP1, 6) == 0 && ch == 6);
+        CHECK(!parse_hello(hp, 39, mac, bs, &ch));           // short
+        free(hp);
+        CHECK(!parse_hello(NULL, HELLO_LEN, mac, bs, &ch));
+        h[28] ^= 1; CHECK(!parse_hello(h, HELLO_LEN, mac, bs, &ch)); h[28] ^= 1;   // not ours
+        h[0] = 0x80; CHECK(!parse_hello(h, HELLO_LEN, mac, bs, &ch)); h[0] = 0xD0; // a beacon
+        h[10] |= 1; CHECK(!parse_hello(h, HELLO_LEN, mac, bs, &ch)); h[10] &= 0xFE; // group sender
+        build_hello(h, B1, NULL, 3);                         // no router found yet: zeros
+        CHECK(parse_hello(h, HELLO_LEN, mac, bs, &ch) && ch == 3 && bs[0] == 0 && bs[5] == 0);
+        beacon_info_t hb; parse_beacon(h, HELLO_LEN, "MyNetwork", &hb);
+        CHECK(!hb.ssid_match);                               // never mistaken for our router
+
+        peer_list_t pl; memset(&pl, 0, sizeof pl);
+        int k = peer_note(&pl, B1, AP1, 6, -50, 1000);
+        CHECK(k >= 0 && peer_find(&pl, B1, 1000) == k && pl.p[k].n == 1 && pl.p[k].rssi_x16 == -800);
+        CHECK(peer_note(&pl, B1, AP1, 6, -60, 2000) == k && pl.p[k].n == 2 && pl.p[k].rssi_x16 / 16 == -52);
+        CHECK(peer_find(&pl, B2, 2000) < 0);
+        CHECK(peer_find(&pl, B1, 2000 + PEER_GONE_MS + 1) < 0);          // gone after 10 s
+        for (int j = 0; j < MAX_PEERS - 1; j++) {
+            uint8_t m[6]; memcpy(m, B2, 6); m[5] = (uint8_t)(0x40 + j);
+            CHECK(peer_note(&pl, m, AP1, 6, -70, 2000) >= 0);
+        }
+        uint8_t extra[6] = {0x24,0x0a,0xc4,0x11,0x22,0x99};
+        CHECK(peer_note(&pl, extra, AP1, 6, -70, 2500) == -1);           // full of live peers
+        CHECK(peer_note(&pl, extra, AP1, 6, -70, 2000 + PEER_GONE_MS + 1) >= 0);  // reuses a gone one
+        CHECK(peer_find(&pl, extra, 2000 + PEER_GONE_MS + 1) >= 0);
+
+        // A peer's pokes to our router come from its made-up addresses: not devices
+        peer_list_t one; memset(&one, 0, sizeof one);
+        peer_note(&one, B1, AP1, 6, -50, 1000);
+        uint8_t ta[6];
+        poke_ta(B1, 0, ta);  CHECK(peer_poke_addr(&one, ta));
+        poke_ta(B1, DEV_NODE(2), ta); CHECK(peer_poke_addr(&one, ta));
+        CHECK(!peer_poke_addr(&one, B1) && !peer_poke_addr(&one, PLUG));
+        poke_ta(B2, 0, ta);  CHECK(!peer_poke_addr(&one, ta));
+        node_table_t pt; memset(&pt, 0, sizeof pt); node_add(&pt, AP1);
+        seen_list_t ps; memset(&ps, 0, sizeof ps);
+        uint8_t df2[24] = {0x48, 0x01};
+        memcpy(df2 + 4, AP1, 6); poke_ta(B1, 0, df2 + 10); memcpy(df2 + 16, AP1, 6);
+        int pe = seen_note(&ps, &pt, df2, 24, -50, 100);     // heard before the hello
+        memcpy(df2 + 10, PLUG, 6);
+        int de = seen_note(&ps, &pt, df2, 24, -50, 100);
+        CHECK(pe >= 0 && de >= 0 && pe != de);
+        seen_forget_peer(&ps, B1);
+        CHECK(!ps.d[pe].used && ps.d[de].used);              // the real device stays
+    }
+
 
     printf("%d passed, %d failed\n", passes, fails);
     if (fails == 0) printf("ALL C TESTS PASSED\n");

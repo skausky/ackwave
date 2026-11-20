@@ -107,6 +107,7 @@ static node_table_t nodes;
 static int node_ch[MAX_NODES];   // channel each node was last heard on
 static poke_gate_t gate;          // which APs / devices are worth poking
 static seen_list_t seen;          // devices heard on our network
+static peer_list_t peers;         // other ackwave boards heard (under seen_mux too)
 static portMUX_TYPE seen_mux = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t q;
 static uint8_t my_mac[6];
@@ -563,7 +564,9 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         int flen = (int)pkt->rx_ctrl.sig_len - 4;
         int rssi = pkt->rx_ctrl.rssi;
         taskENTER_CRITICAL(&seen_mux);
-        seen_note(&seen, &nodes, f, flen, rssi, now_ms());
+        // A peer board's poke to our router is not a device of ours
+        if (!(flen >= 24 && (f[1] & 0x03) == 1 && peer_poke_addr(&peers, f + 10)))
+            seen_note(&seen, &nodes, f, flen, rssi, now_ms());
         taskEXIT_CRITICAL(&seen_mux);
         if (flen >= 24 && (f[1] & 0x03) == 1) {        // sent by a device: if we poke it,
             int dn = node_find(&nodes, f + 10);        // its signal and channel matter
@@ -575,6 +578,23 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;
     }
     if (type != WIFI_PKT_MGMT) return;
+    uint8_t pmac[6], pbssid[6];
+    int pch;
+    if (parse_hello(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, pmac, pbssid, &pch)) {
+        if (memcmp(pmac, my_mac, 6) == 0) return;
+        int rssi = pkt->rx_ctrl.rssi;
+        taskENTER_CRITICAL(&seen_mux);
+        bool fresh = peer_find(&peers, pmac, now_ms()) < 0;
+        peer_note(&peers, pmac, pbssid, pkt->rx_ctrl.channel, rssi, now_ms());
+        if (fresh) seen_forget_peer(&seen, pmac);
+        taskEXIT_CRITICAL(&seen_mux);
+        int dn = node_find(&nodes, pmac);          // poked like a device: its signal and channel
+        if (dn >= MAX_APS) {
+            gate_rssi(&gate, dn, rssi);
+            node_ch[dn] = pkt->rx_ctrl.channel;
+        }
+        return;
+    }
     beacon_info_t b;
     parse_beacon(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, my_ssid, &b);
     if (b.ok && net_collect)
@@ -648,8 +668,9 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
 // Two interleaved slots: APs get POKE_HZ/s whatever happens, and devices
 // share another POKE_HZ/s (a slot with no device to poke stays silent).
 static void poke_task(void *arg) {
-    uint8_t frame[NULL_FRAME_LEN];
+    uint8_t frame[NULL_FRAME_LEN], hello[HELLO_LEN];
     int rr[2] = {0, 0}, slot = 0;
+    uint32_t next_hello = 0;
     TickType_t wake = xTaskGetTickCount();
     TickType_t period = pdMS_TO_TICKS(500 / POKE_HZ);
     if (period == 0) period = 1;
@@ -658,6 +679,14 @@ static void poke_task(void *arg) {
         int devs = slot;
         slot ^= 1;
         if (scanning) continue;
+        // Once a second a device slot says hello to the other boards
+        // (only once our router is found, so the channel is the right one)
+        if (devs && node_count(&nodes) > 0 && deadline_passed(now_ms(), next_hello)) {
+            next_hello = now_ms() + HELLO_EVERY_MS;
+            build_hello(hello, my_mac, nodes.mac[0], cur_ch);
+            esp_wifi_80211_tx(WIFI_IF_STA, hello, sizeof hello, true);
+            continue;
+        }
         int target = next_poke_target(&nodes, node_ch, cur_ch, &rr[devs], &gate, devs);
         if (target < 0) continue;
         uint8_t ta[6];
@@ -716,6 +745,30 @@ static bool seen_has(const uint8_t *mac) {
 
 #define MACF "%02x:%02x:%02x:%02x:%02x:%02x"
 #define MACA(m) (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5]
+
+static bool peer_has(const uint8_t *mac) {
+    taskENTER_CRITICAL(&seen_mux);
+    bool found = peer_find(&peers, mac, now_ms()) >= 0;
+    taskEXIT_CRITICAL(&seen_mux);
+    return found;
+}
+
+// PEER,<mac>,<rssi>,<hellos>,<age_ms>,<ch>,<same router 1/0>: other boards heard
+static void print_peers(void) {
+    peer_list_t copy;
+    taskENTER_CRITICAL(&seen_mux);
+    copy = peers;
+    taskEXIT_CRITICAL(&seen_mux);
+    uint32_t now = now_ms();
+    for (int i = 0; i < MAX_PEERS; i++) {
+        const peer_t *e = &copy.p[i];
+        uint32_t age = now - e->last_ms;
+        if (!e->used || (int32_t)age > PEER_GONE_MS) continue;
+        if ((int32_t)age < 0) age = 0;
+        printf("PEER," MACF ",%d,%" PRIu32 ",%" PRIu32 ",%d,%d\n", MACA(e->mac), e->rssi_x16 / 16,
+               e->n, age, e->ch, node_is_ap(node_find(&nodes, e->bssid)) ? 1 : 0);
+    }
+}
 
 // The poked devices, saved so the board pokes them again after a restart or away from the PC
 static void devs_save(void) {
@@ -861,7 +914,7 @@ static void run_cmd(const char *line) {
         int k = dev_slot_for(&nodes, mac, &is_new);
         if (node_is_ap(node_find(&nodes, mac))) {
             printf("REFUSED," MACF ",is-an-ap\n", MACA(mac));
-        } else if (!seen_has(mac)) {
+        } else if (!seen_has(mac) && !peer_has(mac)) {
             printf("REFUSED," MACF ",not-seen-on-network\n", MACA(mac));
         } else if (k < 0) {
             printf("REFUSED," MACF ",full\n", MACA(mac));
@@ -1050,6 +1103,7 @@ static void control_task(void *arg) {
             print_poking();
 #endif
             print_devices();
+            print_peers();
             print_network();
             print_aps();
             print_led();

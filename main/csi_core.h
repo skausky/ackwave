@@ -695,6 +695,104 @@ static inline int poke_ta_node(const uint8_t me[6], const uint8_t *dmac) {
     return n < MAX_NODES ? n : -1;
 }
 
+// ---------- Other ackwave boards ("peers") ----------
+// Each board broadcasts a small hello once a second: a vendor-specific action
+// frame from its real MAC, saying which router (BSSID) it watches and on
+// which channel. A board that hears it lists the peer (PEER lines) and can
+// poke it like a device: an ESP32 ACKs frames to its own MAC whether or not
+// it joined anything, so two boards give a link across the rooms between
+// them. The hello carries no network name and nothing about the house.
+#define HELLO_LEN    42
+#define HELLO_EVERY_MS 1000
+#define MAX_PEERS    8
+#define PEER_GONE_MS 10000      // not heard this long: forgotten
+static const uint8_t HELLO_MAGIC[8] = { 127, 0x02, 0xAC, 0x57, 'A', 'C', 'K', 'W' };  // vendor action, made-up local OUI
+#define HELLO_VERSION 1
+
+// Action frame: addr1 = broadcast, addr2 = me (real MAC), addr3 = broadcast;
+// body = magic, version, channel, the router's BSSID (all zero: none yet)
+static inline void build_hello(uint8_t out[HELLO_LEN], const uint8_t me[6],
+                               const uint8_t *bssid, int ch) {
+    memset(out, 0, HELLO_LEN);
+    out[0] = 0xD0;                                       // management, action
+    memset(out + 4, 0xFF, 6);
+    memcpy(out + 10, me, 6);
+    memset(out + 16, 0xFF, 6);
+    memcpy(out + 24, HELLO_MAGIC, sizeof HELLO_MAGIC);
+    out[32] = HELLO_VERSION;
+    out[33] = (uint8_t)ch;
+    if (bssid) memcpy(out + 34, bssid, 6);
+}
+
+// f = frame without FCS. True if it is a peer's hello; fills its MAC, router and channel
+static inline bool parse_hello(const uint8_t *f, int len, uint8_t mac[6], uint8_t bssid[6], int *ch) {
+    if (!f || len < 40 || f[0] != 0xD0 || memcmp(f + 24, HELLO_MAGIC, sizeof HELLO_MAGIC) != 0 ||
+        f[32] < 1 || (f[10] & 0x01))
+        return false;
+    memcpy(mac, f + 10, 6);
+    memcpy(bssid, f + 34, 6);
+    *ch = f[33];
+    return true;
+}
+
+typedef struct {
+    uint8_t  mac[6];
+    uint8_t  bssid[6];          // the router it watches
+    int      rssi_x16;          // average, x16
+    uint32_t n;                 // hellos heard
+    uint32_t last_ms;
+    int      ch;
+    bool     used;
+} peer_t;
+
+typedef struct { peer_t p[MAX_PEERS]; } peer_list_t;
+
+// A hello was heard. Returns the entry, or -1 (the list is full of live peers).
+static inline int peer_note(peer_list_t *l, const uint8_t mac[6], const uint8_t bssid[6],
+                            int ch, int rssi, uint32_t now_ms) {
+    int k = -1;
+    for (int i = 0; i < MAX_PEERS && k < 0; i++)
+        if (l->p[i].used && memcmp(l->p[i].mac, mac, 6) == 0) k = i;
+    for (int i = 0; i < MAX_PEERS && k < 0; i++)
+        if (!l->p[i].used || (int32_t)(now_ms - l->p[i].last_ms) > PEER_GONE_MS) {
+            k = i;
+            memset(&l->p[i], 0, sizeof l->p[i]);
+        }
+    if (k < 0) return -1;
+    peer_t *e = &l->p[k];
+    if (!e->used) { memcpy(e->mac, mac, 6); e->used = true; }
+    memcpy(e->bssid, bssid, 6);
+    e->ch = ch;
+    e->rssi_x16 = e->n ? e->rssi_x16 + (rssi * 16 - e->rssi_x16) / 4 : rssi * 16;
+    e->n++;
+    e->last_ms = now_ms;
+    return k;
+}
+
+// The live peer with this MAC, or -1
+static inline int peer_find(const peer_list_t *l, const uint8_t *mac, uint32_t now_ms) {
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (l->p[i].used && (int32_t)(now_ms - l->p[i].last_ms) <= PEER_GONE_MS &&
+            memcmp(l->p[i].mac, mac, 6) == 0)
+            return i;
+    return -1;
+}
+
+// True if `addr` is one of a known peer's made-up poke addresses. Its pokes
+// to our router look like a device talking to it; they must not be listed
+// as devices (they'd never answer a poke).
+static inline bool peer_poke_addr(const peer_list_t *l, const uint8_t *addr) {
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (l->p[i].used && poke_ta_node(l->p[i].mac, addr) >= 0) return true;
+    return false;
+}
+
+// Drops the devices that are really a peer's poke addresses (heard before its hello)
+static inline void seen_forget_peer(seen_list_t *s, const uint8_t peer[6]) {
+    for (int i = 0; i < MAX_SEEN; i++)
+        if (s->d[i].used && poke_ta_node(peer, s->d[i].mac) >= 0) s->d[i].used = false;
+}
+
 // True if f (no FCS) is an ACK control frame addressed to `me`
 static inline bool is_ack_to(const uint8_t *f, int len, const uint8_t me[6]) {
     return f && len >= 10 && f[0] == 0xD4 && memcmp(f + 4, me, 6) == 0;

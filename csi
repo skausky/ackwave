@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # One entry point for everything. Run with no arguments for a menu.
 #   ./csi gui        live view of the board (also logs, like record)
-#   ./csi web        the live view as a web dashboard (localhost:8765; also logs)
+#   ./csi web        the live view as a web dashboard (localhost:8765; also logs; or: ./csi web /dev/ttyACM1)
 #   ./csi record     log motion with clock times until Ctrl+C (e.g. overnight)
 #   ./csi history    look back at a logged session (newest; or: ./csi history --list)
 #   ./csi demo       GUI on fake data (no board needed)
-#   ./csi flash      build and flash the firmware (ESP-IDF v5.3.2)
+#   ./csi flash      build and flash the firmware (ESP-IDF v5.3.2; or: ./csi flash /dev/ttyACM1)
 #   ./csi test       run all tests
 #   ./csi shortcut   add "CSI Motion" to the desktop app menu
 set -u
@@ -24,8 +24,21 @@ need_python() {
 }
 
 find_port() {                      # prints the board's port, or explains what's wrong
-    local port
-    port=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1)
+    local port all                 # $1: a port you name (several boards plugged in)
+    all=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null)
+    if [ -n "${1:-}" ]; then
+        port=$1
+        if [ ! -e "$port" ]; then
+            echo "$port doesn't exist. Boards plugged in: ${all:-none}" >&2
+            return 1
+        fi
+    else
+        port=$(echo "$all" | head -1)
+        if [ "$(echo "$all" | grep -c .)" -gt 1 ]; then
+            echo "Several boards are plugged in ($(echo $all)); using $port." >&2
+            echo "Name another one like this: ./csi ${CMD:-web} /dev/ttyACM1" >&2
+        fi
+    fi
     if [ -z "$port" ]; then
         echo "No board found. Plug the ESP32 in with a USB data cable and try again." >&2
         return 1
@@ -47,7 +60,9 @@ cmd_gui() {
 
 cmd_web() {
     need_python
-    local port; port=$(find_port) || exit 1
+    local want=""
+    case "${1:-}" in /dev/*) want=$1; shift ;; esac
+    local port; port=$(CMD=web find_port "$want") || exit 1
     exec "$PY" tools/web.py "$port" --open "$@"
 }
 
@@ -73,7 +88,7 @@ cmd_flash() {
         echo "No default network set (main/my_network.h): after flashing, open the GUI and"
         echo "press n (or the Network button) to pick your router. It's saved on the board."
     fi
-    local port; port=$(find_port) || exit 1
+    local port; port=$(CMD=flash find_port "${1:-}") || exit 1
     if [ ! -f "$IDF/export.sh" ]; then
         echo "ESP-IDF v5.3.2 not found at $IDF"; exit 1
     fi
@@ -131,7 +146,7 @@ case "${1:-}" in
     record) cmd_record ;;
     history) shift; cmd_history "$@" ;;
     demo) cmd_demo ;;
-    flash) cmd_flash ;;
+    flash) shift; cmd_flash "${1:-}" ;;
     test) cmd_test ;;
     shortcut) cmd_shortcut ;;
     -h|--help|help) usage ;;

@@ -54,7 +54,7 @@ WHYS = ('boot', 'button', 'rssi', 'channel')
 
 def parse_line(line):
     """Returns (kind, dict) for the board's lines (CSI, CHANNEL, LEARNED, STATE,
-    STATS, CALIB, GATE, DEV, POKING, UNPOKED, REFUSED), else None."""
+    STATS, CALIB, GATE, DEV, PEER, POKING, UNPOKED, REFUSED), else None."""
     line = line.strip()
     try:
         if line.startswith('CSI,'):
@@ -100,6 +100,12 @@ def parse_line(line):
             ap = int(p[6]) if len(p) > 6 and p[6].lstrip('-').isdigit() else -1
             return 'dev', dict(mac=p[1].lower(), rssi=int(p[2]), tx=int(p[3]),
                                rx=int(p[4]), age_ms=int(p[5]), ap=ap if 0 <= ap < MAX_APS else -1)
+        if line.startswith('PEER,'):                     # another ackwave board heard
+            p = line.split(',')
+            if len(p) < 7 or len(p[1]) != 17:
+                return None
+            return 'peer', dict(mac=p[1].lower(), rssi=int(p[2]), n=int(p[3]),
+                                age_ms=int(p[4]), ch=int(p[5]), same=p[6] == '1')
         if line.startswith('POKING,'):
             p = line.split(',')
             return 'poking', dict(idx=int(p[1]), mac=p[2].lower())

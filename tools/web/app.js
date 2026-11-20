@@ -1412,7 +1412,7 @@ function renderDev() {
     const cb = el('input', { type: 'checkbox', checked: r.poked || r.picked, title: 'poke this device' });
     cb.onchange = () => cmd({ cmd: 'toggle', mac: r.mac });
     tr.append(el('td', {}, cb));
-    [`${r.name}  ${r.mac}`, r.router || '–', r.rssi ? `${r.rssi} dBm` : '–', r.rate, r.heard, r.why, r.link]
+    [`${r.name}  ${r.mac}`, r.router || (r.board ? 'another board' : '–'), r.rssi ? `${r.rssi} dBm` : '–', r.rate, r.heard, r.why, r.link]
       .forEach((v, i) => tr.append(el('td', { textContent: v, className: i === 5 ? 'why' : '' })));
     body.append(tr);
   }

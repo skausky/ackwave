@@ -183,6 +183,44 @@ def test_auto_picks_stationary():
     check(d.rows()[0]['mac'] == TV and d.rows()[0]['poked'], 'poked first in the table')
 
 
+def test_other_boards():
+    """Other ackwave boards (PEER lines): pokeable at once, picked first in
+    auto mode, never one that watches another router."""
+    B1, B2 = mac(0x24, 0x0a, 0xc4, 1, 2, 3), mac(0x24, 0x0a, 0xc4, 4, 5, 6)
+    check(parse_line(f"PEER,{B1.upper()},-58,40,300,6,1") ==
+          ('peer', dict(mac=B1, rssi=-58, n=40, age_ms=300, ch=6, same=True)), 'PEER parses')
+    check(parse_line(f"PEER,{B1},-58,40,300,6") is None, 'PEER needs every field')
+    clk = Clock()
+    d = Devices(clock=clk)
+    for k in range(int(OBSERVE_S / 5) + 4):
+        clk.t += 5
+        d.feed('peer', dict(mac=B1, rssi=-60, n=5 * k, age_ms=200, ch=6, same=True))
+        d.feed('peer', dict(mac=B2, rssi=-50, n=5 * k, age_ms=200, ch=11, same=False))
+        steady_args = steady(TV, -55, 0, k)
+        dev(d, *steady_args)
+        cmds = d.feed('stats', {})
+        if k == 0:
+            check(cmds == [f"POKE,{B1}"], f'a board needs no watching: {cmds}')
+    st = {r['mac']: r['status'] for r in d.rows()}
+    check(st == {B1: 'board', B2: 'board_other', TV: 'stationary'}, st)
+    check(set(cmds) == {f"POKE,{B1}", f"POKE,{TV}"}, cmds)
+    r = d.rows()[0]
+    check(r['mac'] == B1 and r['board'] and r['name'].startswith('ackwave board'), r)
+    d.poking = {B1: 8}
+    check(d.link_label(8).startswith('ackwave board'), d.link_label(8))
+    # full: the board comes before stationary devices
+    others = [mac(0x3c, 0x22, 0xfb, 9, 9, i) for i in range(4)]
+    d2 = Devices(clock=clk)
+    d2.board_seen = True
+    for m in others:
+        d2.devs[m] = d.devs[TV].__class__(m, clk.t - OBSERVE_S - 60)
+        for i in range(8):
+            d2.devs[m].samples.append((clk.t - i, -55))
+        d2.devs[m].tx, d2.devs[m].rssi, d2.devs[m].last_heard = 100, -55, clk.t
+    d2.feed('peer', dict(mac=B1, rssi=-75, n=3, age_ms=0, ch=6, same=True))
+    check(B1 in d2.desired() and len(d2.desired()) == MAX_DEVS, d2.desired())
+
+
 def test_drop_silent_and_reboot_resync():
     clk = Clock()
     d = Devices(clock=clk)
@@ -262,6 +300,7 @@ def main():
     test_analyzer_takes_new_lines()
     test_oui()
     test_auto_picks_stationary()
+    test_other_boards()
     test_drop_silent_and_reboot_resync()
     test_refused_waits()
     test_manual_and_modes()

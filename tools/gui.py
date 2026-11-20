@@ -324,7 +324,7 @@ class State:
         if kind == 'learned':
             self.nodes[d['idx']] = d['mac']
             return
-        if kind in ('dev', 'gate', 'poking', 'unpoked', 'refused', 'stats'):
+        if kind in ('dev', 'peer', 'gate', 'poking', 'unpoked', 'refused', 'stats'):
             self.outbox += self.devices.feed(kind, d)
             if kind != 'stats':
                 return

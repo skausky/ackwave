@@ -121,6 +121,7 @@ DEMO_DEVICES = [(_mac(0x50, 0x02, 0x91, 0x10, 0x20, 0x30), -62, 2.0, 0.5),
                 (_mac(0x3c, 0x22, 0xfb, 0x40, 0x50, 0x60), -55, 6.0, 1.0),
                 (_mac(0xda, 0xa1, 0x19, 0x70, 0x80, 0x90), -48, 9.0, 6.0),
                 (_mac(0xa4, 0xc1, 0xe8, 0xa0, 0xb0, 0xc0), 0, 0.0, 0.0)]
+DEMO_PEER = _mac(0x24, 0x0a, 0xc4, 0x12, 0x34, 0x56)    # a second ackwave board
 
 
 def fake_devices(t):
@@ -130,6 +131,7 @@ def fake_devices(t):
     for i, (m, rssi, rate, wob) in enumerate(DEMO_DEVICES):
         r = rssi + (round(wob * math.sin(t * 0.7 + i)) if rssi else 0)
         out.append(f"DEV,{m},{r},{int(rate * t)},{int(t / 3)},{0 if rate else 4000},{i % 2}")  # its router
+    out.append(f"PEER,{DEMO_PEER},-58,{int(t)},300,6,1")   # hellos, once a second
     return out
 
 
@@ -180,7 +182,7 @@ def generate(seed=0, scenario=DEFAULT):
             yield "LEARNED,0,aa:bb:cc:dd:ee:f0", 'learned', None, t
             yield "LEARNED,1,aa:bb:cc:dd:ee:f1", 'learned', None, t
             for line in fake_devices(t):         # devices on the network (demo)
-                yield line, 'dev', None, t
+                yield line, line.split(',', 1)[0].lower(), None, t
             yield (f"STATS,{int(next_stats * 1e6)},{pokes},0,{acks},{aps},3,0",
                    'stats', None, t)
             next_stats += 5.0

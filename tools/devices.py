@@ -43,6 +43,7 @@ REFUSE_RETRY_S = 60
 MODES = ('auto', 'all', 'manual', 'off')
 
 STATUS_TEXT = {
+    'board': 'ackwave board',
     'stationary': 'stationary',
     'watching': 'watching',
     'moving': 'signal unsteady',
@@ -51,6 +52,7 @@ STATUS_TEXT = {
     'random': 'private MAC',
     'dropped': "didn't answer",
     'gone': 'gone',
+    'board_other': 'board on another router',
 }
 
 
@@ -129,11 +131,14 @@ class Oui:
 
 
 class Device:
-    __slots__ = ('mac', 'first', 'last_heard', 'tx', 'rx', 'rssi', 'samples', 'tx_hist', 'ap')
+    __slots__ = ('mac', 'first', 'last_heard', 'tx', 'rx', 'rssi', 'samples', 'tx_hist', 'ap', 'board',
+                 'same')
 
     def __init__(self, mac, now):
         self.mac = mac
         self.ap = -1                     # the AP node it talks through (newer boards say), -1 = unknown
+        self.board = False               # another ackwave board (PEER lines), not a device
+        self.same = True                 # (a board) watching the same router as ours
         self.first = self.last_heard = now
         self.tx = self.rx = 0
         self.rssi = 0
@@ -198,6 +203,19 @@ class Devices:
             dv.tx_hist.append((now, d['tx']))
             while dv.tx_hist and dv.tx_hist[0][0] < now - 300:
                 dv.tx_hist.popleft()
+        elif kind == 'peer':                             # another ackwave board: it sits
+            self.board_seen = True                       # still and always answers pokes
+            dv = self.devs.get(d['mac'])
+            if dv is None:
+                dv = self.devs[d['mac']] = Device(d['mac'], now)
+            dv.board, dv.same = True, d['same']
+            dv.last_heard = max(dv.last_heard, now - d['age_ms'] / 1000.0)
+            if d['n'] < dv.tx:
+                dv.tx_hist.clear()
+            dv.tx, dv.rssi = d['n'], d['rssi']
+            dv.tx_hist.append((now, d['n']))
+            while dv.tx_hist and dv.tx_hist[0][0] < now - 300:
+                dv.tx_hist.popleft()
         elif kind == 'gate':
             self.gate[d['idx']] = d
         elif kind == 'poking':
@@ -242,6 +260,12 @@ class Devices:
         drop = self.dropped.get(dv.mac)
         if drop and now - drop[0] < RETRY_S:
             return 'dropped', drop[1]
+        if dv.board:
+            if not dv.same:
+                return 'board_other', 'another ackwave board, watching another router'
+            if dv.rssi < MIN_RSSI:
+                return 'weak', f"another ackwave board, {dv.rssi} dBm is too weak"
+            return 'board', 'another ackwave board: a link across the rooms between you'
         if mac_is_random(dv.mac):
             return 'random', 'private MAC (likely a phone or laptop)'
         watched = now - dv.first
@@ -272,13 +296,13 @@ class Devices:
 
         if self.mode == 'auto':
             cands = [dv for dv in self.devs.values()
-                     if ok(dv) and self.status(dv, now)[0] == 'stationary']
-            cands.sort(key=lambda dv: (dv.mac not in self.poking, -dv.rssi, dv.mac))
+                     if ok(dv) and self.status(dv, now)[0] in ('board', 'stationary')]
+            cands.sort(key=lambda dv: (dv.mac not in self.poking, not dv.board, -dv.rssi, dv.mac))
         else:                                            # all: most active first
             cands = [dv for dv in self.devs.values()
                      if ok(dv) and dv.tx > 0
-                     and self.status(dv, now)[0] not in ('gone', 'dropped')]
-            cands.sort(key=lambda dv: (dv.mac not in self.poking, -dv.tx_rate(now), dv.mac))
+                     and self.status(dv, now)[0] not in ('gone', 'dropped', 'board_other')]
+            cands.sort(key=lambda dv: (dv.mac not in self.poking, not dv.board, -dv.tx_rate(now), dv.mac))
         return {dv.mac for dv in cands[:MAX_DEVS]}
 
     def reconcile(self):
@@ -314,6 +338,9 @@ class Devices:
 
     # ---- display ----
     def name(self, mac):
+        dv = self.devs.get(mac)
+        if dv is not None and dv.board:
+            return 'ackwave board ' + mac[-5:]
         return self.oui.name(mac) if self.oui else ('private address' if mac_is_random(mac) else '')
 
     def link_label(self, idx):
@@ -344,7 +371,7 @@ class Devices:
             out.append(dict(mac=dv.mac, name=self.name(dv.mac), rssi=dv.rssi, tx=dv.tx,
                             rx=dv.rx, rate=dv.tx_rate(now), heard=now - dv.last_heard,
                             status=st, why=why, poked=idx is not None, idx=idx, link=link,
-                            picked=dv.mac in self.manual, ap=dv.ap,
+                            picked=dv.mac in self.manual, ap=dv.ap, board=dv.board,
                             router=self.link_label(dv.ap) if 0 <= dv.ap < 8 else ''))
         out.sort(key=lambda r: (not r['poked'], order.get(r['status'], 99), -r['rssi'] if r['rssi'] else 999))
         return out

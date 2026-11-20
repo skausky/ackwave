@@ -278,6 +278,21 @@ no board joins any network.
 - Open questions to measure first: ESP-NOW range and airtime next to the
   pokes, and keeping every board on the router's channel.
 
+**Step 1, built (2026-11-20, 4 boards on hand): boards find and poke each
+other.** Each board broadcasts a hello once a second (a 42-byte
+vendor-specific action frame from its real MAC: magic `ACKW`, version, channel,
+the router's BSSID; no network name). Boards that hear it list it (`PEER,<mac>,
+<rssi>,<hellos>,<age_ms>,<ch>,<same router>`), accept `POKE` for it like a
+device, and stop listing its made-up poke addresses as devices. On the PC a
+board shows in Devices as "ackwave board", needs no 3-minute watch, and comes
+first in Auto mode; one on another router is never poked. To measure on the
+hardware: does an unjoined ESP32 ACK the pokes (the board link's "answered"
+%), and how far the hello reaches.
+
+Next: each board on its own USB at the PC (`./csi web /dev/ttyACM1 --port 8766
+--out sessions/board2`, one dashboard per board)
+until ESP-NOW carries their results to the hub.
+
 ## Build order
 
 1. Light data stream (appends, per-page payloads) and the simple Watch
