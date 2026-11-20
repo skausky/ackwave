@@ -698,21 +698,52 @@ static inline int poke_ta_node(const uint8_t me[6], const uint8_t *dmac) {
 // ---------- Other ackwave boards ("peers") ----------
 // Each board broadcasts a small hello once a second: a vendor-specific action
 // frame from its real MAC, saying which router (BSSID) it watches and on
-// which channel. A board that hears it lists the peer (PEER lines) and can
-// poke it like a device: an ESP32 ACKs frames to its own MAC whether or not
-// it joined anything, so two boards give a link across the rooms between
-// them. The hello carries no network name and nothing about the house.
-#define HELLO_LEN    42
+// which channel, and its own verdict (SAT lines on the board that hears it).
+// A board that hears it lists the peer (PEER lines) and can poke it like a
+// device: an ESP32 ACKs frames to its own MAC whether or not it joined
+// anything, so two boards give a link across the rooms between them.
+// The hello carries no network name, but it is not encrypted: anyone nearby
+// with a sniffer could read whether a board sees motion.
+#define HELLO_LEN    54
+#define HELLO_V1_LEN 40         // version 1: no report
 #define HELLO_EVERY_MS 1000
+#define HELLO_SOON_MS  100      // a verdict change goes out this soon (not sooner)
 #define MAX_PEERS    8
 #define PEER_GONE_MS 10000      // not heard this long: forgotten
 static const uint8_t HELLO_MAGIC[8] = { 127, 0x02, 0xAC, 0x57, 'A', 'C', 'K', 'W' };  // vendor action, made-up local OUI
-#define HELLO_VERSION 1
+#define HELLO_VERSION 2
+
+// What a board says about itself in each hello (version 2), so the board on
+// the PC's USB (the hub) shows every board. Scores are relative to the
+// board's own thresholds: 50 = at the threshold, capped at 255.
+enum { REP_MOTION = 1, REP_CALIBRATED = 2, REP_WEAK = 4 };
+typedef struct {
+    uint16_t seq;               // +1 per hello: the hub prints each one once
+    uint8_t  flags;             // REP_*
+    uint8_t  k_short, k_long;   // score / threshold x50
+    uint8_t  acks;              // router ACKs/s (capped)
+    int8_t   rssi;              // the router link's signal, dBm
+    uint8_t  n_dev;             // device (and board) links it pokes
+    uint32_t up_s;              // seconds since it started
+} sat_report_t;
+
+typedef struct {
+    uint8_t mac[6], bssid[6];
+    int ch;
+    bool has_report;            // version 2 or later
+    sat_report_t rep;
+} hello_t;
+
+static inline uint8_t rep_k(float score, float threshold) {
+    if (!(threshold > 0) || !(score > 0)) return 0;
+    float k = score / threshold * 50.0f;
+    return k >= 255.0f ? 255 : (uint8_t)k;
+}
 
 // Action frame: addr1 = broadcast, addr2 = me (real MAC), addr3 = broadcast;
-// body = magic, version, channel, the router's BSSID (all zero: none yet)
+// body = magic, version, channel, the router's BSSID (all zero: none yet), report
 static inline void build_hello(uint8_t out[HELLO_LEN], const uint8_t me[6],
-                               const uint8_t *bssid, int ch) {
+                               const uint8_t *bssid, int ch, const sat_report_t *r) {
     memset(out, 0, HELLO_LEN);
     out[0] = 0xD0;                                       // management, action
     memset(out + 4, 0xFF, 6);
@@ -722,16 +753,31 @@ static inline void build_hello(uint8_t out[HELLO_LEN], const uint8_t me[6],
     out[32] = HELLO_VERSION;
     out[33] = (uint8_t)ch;
     if (bssid) memcpy(out + 34, bssid, 6);
+    uint8_t *b = out + 40;                               // little-endian, no padding
+    b[0] = (uint8_t)r->seq; b[1] = (uint8_t)(r->seq >> 8);
+    b[2] = r->flags; b[3] = r->k_short; b[4] = r->k_long; b[5] = r->acks;
+    b[6] = (uint8_t)r->rssi; b[7] = r->n_dev;
+    for (int i = 0; i < 4; i++) b[8 + i] = (uint8_t)(r->up_s >> (8 * i));
+    out[52] = out[53] = 0;                               // spare
 }
 
-// f = frame without FCS. True if it is a peer's hello; fills its MAC, router and channel
-static inline bool parse_hello(const uint8_t *f, int len, uint8_t mac[6], uint8_t bssid[6], int *ch) {
-    if (!f || len < 40 || f[0] != 0xD0 || memcmp(f + 24, HELLO_MAGIC, sizeof HELLO_MAGIC) != 0 ||
-        f[32] < 1 || (f[10] & 0x01))
+// f = frame without FCS. True if it is a peer's hello (any version)
+static inline bool parse_hello(const uint8_t *f, int len, hello_t *h) {
+    if (!f || len < HELLO_V1_LEN || f[0] != 0xD0 ||
+        memcmp(f + 24, HELLO_MAGIC, sizeof HELLO_MAGIC) != 0 || f[32] < 1 || (f[10] & 0x01))
         return false;
-    memcpy(mac, f + 10, 6);
-    memcpy(bssid, f + 34, 6);
-    *ch = f[33];
+    memset(h, 0, sizeof *h);
+    memcpy(h->mac, f + 10, 6);
+    memcpy(h->bssid, f + 34, 6);
+    h->ch = f[33];
+    if (f[32] >= 2 && len >= 52) {
+        const uint8_t *b = f + 40;
+        h->has_report = true;
+        h->rep.seq = (uint16_t)(b[0] | b[1] << 8);
+        h->rep.flags = b[2]; h->rep.k_short = b[3]; h->rep.k_long = b[4]; h->rep.acks = b[5];
+        h->rep.rssi = (int8_t)b[6]; h->rep.n_dev = b[7];
+        h->rep.up_s = (uint32_t)b[8] | (uint32_t)b[9] << 8 | (uint32_t)b[10] << 16 | (uint32_t)b[11] << 24;
+    }
     return true;
 }
 

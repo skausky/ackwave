@@ -1074,7 +1074,7 @@ int main(void) {
         seen_note(&fz_seen, &fz_nodes, buf, len, -50, (uint32_t)it);
         if (len) buf[0] = 0xD0;                               // ...and as a peer's hello
         if (len >= 32 && (it & 8)) memcpy(buf + 24, HELLO_MAGIC, sizeof HELLO_MAGIC);
-        { uint8_t m[6], bs[6]; int c; parse_hello(buf, len, m, bs, &c); }
+        { hello_t fh; parse_hello(buf, len, &fh); }
         free(buf);
         fuzzed++;
     }
@@ -1083,23 +1083,35 @@ int main(void) {
     {   // Other ackwave boards: hello frames, the peer list, their poke addresses
         const uint8_t B1[6] = {0x24,0x0a,0xc4,0x11,0x22,0x30}, B2[6] = {0x24,0x0a,0xc4,0x11,0x22,0x40};
         const uint8_t PLUG[6] = {0x50,0x02,0x91,0x0a,0x0b,0x0c};
-        uint8_t h[HELLO_LEN], mac[6], bs[6];
-        int ch = 0;
-        build_hello(h, B1, AP1, 6);
+        uint8_t h[HELLO_LEN];
+        hello_t hl;
+        sat_report_t rp = { .seq = 0x1234, .flags = REP_MOTION | REP_CALIBRATED, .k_short = 77,
+                            .k_long = 255, .acks = 96, .rssi = -57, .n_dev = 3, .up_s = 0x01020304 };
+        build_hello(h, B1, AP1, 6, &rp);
         uint8_t *hp = malloc(HELLO_LEN);                     // exact size: ASan catches over-reads
         memcpy(hp, h, HELLO_LEN);
-        CHECK(parse_hello(hp, HELLO_LEN, mac, bs, &ch) && memcmp(mac, B1, 6) == 0 &&
-              memcmp(bs, AP1, 6) == 0 && ch == 6);
-        CHECK(!parse_hello(hp, 39, mac, bs, &ch));           // short
+        CHECK(parse_hello(hp, HELLO_LEN, &hl) && memcmp(hl.mac, B1, 6) == 0 &&
+              memcmp(hl.bssid, AP1, 6) == 0 && hl.ch == 6 && hl.has_report);
+        CHECK(hl.rep.seq == 0x1234 && hl.rep.flags == (REP_MOTION | REP_CALIBRATED) &&
+              hl.rep.k_short == 77 && hl.rep.k_long == 255 && hl.rep.acks == 96 &&
+              hl.rep.rssi == -57 && hl.rep.n_dev == 3 && hl.rep.up_s == 0x01020304);
+        CHECK(!parse_hello(hp, 39, &hl));                    // short
+        CHECK(parse_hello(hp, 51, &hl) && !hl.has_report);   // cut report: peer only
         free(hp);
-        CHECK(!parse_hello(NULL, HELLO_LEN, mac, bs, &ch));
-        h[28] ^= 1; CHECK(!parse_hello(h, HELLO_LEN, mac, bs, &ch)); h[28] ^= 1;   // not ours
-        h[0] = 0x80; CHECK(!parse_hello(h, HELLO_LEN, mac, bs, &ch)); h[0] = 0xD0; // a beacon
-        h[10] |= 1; CHECK(!parse_hello(h, HELLO_LEN, mac, bs, &ch)); h[10] &= 0xFE; // group sender
-        build_hello(h, B1, NULL, 3);                         // no router found yet: zeros
-        CHECK(parse_hello(h, HELLO_LEN, mac, bs, &ch) && ch == 3 && bs[0] == 0 && bs[5] == 0);
+        h[32] = 1;                                           // a version 1 board (no report)
+        CHECK(parse_hello(h, HELLO_V1_LEN, &hl) && !hl.has_report && hl.ch == 6);
+        CHECK(parse_hello(h, HELLO_LEN, &hl) && !hl.has_report);
+        h[32] = HELLO_VERSION;
+        CHECK(!parse_hello(NULL, HELLO_LEN, &hl));
+        h[28] ^= 1; CHECK(!parse_hello(h, HELLO_LEN, &hl)); h[28] ^= 1;   // not ours
+        h[0] = 0x80; CHECK(!parse_hello(h, HELLO_LEN, &hl)); h[0] = 0xD0; // a beacon
+        h[10] |= 1; CHECK(!parse_hello(h, HELLO_LEN, &hl)); h[10] &= 0xFE; // group sender
+        build_hello(h, B1, NULL, 3, &rp);                    // no router found yet: zeros
+        CHECK(parse_hello(h, HELLO_LEN, &hl) && hl.ch == 3 && hl.bssid[0] == 0 && hl.bssid[5] == 0);
         beacon_info_t hb; parse_beacon(h, HELLO_LEN, "MyNetwork", &hb);
         CHECK(!hb.ssid_match);                               // never mistaken for our router
+        CHECK(rep_k(0.5f, 1.0f) == 25 && rep_k(1.0f, 1.0f) == 50 && rep_k(9.0f, 1.0f) == 255);
+        CHECK(rep_k(1.0f, 0.0f) == 0 && rep_k(-1.0f, 1.0f) == 0 && rep_k(0.0f / 0.0f, 1.0f) == 0);
 
         peer_list_t pl; memset(&pl, 0, sizeof pl);
         int k = peer_note(&pl, B1, AP1, 6, -50, 1000);

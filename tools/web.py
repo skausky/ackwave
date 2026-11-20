@@ -33,7 +33,7 @@ import numpy as np
 from collections import deque
 
 from activity import LABELS, Activities, label_info
-from analyze import MAX_APS, MotionDetector, open_port
+from analyze import MAX_APS, MotionDetector, open_port, parse_line
 from breathing import Breathing
 from timeline import Timeline
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
@@ -71,6 +71,9 @@ ALERT_MAX = 8                               # device links that may drive the al
 EXT_EVERY_S = 1.0                           # EXT,1 repeated this often (the board holds it 5 s)
 ACT_LABEL_RE = re.compile(r'[a-z0-9_]{1,24}')  # an activity's key (own names allowed)
 ROUTER_NAME_MAX, ROUTER_NAMES_MAX = 24, 32    # nicknames you give routers (by BSSID)
+BOARD_NAMES_MAX = 16                           # ...and other ackwave boards (by MAC), same length
+SAT_GONE_S = 10                                # another board not heard this long: gone
+SAT_MAX = 16
 ACT_HOLD_S = 3.0                              # an activity counts once it lasts this long (no flicker)
 ACT_NOT_KEPT = ('uncalibrated', 'no-data', 'unknown')   # shown, but not filed in the timeline
 
@@ -202,6 +205,8 @@ class Dashboard:
                  light_call=http_call, light_run=None):
         self.s, self.send, self.log_name, self.prefs = state, send, log_name, prefs
         state.devices.router_name = self._router_name   # nicknames on every page
+        state.devices.board_name = lambda m: self.cfg['board_names'].get(m)
+        self.sats = {}                   # other boards heard through ours: MAC -> latest report
         self.sessions = Sessions(sessions_dir) if sessions_dir else None
         # Where and when motion happened, on disk (timeline.py): the periods
         # still open are kept here until they end
@@ -218,7 +223,7 @@ class Dashboard:
         self.lock = threading.Lock()
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
-        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, act_place=0)   # sound, sens: kept on the board; None = its own
+        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, board_names={}, act_place=0)   # sound, sens: kept on the board; None = its own
         # Device links that drive the alerts (light, buzzer, LED) besides the board:
         # src -> True once that link's slow window confirmed its current motion
         self.confirmed = {}
@@ -243,6 +248,10 @@ class Dashboard:
                 if isinstance(rn, dict) and len(rn) <= ROUTER_NAMES_MAX:
                     self.cfg['router_names'] = {k.lower(): v for k, v in rn.items()
                                                 if isinstance(k, str) and MAC_RE.fullmatch(k) and _router_nick(v)}
+                bn = got.get('board_names')
+                if isinstance(bn, dict) and len(bn) <= BOARD_NAMES_MAX:
+                    self.cfg['board_names'] = {k.lower(): v for k, v in bn.items()
+                                               if isinstance(k, str) and MAC_RE.fullmatch(k) and _router_nick(v)}
             except (OSError, ValueError):
                 got = {}
         try:                                     # re-applied whenever the board differs
@@ -355,6 +364,47 @@ class Dashboard:
             end = sp[-1][1] if sp and sp[-1][1] is not None else None
             self._period('board', False, s.wall(end) if end is not None else (s.last_wall or time.time()))
 
+    # ---------- other boards (their hellos, heard by ours) ----------
+    def board_label(self, mac):
+        return self.cfg['board_names'].get(mac) or f"Board {mac[-5:]}"
+
+    def _sat(self, line):
+        ev = parse_line(line)
+        if not ev or ev[0] != 'sat':
+            return
+        d, now = ev[1], time.time()
+        old = self.sats.get(d['mac'])
+        if old is None and len(self.sats) >= SAT_MAX:
+            return
+        if old and old['seq'] == d['seq'] and now - old['at'] < SAT_GONE_S:
+            return                                   # the same hello, heard twice
+        d['at'] = now
+        d['since'] = old['since'] if old and old['motion'] == d['motion'] and now - old['at'] < SAT_GONE_S else now
+        self.sats[d['mac']] = d
+        self._period('sat:' + d['mac'], d['motion'] and d['calibrated'], now, self.board_label(d['mac']))
+
+    def _sats_gone(self):
+        """A board that went quiet: its open motion period ends when it was last heard."""
+        now = time.time()
+        for mac, d in self.sats.items():
+            if now - d['at'] > SAT_GONE_S:
+                self._period('sat:' + mac, False, d['at'])
+
+    def _boards(self):
+        """The other boards, as the hub hears them (their hellos)."""
+        now = time.time()
+        out = []
+        for mac, d in sorted(self.sats.items()):
+            gone = now - d['at'] > SAT_GONE_S
+            out.append(dict(mac=mac, name=self.board_label(mac), nick=self.cfg['board_names'].get(mac, ''),
+                            state='gone' if gone else 'calibrating' if not d['calibrated'] else
+                            'motion' if d['motion'] else 'still',
+                            level=round(max(d['k_short'], d['k_long']), 2), weak=d['weak'],
+                            acks=d['acks'], router_rssi=d['router_rssi'], links=d['links'],
+                            up_s=d['up_s'], heard_s=round(now - d['at'], 1), rssi=d['rssi'],
+                            since=r2(d['since'])))
+        return out
+
     def _link_key(self, src):
         if src < MAX_APS:
             return f'ap:{src}'
@@ -385,7 +435,7 @@ class Dashboard:
         for e in self.link_events:
             if e[1] is None:
                 e[1] = max(e[0], self.s.last_wall or e[0])
-        for key in [k for k in self._open if k != 'board']:
+        for key in [k for k in self._open if k != 'board' and not k.startswith('sat:')]:
             self._period(key, False, self.s.last_wall or time.time())
         self.links.clear()
         self.csi_ts = None
@@ -491,6 +541,8 @@ class Dashboard:
     # ---------- input ----------
     def feed(self, line):
         with self.lock:
+            if line.startswith('SAT,'):
+                self._sat(line)
             self.s.feed(line)
             self.version += 1
             self._board_period()
@@ -511,6 +563,7 @@ class Dashboard:
         """Once a second from a timer, so the light still goes off when no data
         comes, and the board keeps hearing that a device link sees motion."""
         with self.lock:
+            self._sats_gone()
             self._light_rule()
             self._flush()
 
@@ -704,6 +757,25 @@ class Dashboard:
                     names[bssid.lower()] = name
                     msg = f'Router named "{name}"'
                 self._save_settings()
+            elif what == 'board_name':
+                mac, name = c.get('mac'), c.get('name')
+                if not isinstance(mac, str) or not MAC_RE.fullmatch(mac):
+                    return False, 'bad board address'
+                if not isinstance(name, str):
+                    return False, 'bad name'
+                name = ' '.join(name.split())
+                names = self.cfg['board_names']
+                if not name:
+                    names.pop(mac.lower(), None)
+                    msg = 'Name removed'
+                elif not _router_nick(name):
+                    return False, f'a name is 1-{ROUTER_NAME_MAX} characters'
+                elif mac.lower() not in names and len(names) >= BOARD_NAMES_MAX:
+                    return False, 'too many board names: remove one first'
+                else:
+                    names[mac.lower()] = name
+                    msg = f'Board named "{name}"'
+                self._save_settings()
             elif what == 'alerts':
                 keys = c.get('keys')
                 if not isinstance(keys, list) or len(keys) > ALERT_MAX or not all(
@@ -890,7 +962,7 @@ class Dashboard:
         with self.lock:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
-                       routers=self._routers(), tz=PC_TZ,
+                       routers=self._routers(), boards=self._boards(), tz=PC_TZ,
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
                        thresholds=self._thresholds(), today=self._today_totals(),
                        radio=self._radio(), channel=s.channel[0] if s.channel else None,
@@ -1091,7 +1163,7 @@ class Dashboard:
         the board's verdict first, then routers, then devices."""
         hours = min(max(hours if math.isfinite(hours) else 24.0, 30 / 3600), 168.0)   # 30 s to 7 days
         with self.lock:
-            now = self.s.last_wall or time.time()
+            now = max(self.s.last_wall or 0, time.time())    # board periods use the PC clock
             t0 = now - hours * 3600
             spans = [list(p) for p in self.timeline.read(t0, now)] if self.timeline else []
             spans += [[w0, now, k, nm, True] for k, (w0, nm) in self._open.items() if w0 <= now]
@@ -1106,9 +1178,12 @@ class Dashboard:
             for k in names:                          # today's names win (a router renamed since)
                 if k.startswith('ap:'):
                     names[k] = self._router_name(int(k[3:]))
+                elif k.startswith('sat:'):
+                    names[k] = self.board_label(k[4:])
                 elif k != 'board' and k in self.s.devices.devs:
                     names[k] = self.s.devices.name(k) or names[k]
-            order = lambda k: (0 if k == 'board' else 1 if k == 'activity' else 2 if k.startswith('ap:') else 3, k)
+            order = lambda k: (0 if k == 'board' else 1 if k.startswith('sat:') else 2 if k == 'activity'
+                               else 3 if k.startswith('ap:') else 4, k)
             lanes = [dict(key=k, name='Board' if k == 'board' else names[k])
                      for k in sorted(names, key=order)]
             if not any(l['key'] == 'board' for l in lanes):

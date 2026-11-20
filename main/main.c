@@ -108,6 +108,10 @@ static int node_ch[MAX_NODES];   // channel each node was last heard on
 static poke_gate_t gate;          // which APs / devices are worth poking
 static seen_list_t seen;          // devices heard on our network
 static peer_list_t peers;         // other ackwave boards heard (under seen_mux too)
+static sat_report_t my_rep;       // what our hellos say (under seen_mux; print_task fills it)
+static volatile uint32_t hello_soon;   // our verdict changed: say it now
+typedef struct { uint8_t mac[6]; int8_t rssi; sat_report_t rep; } sat_rx_t;
+static QueueHandle_t sat_q;       // other boards' reports, printed by the control task
 static portMUX_TYPE seen_mux = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t q;
 static uint8_t my_mac[6];
@@ -578,16 +582,21 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;
     }
     if (type != WIFI_PKT_MGMT) return;
-    uint8_t pmac[6], pbssid[6];
-    int pch;
-    if (parse_hello(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, pmac, pbssid, &pch)) {
+    hello_t hl;
+    if (parse_hello(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, &hl)) {
+        const uint8_t *pmac = hl.mac;
         if (memcmp(pmac, my_mac, 6) == 0) return;
         int rssi = pkt->rx_ctrl.rssi;
         taskENTER_CRITICAL(&seen_mux);
         bool fresh = peer_find(&peers, pmac, now_ms()) < 0;
-        peer_note(&peers, pmac, pbssid, pkt->rx_ctrl.channel, rssi, now_ms());
+        peer_note(&peers, pmac, hl.bssid, pkt->rx_ctrl.channel, rssi, now_ms());
         if (fresh) seen_forget_peer(&seen, pmac);
         taskEXIT_CRITICAL(&seen_mux);
+        if (hl.has_report && sat_q) {
+            sat_rx_t r = { .rssi = (int8_t)rssi, .rep = hl.rep };
+            memcpy(r.mac, pmac, 6);
+            xQueueSend(sat_q, &r, 0);              // full: this one is skipped, the next comes in 1 s
+        }
         int dn = node_find(&nodes, pmac);          // poked like a device: its signal and channel
         if (dn >= MAX_APS) {
             gate_rssi(&gate, dn, rssi);
@@ -670,7 +679,7 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
 static void poke_task(void *arg) {
     uint8_t frame[NULL_FRAME_LEN], hello[HELLO_LEN];
     int rr[2] = {0, 0}, slot = 0;
-    uint32_t next_hello = 0;
+    uint32_t next_hello = 0, last_hello = 0;
     TickType_t wake = xTaskGetTickCount();
     TickType_t period = pdMS_TO_TICKS(500 / POKE_HZ);
     if (period == 0) period = 1;
@@ -681,9 +690,19 @@ static void poke_task(void *arg) {
         if (scanning) continue;
         // Once a second a device slot says hello to the other boards
         // (only once our router is found, so the channel is the right one)
-        if (devs && node_count(&nodes) > 0 && deadline_passed(now_ms(), next_hello)) {
-            next_hello = now_ms() + HELLO_EVERY_MS;
-            build_hello(hello, my_mac, nodes.mac[0], cur_ch);
+        uint32_t tn = now_ms();
+        if (devs && node_count(&nodes) > 0 && (deadline_passed(tn, next_hello) ||
+            (hello_soon && older_than(tn, last_hello, HELLO_SOON_MS)))) {
+            next_hello = tn + HELLO_EVERY_MS;
+            last_hello = tn;
+            hello_soon = 0;
+            sat_report_t r;
+            taskENTER_CRITICAL(&seen_mux);
+            my_rep.seq++;
+            my_rep.up_s = (uint32_t)(esp_timer_get_time() / 1000000);
+            r = my_rep;
+            taskEXIT_CRITICAL(&seen_mux);
+            build_hello(hello, my_mac, nodes.mac[0], cur_ch, &r);
             esp_wifi_80211_tx(WIFI_IF_STA, hello, sizeof hello, true);
             continue;
         }
@@ -1060,6 +1079,12 @@ static void control_task(void *arg) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
         poll_cmds();
+        // SAT,<mac>,<rssi>,<seq>,<flags>,<k_short>,<k_long>,<acks>,<router rssi>,<links>,<up_s>
+        sat_rx_t sr;
+        while (sat_q && xQueueReceive(sat_q, &sr, 0) == pdTRUE)
+            printf("SAT," MACF ",%d,%u,%u,%u,%u,%u,%d,%u,%" PRIu32 "\n", MACA(sr.mac), sr.rssi,
+                   sr.rep.seq, sr.rep.flags, sr.rep.k_short, sr.rep.k_long, sr.rep.acks,
+                   sr.rep.rssi, sr.rep.n_dev, sr.rep.up_s);
         led_update(!my_ssid[0] && !aps.n); // no network chosen yet: yellow
 
         for (int n = node_count(&nodes); printed < n; printed++) {
@@ -1181,6 +1206,7 @@ static void print_task(void *arg) {
     // Link watch: a weak link is noisy and looks like motion, so no beeps then
     int64_t link_from = 0;
     int link_acks = 0, link_rssi_sum = 0;
+    int link_rate = 0, link_rssi_now = -127;     // the last 5 s, for our hellos
     bool link_weak = false;
     csi_pkt_t p;
     for (;;) {
@@ -1206,6 +1232,8 @@ static void print_task(void *arg) {
             int rate = (int)((int64_t)link_acks * 1000000 / (p.ts - link_from));
             int rssi = link_acks ? link_rssi_sum / link_acks : -127;
             bool weak = link_from > 0 && (rate < LINK_MIN_ACKS || rssi < LINK_MIN_RSSI);
+            link_rate = rate;
+            link_rssi_now = rssi;
             if (weak != link_weak)
                 printf("LINK,%" PRId64 ",%s,%d,%d\n", p.ts, weak ? "weak" : "ok", rate, rssi);
             link_weak = weak;
@@ -1224,6 +1252,22 @@ static void print_task(void *arg) {
                 if (!det.motion && ms > det.c.on_short * f) led_blip_ms = clock_ms() | 1;
             }
         }
+        {                                    // what our hellos say about us
+            float ms, ml, f = det.floor;
+            md_max_scores(&det, p.ts, &ms, &ml);
+            int nd = 0;
+            for (int k = 0; k < MAX_DEVS; k++) nd += node_active(&nodes, DEV_NODE(k));
+            taskENTER_CRITICAL(&seen_mux);
+            my_rep.flags = (uint8_t)((det.motion ? REP_MOTION : 0) |
+                                     (det.phase > MD_CAL_COLLECT ? REP_CALIBRATED : 0) |
+                                     (link_weak ? REP_WEAK : 0));
+            my_rep.k_short = rep_k(ms, det.c.on_short * f);
+            my_rep.k_long = rep_k(ml, det.c.on_long * f);
+            my_rep.acks = (uint8_t)(link_rate > 255 ? 255 : link_rate);
+            my_rep.rssi = (int8_t)(link_rssi_now < -127 ? -127 : link_rssi_now);
+            my_rep.n_dev = (uint8_t)nd;
+            taskEXIT_CRITICAL(&seen_mux);
+        }
         bool cal = det.phase <= MD_CAL_COLLECT;  // no quiet level yet
         if (led_cal && !cal) buzzer_auto(&TUNE_READY);   // calibrated: watching now
         led_cal = cal;
@@ -1237,6 +1281,7 @@ static void print_task(void *arg) {
             md_max_scores(&det, p.ts, &ms, &ml);
             printf("STATE,%" PRId64 ",%s,%d,%d\n", p.ts, change > 0 ? "motion" : "still",
                    (int)(ms * 1000), (int)(ml * 1000));
+            hello_soon = 1;                  // the other boards hear it at once
             beep_at = change > 0 ? p.ts + (int64_t)BEEP_AFTER_MS * 1000 : -1;
             if (change < 0 && beeped && snd_mode != SND_OFF) {
                 tune_t t = tune_motion(false);
@@ -1331,6 +1376,7 @@ void app_main(void) {
     // Queues + printers must exist before CSI is enabled
     q = xQueueCreate(32, sizeof(csi_pkt_t));
     configASSERT(q);
+    sat_q = xQueueCreate(16, sizeof(sat_rx_t));      // NULL: no SAT lines, sensing goes on
     xTaskCreate(print_task, "csi_print", 4096, NULL, 5, NULL);
 #if CSI_PROBE
     probe_q = xQueueCreate(64, sizeof(probe_rec_t));

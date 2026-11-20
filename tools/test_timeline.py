@@ -23,7 +23,7 @@ def store():
     assert not tl.add(now - 10, now, '../etc', 'x'), "keys are checked"
     assert not tl.add('soon', now, 'board', 'x')
     got = tl.read(now - 3600, now)
-    assert [p[2] for p in got] == ['board', 'ap:1'] and got[0][1] - got[0][0] == 10, got
+    assert [p[2] for p in got] == ['board', 'ap:1'] and abs(got[0][1] - got[0][0] - 10) < 0.021, got
     assert tl.read(now - 50, now) == [], "periods outside the range are left out"
     # a crash can tear the last line: it is skipped, the rest still reads
     with open(tl.path(datetime.fromtimestamp(now - 100).strftime('%Y-%m-%d')), 'a') as f:
@@ -32,10 +32,10 @@ def store():
     # a period that started yesterday shows in a range that starts today
     midnight = datetime.combine(datetime.now().date(), datetime.min.time()).timestamp()
     assert tl.add(midnight - 30, midnight + 30, 'board', 'Board')
-    assert any(p[0] == round(midnight - 30, 2) for p in tl.read(midnight + 1, midnight + 60))
+    assert any(abs(p[0] - (midnight - 30)) < 0.011 for p in tl.read(midnight + 1, midnight + 60))
     # a stuck verdict is cut at 24 h; names are cut at 40 characters
     assert tl.add(now - 5 * 86400, now, 'board', 'x' * 99)
-    p = [p for p in tl.read(now - 6 * 86400, now) if p[0] == round(now - 5 * 86400, 2)][0]
+    p = [p for p in tl.read(now - 6 * 86400, now) if abs(p[0] - (now - 5 * 86400)) < 0.011][0]
     assert p[1] - p[0] <= 86400 and len(p[3]) == 40
     assert tl.days()[0] == datetime.now().strftime('%Y-%m-%d')
     yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')

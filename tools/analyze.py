@@ -54,7 +54,7 @@ WHYS = ('boot', 'button', 'rssi', 'channel')
 
 def parse_line(line):
     """Returns (kind, dict) for the board's lines (CSI, CHANNEL, LEARNED, STATE,
-    STATS, CALIB, GATE, DEV, PEER, POKING, UNPOKED, REFUSED), else None."""
+    STATS, CALIB, GATE, DEV, PEER, SAT, POKING, UNPOKED, REFUSED), else None."""
     line = line.strip()
     try:
         if line.startswith('CSI,'):
@@ -106,6 +106,15 @@ def parse_line(line):
                 return None
             return 'peer', dict(mac=p[1].lower(), rssi=int(p[2]), n=int(p[3]),
                                 age_ms=int(p[4]), ch=int(p[5]), same=p[6] == '1')
+        if line.startswith('SAT,'):                      # another board's own verdict (its hello)
+            p = line.split(',')
+            if len(p) < 11 or len(p[1]) != 17:
+                return None
+            fl = int(p[4])
+            return 'sat', dict(mac=p[1].lower(), rssi=int(p[2]), seq=int(p[3]),
+                               motion=bool(fl & 1), calibrated=bool(fl & 2), weak=bool(fl & 4),
+                               k_short=int(p[5]) / 50, k_long=int(p[6]) / 50, acks=int(p[7]),
+                               router_rssi=int(p[8]), links=int(p[9]), up_s=int(p[10]))
         if line.startswith('POKING,'):
             p = line.split(',')
             return 'poking', dict(idx=int(p[1]), mac=p[2].lower())

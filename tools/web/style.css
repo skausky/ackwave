@@ -481,3 +481,21 @@ body.simple .nav a[data-adv] { display: none; }
 .act-axes { margin-top: 6px; font-size: 15px; }
 .act-axes b { color: var(--fg); }
 .act-trust { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+
+/* ---------- other boards (Home) ---------- */
+.boards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.board-tile { background: var(--card2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  display: grid; gap: 5px; --c: var(--still); }
+.board-tile.motion { --c: var(--motion); border-color: rgba(255,90,79,.45); }
+.board-tile.calibrating { --c: var(--cal); }
+.board-tile.gone { --c: var(--scan); opacity: .6; }
+.board-tile .name { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.board-tile .name > span { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.board-tile .name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-tile .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--c); flex: none; }
+.board-tile.motion .dot { box-shadow: 0 0 8px var(--c); }
+.board-tile .word { color: var(--c); font-weight: 700; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+.bt-meter { position: relative; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.bt-meter::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: var(--motion); }
+.bt-fill { height: 100%; background: var(--c); border-radius: 3px; transition: width .4s; }
+.board-tile button { justify-self: start; }

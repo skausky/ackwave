@@ -2,7 +2,8 @@
 
 One line per finished motion period of one link: the board's own verdict
 ('board'), a router link ('ap:<n>'), a poked device's link (its MAC), or a
-recognised activity ('activity', its name says which):
+recognised activity ('activity', its name says which), or another ackwave
+board's own verdict ('sat:<its MAC>', heard by the board on USB):
 
     {"t0": 1795100000.1, "t1": 1795100012.6, "key": "board", "name": "Board"}
 
@@ -12,13 +13,14 @@ most the periods still open. Reading a range returns the periods that
 overlap it, oldest first; periods still open come from the caller.
 """
 import json
+import math
 import os
 import re
 import time
 from datetime import datetime, timedelta
 
 FILE_RE = re.compile(r'timeline-(\d{4}-\d{2}-\d{2})\.jsonl$')
-KEY_RE = re.compile(r'board|activity|ap:[0-7]|[0-9a-f]{2}(:[0-9a-f]{2}){5}')   # activity: name = what it was
+KEY_RE = re.compile(r'board|activity|ap:[0-7]|(sat:)?[0-9a-f]{2}(:[0-9a-f]{2}){5}')   # activity: name = what it was
 MAX_SPAN_S = 24 * 3600            # a period longer than this is cut (a stuck verdict)
 MAX_RANGE_S = 7 * 24 * 3600       # the longest range read at once
 NAME_MAX = 40
@@ -45,7 +47,11 @@ class Timeline:
         if not (t1 >= t0 > 0) or not isinstance(key, str) or not KEY_RE.fullmatch(key):
             return False
         t1 = min(t1, t0 + MAX_SPAN_S)
-        rec = dict(t0=round(t0, 2), t1=round(t1, 2), key=key, name=str(name)[:NAME_MAX])
+        # to 1/100 s, start rounded down and end up: a period never shrinks
+        # (rounding the start up could put it after "now")
+        t0 = math.floor(t0 * 100) / 100
+        rec = dict(t0=t0, t1=min(math.ceil(t1 * 100) / 100, t0 + MAX_SPAN_S), key=key,
+                   name=str(name)[:NAME_MAX])
         try:
             os.makedirs(self.folder, exist_ok=True)
             with open(self.path(_day(t0)), 'a', encoding='utf-8') as f:

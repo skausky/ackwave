@@ -283,7 +283,39 @@ function fmtAgo(s) {
   return s < 60 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`;
 }
 
+// Other ackwave boards: their own verdicts, from the hellos the board on USB hears
+function renderBoards() {
+  const bs = (slow && slow.boards) || [];
+  $('#boards-card').hidden = !bs.length;
+  if (!bs.length) return;
+  const n = bs.filter((b) => b.state === 'motion').length;
+  $('#boards-state').textContent = `${bs.length} heard${n ? ` · ${n} see${n > 1 ? '' : 's'} motion` : ''}`;
+  const WORD = { motion: 'Motion', still: 'Still', calibrating: 'Calibrating', gone: 'Not heard' };
+  const nowS = Date.now() / 1000;
+  $('#boards').replaceChildren(...bs.map((b) => {
+    const pct = Math.max(0, Math.min(100, b.level * 50));            // 1.0 = threshold = middle
+    const sub = b.state === 'gone' ? `last heard ${fmtSpan(b.heard_s)} ago`
+      : b.state === 'calibrating' ? 'measuring the quiet level'
+      : `${b.state === 'motion' ? 'moving' : 'still'} for ${fmtSpan(nowS - b.since)}`;
+    const ren = el('button', { type: 'button', className: 'ghost small', textContent: b.nick ? 'Rename' : 'Name it',
+      onclick: () => {
+        const name = prompt(`A name for ${b.name} (${b.mac}), e.g. its room. Leave empty for "Board ${b.mac.slice(-5)}".`, b.nick);
+        if (name !== null) cmd({ cmd: 'board_name', mac: b.mac, name });
+      } });
+    return el('div', { className: `board-tile ${b.state}` },
+      el('div', { className: 'name' }, el('span', {}, el('i', { className: 'dot' }), el('b', { textContent: b.name })),
+        el('span', { className: 'word', textContent: WORD[b.state] || b.state })),
+      el('div', { className: 'muted small', textContent: sub }),
+      el('div', { className: 'bt-meter', title: 'How close its link is to the motion threshold (the mark)' },
+        el('div', { className: 'bt-fill', style: `width:${pct}%` })),
+      el('div', { className: 'muted small', textContent:
+        `router ${b.acks}/s · ${b.router_rssi} dBm${b.weak ? ' · weak link' : ''} · ${b.links} other link${b.links === 1 ? '' : 's'} · heard at ${b.rssi} dBm` }),
+      ren);
+  }));
+}
+
 function renderHome() {
+  renderBoards();
   // Where now: the links that see motion (with per-link analysis on)
   const mv = ((slow && slow.radio) || []).filter((r) => r.moving).map((r) => r.label);
   const wn = $('#home-where');

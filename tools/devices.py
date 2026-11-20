@@ -164,6 +164,7 @@ class Devices:
         self.manual = set(manual)
         self.devs = {}
         self.router_name = None          # node index -> name (the dashboard sets it); None: 'Router N'
+        self.board_name = None           # another board's MAC -> your name for it, or None
         self.poking = {}                 # mac -> node index, as the board last said
         self._cycle = {}
         self.gate = {}                   # node index -> last GATE dict
@@ -340,7 +341,8 @@ class Devices:
     def name(self, mac):
         dv = self.devs.get(mac)
         if dv is not None and dv.board:
-            return 'ackwave board ' + mac[-5:]
+            got = self.board_name(mac) if self.board_name else None
+            return got or 'ackwave board ' + mac[-5:]
         return self.oui.name(mac) if self.oui else ('private address' if mac_is_random(mac) else '')
 
     def link_label(self, idx):

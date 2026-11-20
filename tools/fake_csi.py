@@ -132,6 +132,9 @@ def fake_devices(t):
         r = rssi + (round(wob * math.sin(t * 0.7 + i)) if rssi else 0)
         out.append(f"DEV,{m},{r},{int(rate * t)},{int(t / 3)},{0 if rate else 4000},{i % 2}")  # its router
     out.append(f"PEER,{DEMO_PEER},-58,{int(t)},300,6,1")   # hellos, once a second
+    mv = int(t // 40) % 3 == 1                                # its own verdict: motion now and then
+    out.append(f"SAT,{DEMO_PEER},-58,{int(t)},{3 if mv else 2},{80 if mv else 18},{60 if mv else 14},"
+               f"95,-60,1,{int(t)}")
     return out
 
 

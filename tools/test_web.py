@@ -5,6 +5,7 @@ import http.client
 import json
 import os
 import tempfile
+import time
 
 from fake_csi import generate
 from gui import State
@@ -37,7 +38,7 @@ def main():
     assert len(blob) < 400_000, len(blob)
     assert f['header']['badge']['word'] in ('STILL', 'MOTION', 'CALIBRATING')
     assert f['score']['series'] and f['window'][1] > f['window'][0]
-    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'act_place': 0}
+    assert 'links' not in sl and sl['settings'] == {'per_link': False, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0}
     assert sent[:2] == ['SOUND', 'SENS'], "asks the board for its buzzer and threshold settings"
     assert sl['timeline']['end'] >= sl['timeline']['start']
     f600 = dash.fast(600)
@@ -129,7 +130,7 @@ def main():
     # Per-link mode: off by default; once on, each ACK link gets its own analysis
     assert dash.command({'cmd': 'settings', 'per_link': True})[0]
     assert json.load(open(os.path.join(tmp, 'dashboard.json'))) == {
-        'per_link': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'act_place': 0,
+        'per_link': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0,
         'light': {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120}}
     for line in lines[half:]:
         dash.feed(line)
@@ -495,6 +496,48 @@ def routers_named(d, tmp):
     assert d.s.devices.link_label(1) == 'Router 2', "an empty name removes the nickname"
 
 
+def other_boards(tmp):
+    """Other boards' verdicts (SAT lines, from their hellos): listed with a
+    name you can change, each hello counted once, motion filed in the
+    timeline, and a board that goes quiet shown as gone."""
+    from timeline import Timeline
+    B = _mac(0x24, 0x0a, 0xc4, 0x12, 0x34, 0x99)
+    path = os.path.join(tmp, 'boards.json')
+    d = Dashboard(State(60), settings=path)
+    d.timeline = Timeline(tmp)
+    assert d.slow(30)['boards'] == []
+    d.feed(f'SAT,{B},-41,7,2,20,15,96,-57,2,3600\n')           # calibrated, still
+    b = d.slow(30)['boards'][0]
+    assert b['mac'] == B and b['state'] == 'still' and b['name'] == 'Board 34:99', b
+    assert b['level'] == 0.4 and b['acks'] == 96 and b['router_rssi'] == -57 and b['links'] == 2
+    d.feed(f'SAT,{B},-41,8,3,80,40,96,-57,2,3601\n')           # motion
+    d.feed(f'SAT,{B},-41,8,3,80,40,96,-57,2,3601\n')           # the same hello again: ignored
+    assert d.slow(30)['boards'][0]['state'] == 'motion' and 'sat:' + B in d._open
+    d.feed(f'SAT,{B},-41,9,2,10,10,96,-57,2,3602\n')           # still again: a period filed
+    got = [p for p in d.timeline.read(time.time() - 60, time.time() + 1) if p[2] == 'sat:' + B]
+    assert len(got) == 1 and got[0][3] == 'Board 34:99', got
+    lanes = [l['key'] for l in d.timeline_range(1)['lanes']]
+    assert lanes[:2] == ['board', 'sat:' + B], lanes
+    d.feed(f'SAT,{B},-41,10,0,0,0,0,-127,0,5\n')               # restarted: calibrating
+    assert d.slow(30)['boards'][0]['state'] == 'calibrating'
+    ok, msg = d.command({'cmd': 'board_name', 'mac': B.upper(), 'name': ' Kitchen '})
+    assert ok and d.slow(30)['boards'][0]['name'] == 'Kitchen', msg
+    with open(path) as f:
+        assert json.load(f)['board_names'] == {B: 'Kitchen'}
+    assert Dashboard(State(60), settings=path).cfg['board_names'] == {B: 'Kitchen'}
+    for bad in ({'mac': 'nope', 'name': 'x'}, {'mac': B, 'name': 'x' * 25}, {'mac': B, 'name': None}):
+        assert not d.command(dict(bad, cmd='board_name'))[0], bad
+    d.feed(f'PEER,{B},-41,30,200,6,1\n')                       # the same board in Devices: your name
+    assert any(r['name'] == 'Kitchen' for r in d.slow(30)['devices']['rows'])
+    d.feed(f'SAT,{B},-41,11,3,80,40,96,-57,2,3700\n')
+    d.sats[B]['at'] -= 60                                       # not heard for a minute
+    d.tick()
+    assert d.slow(30)['boards'][0]['state'] == 'gone' and 'sat:' + B not in d._open
+    for junk in ('SAT,nope', f'SAT,{B},x,1,2,3,4,5,6,7,8', f'SAT,{B},-41,1,2'):
+        d.feed(junk + '\n')                                    # never an error
+    assert len(d.sats) == 1
+
+
 def device_alerts(tmp):
     """Device links you tick drive the alerts (light, and the board's LED and
     buzzer via EXT) once their slow window confirms; the board's verdict is
@@ -612,6 +655,7 @@ def pages_and_debug(tmp):
     assert sl['radio'][0]['key'] == 'ap:0' and sl['radio'][0]['label'] == 'Router 1'
     assert [(g['node'], g['state']) for g in sl['gates']] == [(0, 'ok'), (1, 'far')]
     routers_named(d, tmp)
+    other_boards(tmp)
     assert sl['thresholds']['on_short'] == 2.8 and sl['thresholds']['short_gate'] == 1.2
     assert set(sl['today']) == {'periods', 'blips', 'motion_s'}
     import web as webmod
