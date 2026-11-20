@@ -169,8 +169,26 @@ def house():
     d.tick()
     assert not d.slow(30)['house']['motion'], "two boards needed now"
     assert not d.command({'cmd': 'house_rule', 'rule': 'nope'})[0]
+    # the hub need not count: only the satellite drives the light then
+    assert d.command({'cmd': 'house_rule', 'rule': 'any'})[0]
+    ok, msg = d.command({'cmd': 'house_use', 'key': 'board', 'use': False})
+    assert ok and 'no longer counts' in msg and d.cfg['house_off'] == ['board']
+    d.house.since.pop('board', None)
+    d.feed(f'SAT,{sat},-40,50,2,10,10,95,-60,1,50\n')      # the satellite: still
+    d.tick()
+    assert not d.slow(30)['house']['motion'] and d._light_on is False, "the hub's motion no longer counts"
+    src = {x['key']: x['use'] for x in d.slow(30)['house']['sources']}
+    assert src == {'board': False, sat: True}, src
+    assert not d.command({'cmd': 'house_use', 'key': 'nope', 'use': True})[0]
+    assert not d.command({'cmd': 'house_use', 'key': 'board', 'use': 'yes'})[0]
+    assert d.command({'cmd': 'house_use', 'key': 'board', 'use': True})[0] and d.cfg['house_off'] == []
+    d0 = Dashboard(State(60), settings=os.path.join(tmp, 'alone.json'))
+    d0.cfg['house_off'] = ['board']                           # alone, the hub always counts
+    d0.s.det.motion, d0.s.det.floor = True, 0.02
+    d0._motion_now = lambda: True
+    assert d0._house()[0], "one board: exactly its verdict"
     with open(os.path.join(tmp, 'dashboard.json')) as f:
-        assert json.load(f)['house_rule'] == 'two'
+        assert json.load(f)['house_rule'] == 'any'
 
 
 def sat_links():

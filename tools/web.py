@@ -237,7 +237,7 @@ class Dashboard:
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
         self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, board_names={}, act_place=0, hub=None, paired=[],
-                        house_rule='confirm')   # sound, sens: kept on the board; None = its own
+                        house_rule='confirm', house_off=[])   # house_off: boards that don't count   # sound, sens: kept on the board; None = its own
         # Device links that drive the alerts (light, buzzer, LED) besides the board:
         # src -> True once that link's slow window confirmed its current motion
         self.confirmed = {}
@@ -289,6 +289,10 @@ class Dashboard:
             self.cfg['hub'] = hub.lower()
         if got.get('house_rule') in HOUSE_RULES:
             self.cfg['house_rule'] = got['house_rule']
+        ho = got.get('house_off')
+        if isinstance(ho, list) and len(ho) <= SAT_MAX + 1:
+            self.cfg['house_off'] = sorted({k.lower() for k in ho if isinstance(k, str) and
+                                            (k == 'board' or MAC_RE.fullmatch(k))})
         pr = got.get('paired')
         if isinstance(pr, list) and len(pr) <= SAT_MAX:
             self.cfg['paired'] = sorted({m.lower() for m in pr if isinstance(m, str) and MAC_RE.fullmatch(m)})
@@ -862,13 +866,14 @@ class Dashboard:
         """Every board's own verdict combined by the rule you chose (boards.House).
         One board alone: its verdict, exactly as before."""
         now = time.time()
-        states = {'board': self._motion_now()}
+        off = set(self.cfg['house_off']) if self.sats else set()   # alone, the hub always counts
+        states = {} if 'board' in off else {'board': self._motion_now()}
         for mac, d in self.sats.items():
-            if now - d['at'] <= SAT_GONE_S and d['calibrated']:
+            if now - d['at'] <= SAT_GONE_S and d['calibrated'] and mac not in off:
                 states[mac] = bool(d['motion'])
         self.house.update(states, now)
         motion, by = self.house.verdict(self.cfg['house_rule'], now, len(states))
-        if len(states) > 1:
+        if len(states) > 1 or len(self.sats):
             self._period('house', motion, now, 'House')
         self.house_now = (motion, by)
         return motion, by
@@ -905,8 +910,11 @@ class Dashboard:
 
     def _house_slow(self):
         motion, by = self.house_now
+        off = set(self.cfg['house_off'])
+        sources = [dict(key='board', name='Hub', use='board' not in off)] + \
+            [dict(key=m, name=self.board_label(m), use=m not in off) for m in sorted(self.sats)]
         return dict(motion=motion, by=['Hub' if b == 'board' else self.board_label(b) for b in by],
-                    rule=self.cfg['house_rule'], rules={k: HOUSE_TEXT[k] for k in HOUSE_RULES},
+                    sources=sources, rule=self.cfg['house_rule'], rules={k: HOUSE_TEXT[k] for k in HOUSE_RULES},
                     boards=1 + sum(1 for d in self.sats.values() if time.time() - d['at'] <= SAT_GONE_S))
 
     def _debug_line(self, line):
@@ -989,6 +997,20 @@ class Dashboard:
                     return False, 'choosing a network needs a board'
                 self.s.outbox.append('USE_DEFAULT')
                 msg = 'Back to the default network: the board restarts (about 15 s)'
+            elif what == 'house_use':                    # a board counts for the house, or not
+                key, use = c.get('key'), c.get('use')
+                if not isinstance(key, str) or not (key == 'board' or MAC_RE.fullmatch(key)) \
+                        or not isinstance(use, bool):
+                    return False, 'bad board'
+                key = key.lower()
+                off = set(self.cfg['house_off'])
+                (off.discard if use else off.add)(key)
+                if len(off) > SAT_MAX + 1:
+                    return False, 'too many boards'
+                self.cfg['house_off'] = sorted(off)
+                self._save_settings()
+                name = 'The hub' if key == 'board' else self.board_label(key)
+                msg = f"{name} {'counts' if use else 'no longer counts'} for the light and alerts"
             elif what == 'house_rule':
                 if c.get('rule') not in HOUSE_RULES:
                     return False, 'bad rule'
@@ -2109,7 +2131,15 @@ def main():
         print(f"Logging to {log.ev_path}")
     prefs = os.path.join(a.out, 'devices.json')
     mode, picks = Devices.load_prefs(prefs)
-    state.devices = Devices(oui=Oui(), mode=mode, manual=picks)
+    oui = Oui()
+    state.devices = Devices(oui=oui, mode=mode, manual=picks)
+
+    def say_oui():                               # once: which maker list names the devices
+        oui.ready.wait()
+        print(f"Device makers: {len(oui.table)} prefixes from {oui.source}" if oui.table else
+              "Device makers: no list found (install ieee-data or arp-scan): devices show as 'unknown'",
+              flush=True)
+    threading.Thread(target=say_oui, daemon=True).start()
     opened = [open_port(src, a.baud) for src in a.source]
     lines, send = opened[0]
     state.live = send is not None

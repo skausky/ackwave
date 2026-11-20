@@ -502,3 +502,5 @@ body.simple .nav a[data-adv] { display: none; }
 .bt-fill { height: 100%; background: var(--c); border-radius: 3px; transition: width .4s; }
 .board-tile button { justify-self: start; }
 .map-show { margin: 2px 0 10px; flex-wrap: wrap; }
+.house-uses { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 4px 0 8px; }
+.house-use { display: flex; align-items: center; gap: 6px; }

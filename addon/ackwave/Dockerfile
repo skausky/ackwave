@@ -1,5 +1,6 @@
 FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+# ieee-data: the IEEE maker list (/usr/share/ieee-data/oui.csv) for device names
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata ieee-data \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir "numpy>=1.21" "pyserial>=3.5" "esptool>=4.7,<5"
 COPY tools /app/tools

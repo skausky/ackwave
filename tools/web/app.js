@@ -957,6 +957,15 @@ function renderHouse() {
     }
   for (const b of seg.children) b.classList.toggle('on', b.dataset.r === h.rule);
   $('#house-state').textContent = `${h.boards} boards`;
+  // which boards count (their motion still shows on their tiles and the timeline)
+  const box = $('#house-use');
+  box.replaceChildren(...(h.sources || []).map((src) => {
+    const cb = el('input', { type: 'checkbox', checked: src.use });
+    cb.onchange = () => cmd({ cmd: 'house_use', key: src.key, use: cb.checked });
+    return el('label', { className: 'house-use' }, cb, el('span', { textContent: src.name }));
+  }));
+  const none = (h.sources || []).length && !(h.sources || []).some((x) => x.use);
+  $('#house-none').hidden = !none;
 }
 function renderSens() {
   const board = slow && slow.sens, want = slow && slow.settings && slow.settings.sens;
