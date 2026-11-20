@@ -176,6 +176,9 @@ def house():
     d.house.since.pop('board', None)
     d.feed(f'SAT,{sat},-40,50,2,10,10,95,-60,1,50\n')      # the satellite: still
     d.tick()
+    assert d._light_on is True, "another board's alert holds a while (no flapping)"
+    d.others_until = 0.0                                     # 15 s later
+    d.tick()
     assert not d.slow(30)['house']['motion'] and d._light_on is False, "the hub's motion no longer counts"
     src = {x['key']: x['use'] for x in d.slow(30)['house']['sources']}
     assert src == {'board': False, sat: True}, src

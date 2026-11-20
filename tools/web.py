@@ -76,6 +76,7 @@ ROUTER_NAME_MAX, ROUTER_NAMES_MAX = 24, 32    # nicknames you give routers (by B
 BOARD_NAMES_MAX = 16                           # ...and other ackwave boards (by MAC), same length
 SAT_GONE_S = 10                                # another board not heard this long: gone
 SAT_MAX = 16
+OTHERS_HOLD_S = 15.0                           # another board's motion keeps the alert on this long after
 ACT_HOLD_S = 3.0                              # an activity counts once it lasts this long (no flicker)
 ACT_NOT_KEPT = ('uncalibrated', 'no-data', 'unknown')   # shown, but not filed in the timeline
 
@@ -852,7 +853,10 @@ class Dashboard:
         motion, by = self._house()
         if not self.send:
             return
-        ext = bool(self._alerting()) or any(b != 'board' for b in by)   # another board: LED, buzzer too
+        now_m = time.monotonic()
+        if any(b != 'board' for b in by):            # another board sees motion: held a while, so a
+            self.others_until = now_m + OTHERS_HOLD_S  # burst of movement is one alert, not ten
+        ext = bool(self._alerting()) or now_m < getattr(self, 'others_until', 0.0)
         self.light.update(motion or ext)
         now = time.monotonic()
         if ext and (not self.ext_sent or now - self.ext_at >= EXT_EVERY_S):
