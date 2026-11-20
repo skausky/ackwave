@@ -266,32 +266,11 @@ a device (`seen_note` in `csi_core.h`) but does not keep it.
 
 ## Satellites and a Pi hub
 
-More ESP32-S3 boards ("satellites") plus one on a Raspberry Pi as the hub;
-no board joins any network.
-
-- Each satellite pokes the router, devices and **each other** (an ESP32
-  answers pokes like any device), so links can cross the rooms you choose.
-- Satellites send results (motion, scores, activity), not raw CSI, to the hub
-  board over ESP-NOW; the hub board passes them to the Pi over USB, and the Pi
-  runs the dashboard (in Compact or Events-only storage).
-- The tiny network runs on each satellite; the Pi trains and sends weights.
-- Open questions to measure first: ESP-NOW range and airtime next to the
-  pokes, and keeping every board on the router's channel.
-
-**Step 1, built (2026-11-20, 4 boards on hand): boards find and poke each
-other.** Each board broadcasts a hello once a second (a 42-byte
-vendor-specific action frame from its real MAC: magic `ACKW`, version, channel,
-the router's BSSID; no network name). Boards that hear it list it (`PEER,<mac>,
-<rssi>,<hellos>,<age_ms>,<ch>,<same router>`), accept `POKE` for it like a
-device, and stop listing its made-up poke addresses as devices. On the PC a
-board shows in Devices as "ackwave board", needs no 3-minute watch, and comes
-first in Auto mode; one on another router is never poked. To measure on the
-hardware: does an unjoined ESP32 ACK the pokes (the board link's "answered"
-%), and how far the hello reaches.
-
-Next: each board on its own USB at the PC (`./csi web /dev/ttyACM1 --port 8766
---out sessions/board2`, one dashboard per board)
-until ESP-NOW carries their results to the hub.
+More ESP32-S3 boards plus one on USB as the hub (on a PC or, later, a
+Raspberry Pi); no board joins any network. Built so far: boards find and
+poke each other, and send their own verdict sealed with AES-CCM under a key
+per board (no ESP-NOW). The plan for several boards in the dashboard,
+including that design, is in [multi-board.md](multi-board.md).
 
 ## Build order
 
