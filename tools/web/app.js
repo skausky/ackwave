@@ -82,6 +82,7 @@ function connect() {
   };
 }
 
+window.ackCmd = (body) => cmd(body);      // the Map page names routers through it
 async function cmd(body) {
   try {
     const r = await fetch('cmd', {

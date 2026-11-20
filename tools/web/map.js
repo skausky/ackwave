@@ -37,6 +37,9 @@ window.AckMap = (() => {
   let pageView = null, homeFit = false;     // the Map page's view, kept while Home fits its own
   let radio = [], channel = 6, boardMotion = false;
   let others = [];                          // the other boards (slow.map_boards): each a point with its router
+  let routersInfo = [];                     // the hub's routers (slow.routers): idx -> bssid, for naming
+  let showOnly = null;                      // null = every board's links; 'hub' or 'sat:<mac>' = one board's
+  const WEAK_DBM = -80;                     // links weaker than this are drawn faint
   let autoFit = true;                       // refit as things appear, until you pan, zoom or drag
   let viewByUser = false;                   // only a view you set is saved
   let nodeCount = 0;
@@ -136,8 +139,10 @@ window.AckMap = (() => {
         out.push({ r, a, n, color: PALETTE[(live.length + 3 * k + j) % PALETTE.length], d: Math.hypot(n.x - a.x, n.y - a.y) });
       });
     });
-    return out;
+    if (!showOnly) return out;
+    return out.filter(({ a }) => (showOnly === 'hub' ? a === HUB : a.key === showOnly));
   }
+  const weak = (r) => r.rssi !== null && r.rssi !== undefined && r.rssi <= WEAK_DBM;
   const moving = (r) => (r.link ? !!r.link.moving && r.board.state !== 'gone'
     : r.board ? r.board.state === 'motion' : r.key === 'ap:0' ? boardMotion : !!r.moving);
 
@@ -167,7 +172,8 @@ window.AckMap = (() => {
     heatKey = key;
     const lam = lambda(), motionRgb = rgbOf(css('--motion'));
     const still = new ImageData(w, h), mov = new ImageData(w, h);
-    const spec = L.filter(({ d }) => d >= 0.05).map(({ a, n, color, d, r }) => ({ a, n, d, mv: moving(r), rgb: rgbOf(color) }));
+    const spec = L.filter(({ d }) => d >= 0.05).map(({ a, n, color, d, r }) =>
+      ({ a, n, d, mv: moving(r), rgb: rgbOf(color), w: weak(r) ? 0.35 : 1 }));
     for (let j = 0; j < h; j++) {
       const wy = M.view.y + (j * S - H / 2) / M.view.s;
       for (let i = 0; i < w; i++) {
@@ -175,7 +181,7 @@ window.AckMap = (() => {
         // overlapping links blend: opacity adds up, colour is their weighted mix
         let clear = 1, r = 0, g = 0, b = 0, sum = 0, clearMv = 1;
         for (const l of spec) {
-          const v = sensitivity(wx, wy, l.a, l.n, l.d, lam);
+          const v = l.w * sensitivity(wx, wy, l.a, l.n, l.d, lam);
           if (l.mv) { clearMv *= 1 - 0.75 * v ** 1.6; continue; }
           const a = 0.45 * v * v;
           clear *= 1 - a;
@@ -308,8 +314,9 @@ window.AckMap = (() => {
       const rot = Math.atan2(n.y - e.y, n.x - e.x), cx = (e.x + n.x) / 2, cy = (e.y + n.y) / 2;
       const a = (d + lam / 2) / 2, b = Math.sqrt(Math.max(a * a - d * d / 4, 0));
       ellipse(cx, cy, a, b, rot);                  // the first Fresnel zone: a thin outline
-      const mv = moving(r);
-      ctx.strokeStyle = mv ? motionC : alpha(color, 0.8); ctx.lineWidth = mv ? 1.8 : 1; ctx.setLineDash([]);
+      const mv = moving(r), wk = weak(r) && !mv;
+      ctx.strokeStyle = mv ? motionC : alpha(color, wk ? 0.3 : 0.8); ctx.lineWidth = mv ? 1.8 : 1;
+      ctx.setLineDash(wk ? [4, 4] : []);
       ctx.stroke();
       ctx.strokeStyle = alpha(color, 0.55); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(X(e.x), Y(e.y)); ctx.lineTo(X(n.x), Y(n.y)); ctx.stroke();
@@ -375,9 +382,28 @@ window.AckMap = (() => {
   }
 
   // ---------- the list beside the map ----------
+  // A router's address, from its key: 'r:<bssid>' or the hub's 'ap:N'
+  function bssidOf(key) {
+    if (key.startsWith('r:')) return key.slice(2);
+    const m = key.match(/^ap:(\d)$/);
+    const r = m && routersInfo.find((x) => x.idx === +m[1]);
+    return r ? r.bssid : null;
+  }
   function renderList() {
     const box = $('#map-links');
     box.replaceChildren();
+    if (others.length) {                       // which board's links to show
+      const seg = el('div', { className: 'seg map-show' });
+      for (const [k, name] of [[null, 'All'], ['hub', 'Hub'], ...others.map((b) => [b.key, b.label])]) {
+        const b = el('button', { type: 'button', textContent: name, className: showOnly === k ? 'on' : '' });
+        b.onclick = () => {
+          showOnly = k;                          // this page only: the layout itself lives on the PC
+          heatKey = ''; dirty = true; renderList();
+        };
+        seg.append(b);
+      }
+      box.append(el('div', { className: 'muted small', textContent: 'Show the links of' }), seg);
+    }
     const L = links();
     if (!L.length) box.append(el('p', { className: 'muted small', textContent: 'No live links yet.' }));
     for (const { r, n, color, d } of L) {
@@ -401,9 +427,19 @@ window.AckMap = (() => {
           : diff < 0 ? `${-diff} dB weaker than open air would give here (${Math.round(exp)} dBm): walls, furniture or people in between`
             : `${diff} dB stronger than expected here (${Math.round(exp)} dBm): it may be closer than placed, or a strong device`);
       }
-      if (!n.placed) rows.push('Placed from its signal (rough): drag the dot to where it really is.');
+      if (!n.placed && !n.board && n !== HUB) rows.push('Placed from its signal (rough): drag the dot to where it really is.');
+      if (weak(r)) rows.push(`Weak (${WEAK_DBM} dBm or less): drawn faint; its board relies on it little.`);
+      const bssid = r.ap ? bssidOf(n.key || '') : null;
+      if (bssid) {                               // name a router once, every page and board uses it
+        const nm = el('button', { type: 'button', className: 'ghost small', textContent: 'Name this router' });
+        nm.onclick = () => {
+          const name = prompt(`A name for the router ${bssid} (e.g. Main, Main upstairs, Secondary). Empty: back to the default.`, n.name || '');
+          if (name !== null) window.ackCmd({ cmd: 'router_name', bssid, name });
+        };
+        rows.push(nm);
+      }
       box.append(el('div', { className: 'map-link' + (mv ? ' moving' : '') }, head,
-        ...rows.map((t) => el('div', { className: 'muted small', textContent: t }))));
+        ...rows.map((t) => (typeof t === 'string' ? el('div', { className: 'muted small', textContent: t }) : t))));
     }
     $('#map-wave').textContent = `Channel ${channel} · ${(freq() / 1e6).toFixed(0)} MHz · wavelength ${M.unit === 'ft' ? (lambda() / IN).toFixed(1) + '″' : (lambda() * 100).toFixed(1) + ' cm'}`;
   }
@@ -710,13 +746,13 @@ window.AckMap = (() => {
       if (!started) { init(); started = true; }
       apply(m || {}); loaded = true; visible = true;
       syncControls(); resize();
-      radio = slow.radio || []; others = slow.map_boards || []; if (slow.channel) channel = slow.channel;
+      radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; if (slow.channel) channel = slow.channel;
       boardMotion = hubMoving(header);
       renderList(); draw(performance.now());
     },
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
-      if (slow) { radio = slow.radio || []; others = slow.map_boards || []; if (slow.channel) channel = slow.channel; }
+      if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; if (slow.channel) channel = slow.channel; }
       if (header) boardMotion = hubMoving(header);
       if (!visible || !loaded) return;
       dirty = true;

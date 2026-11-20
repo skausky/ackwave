@@ -501,3 +501,4 @@ body.simple .nav a[data-adv] { display: none; }
 .bt-meter::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: var(--motion); }
 .bt-fill { height: 100%; background: var(--c); border-radius: 3px; transition: width .4s; }
 .board-tile button { justify-self: start; }
+.map-show { margin: 2px 0 10px; flex-wrap: wrap; }
