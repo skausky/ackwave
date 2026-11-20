@@ -122,6 +122,7 @@ DEMO_DEVICES = [(_mac(0x50, 0x02, 0x91, 0x10, 0x20, 0x30), -62, 2.0, 0.5),
                 (_mac(0xda, 0xa1, 0x19, 0x70, 0x80, 0x90), -48, 9.0, 6.0),
                 (_mac(0xa4, 0xc1, 0xe8, 0xa0, 0xb0, 0xc0), 0, 0.0, 0.0)]
 DEMO_PEER = _mac(0x24, 0x0a, 0xc4, 0x12, 0x34, 0x56)    # a second ackwave board
+DEMO_ME = _mac(0x24, 0x0a, 0xc4, 0x11, 0x22, 0x33)      # the demo's own board (ME)
 
 
 def fake_devices(t):
@@ -134,7 +135,14 @@ def fake_devices(t):
     out.append(f"PEER,{DEMO_PEER},-58,{int(t)},300,6,1")   # hellos, once a second
     mv = int(t // 40) % 3 == 1                                # its own verdict: motion now and then
     out.append(f"SAT,{DEMO_PEER},-58,{int(t)},{3 if mv else 2},{80 if mv else 18},{60 if mv else 14},"
-               f"95,-60,1,{int(t)}")
+               f"95,-60,1,{int(t)},{_mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf1)},6")   # its router: the demo's 2nd
+    k = 3.2 if mv else 1.0                                   # its links: router, a plug, the hub
+    out.append(f"SATL,{DEMO_PEER},{_mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf1)}:3:{int(22 * k)}:{int(21 * k)},"
+               f"{DEMO_DEVICES[0][0]}:4:{int(30 * (1.1 if mv else 1))}:{int(28 * (1.1 if mv else 1))},"
+               f"{DEMO_ME}:4:{int(25 * k)}:{int(24 * k)}")
+    if int(t) % 10 < 5:                                      # every 10 s: who it hears
+        out.append(f"SURV,{DEMO_PEER},{_mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf1)}:0:-60,"
+                   f"{DEMO_ME}:1:-58,{DEMO_DEVICES[0][0]}:2:-55")
     return out
 
 

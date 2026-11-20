@@ -11,6 +11,7 @@ Lines from a stream that carries several boards (fake_csi --boards, later
 the hub) are tagged '@<mac>,<line>'; untagged lines belong to the board on
 that port.
 """
+import math
 import re
 import time
 from collections import deque
@@ -124,7 +125,8 @@ class OtherBoard:
                     router_rssi=(g or {}).get('rssi', 0) or 0, links=len(s.devices.poking),
                     up_s=int((st.get('ts') or 0) / 1e6), rssi=0, seq=0,
                     at=self.last or 0, since=self.since or self.last or 0, via='usb',
-                    hub_ch=self.pair.hub_ch, reports=self.pair.reports, answered=self.pair.answered)
+                    hub_ch=self.pair.hub_ch, reports=self.pair.reports, answered=self.pair.answered,
+                    bssid=(s.nodes.get(0) or '').lower() or None, ch=s.channel[0] if s.channel else None)
 
 
 # ---------- The house verdict (docs/redesign/multi-board.md, step C) ----------
@@ -176,3 +178,44 @@ class House:
             return bool(ok), ok
         ok = [s for s in moving if now - self.since[s] >= self.BRIEF_S or self._near(s, now)]
         return bool(ok), ok
+
+
+# ---------- Other boards' links (SATL lines, step 3) ----------
+class SatLink:
+    """One link of another board, judged from its scores (x the board's quiet
+    level). A device link is noisier than the router's, so each link keeps its
+    own quiet level: a slow average of its scores while it isn't moving. It
+    moves when the short score passes ON_SHORT x that, or the long one ON_LONG x."""
+    ON_SHORT, ON_LONG, OFF = 2.8, 1.4, 0.75
+    TAU_S = 120.0                         # the quiet level follows over ~2 min
+
+    def __init__(self, flags):
+        self.flags = flags
+        self.q_s = self.q_l = None        # its quiet levels
+        self.moving = False
+        self.ks = self.kl = 0.0
+        self.at = self.t_last = None
+
+    def feed(self, ks, kl, now):
+        self.ks, self.kl, self.at = ks, kl, now
+        if self.q_s is None:
+            self.q_s, self.q_l = max(ks, 0.5), max(kl, 0.5)
+            self.t_last = now
+            return self.moving
+        dt = max(0.0, now - self.t_last)
+        self.t_last = now
+        rs, rl = ks / self.q_s, kl / self.q_l
+        if self.moving:
+            self.moving = rs > self.ON_SHORT * self.OFF or rl > self.ON_LONG * self.OFF
+        else:
+            self.moving = rs >= self.ON_SHORT or rl >= self.ON_LONG
+        if not self.moving:               # learn the quiet level only while quiet
+            a = 1 - math.exp(-dt / self.TAU_S)
+            self.q_s += a * (max(ks, 0.3) - self.q_s)
+            self.q_l += a * (max(kl, 0.3) - self.q_l)
+        return self.moving
+
+    def level(self):
+        if self.q_s is None:
+            return 0.0
+        return max(self.ks / (self.ON_SHORT * self.q_s), self.kl / (self.ON_LONG * self.q_l))

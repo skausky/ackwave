@@ -213,7 +213,7 @@ def network_lines():
     # Alerts from device links (the board reports EXT changes): logged apart from motion
     out, rec = drive([(0, "CALIB,1,track,boot,25000,70000,35000"), (5, "EXT,1"), (6, "EXT,1"), (20, "EXT,0")])
     text = '\n'.join(out)
-    assert text.count("Alert: a device link sees motion (the board's own verdict: still)") == 1, text
+    assert text.count("Alert: a device link or another board sees motion (this board's own verdict: still)") == 1, text
     assert "Alert over" in text and not rec.periods, "never a motion period of the board's own"
 
 

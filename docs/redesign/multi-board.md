@@ -152,3 +152,41 @@ links answered 78-92 % at -40 dBm). Version 3 adds the board's own verdict,
   board joins Wi-Fi.
 - Biggest risk: a second board mostly double-counts the same rooms. Step A
   measures before any combining is built.
+
+## What four boards make possible (2026-11-20)
+
+Each board already measures far more than its verdict: how strongly it hears
+every other board (hellos), every router (beacons) and every device on the
+network (DEV), and how each of its links moves. Sent to the hub, sealed, this
+gives:
+
+1. **A map that lays itself out.** Signal strength between every pair
+   (board↔board both ways, board→router, board→device) gives rough
+   distances (path loss, its exponent fitted to the house). Weighted
+   multidimensional scaling places every dot so those distances fit best,
+   held by the two or three you placed by hand. Pairs that lose more than
+   the fit expects show where walls are ("8 dB more than open air between
+   Kitchen and Hall"). Dots get an uncertainty ring; placing one more
+   tightens the rest.
+2. **Where a person is, not only that someone moved.** Each link has a
+   sensitivity map (the glow); when links report their motion scores, the
+   likelihood of a person at each spot is the product over links of how
+   well that spot explains each score. With 4 boards × (router, devices,
+   each other) about 20-30 links cross the house: a blob on the floor plan,
+   "someone in the hall by the kitchen".
+3. **Paths and rooms over time.** The blob over time: paths on the floor
+   plan, and time per room in Where and when.
+4. **Rooms learned, not modelled.** A walk test: stand in each room and
+   press its name; the pattern of which links respond becomes that room's
+   fingerprint (kNN, like activities), corrected with ✓/✗ as you use it.
+   Moving a board means a new walk test, minutes not days.
+5. **Devices shared smartly.** Boards choose which devices to poke so links
+   cross different rooms (coverage), and not every board pokes the same
+   device (airtime). A device near one board and far from another is
+   poked by both: one more link through the house.
+6. **Your own devices' rough location.** The signal of a fixed MAC
+   (not phones' private ones) seen by every board places it like a dot.
+
+Needs first: the report carries per-link scores and the activity
+features (item 3), and a survey every ~10 s: who the board hears and how
+strongly. One reflash of the satellites, then each of 1-6 is PC side.

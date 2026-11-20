@@ -75,7 +75,7 @@
     </div>
     <article class="card boards-card" id="boards-card" hidden>
       <div class="card-head"><h2>Other boards <span class="muted small" id="boards-state"></span></h2></div>
-      <p class="cap">Each board's own verdict on its router link, heard through the board on this PC. Name them after their room.</p>
+      <p class="cap">Each board's own verdict on its router link, sent sealed to the hub. Name them after their room.</p>
       <div class="boards" id="boards"></div>
     </article>
     <article class="card where-card">
@@ -257,7 +257,7 @@
             <button type="button" id="map-reset" class="ghost">Reset</button>
           </div>
         </div>
-        <p class="cap">Each oval is a link's 1st Fresnel zone, drawn to scale: a person inside it changes that link's signal the most (the dashed oval is the weaker 2nd zone). It pulses red while that link sees motion. Drag each dot, and the board's square, to where it really is; pinch or scroll to zoom, drag empty space to pan.</p>
+        <p class="cap">Every board (squares), router and poked device (dots), and each link between them. The glow is where a person changes that link's signal, an estimate: strongest inside the thin outline (the 1st Fresnel zone, drawn to scale), fading outward as reflections carry the change around the room, and strong right next to either end. It pulses red while that link sees motion. Walls and furniture bend it; drag each square and dot to where it really is; pinch or scroll to zoom, drag empty space to pan.</p>
         <div class="map-stage"><canvas id="map-cv"></canvas><div class="overlay" id="map-msg"></div>
           <div class="map-hint" id="map-hint" hidden><span id="map-hint-text"></span><button type="button" id="map-hint-done">Done</button></div></div>
       </section>

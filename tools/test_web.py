@@ -548,7 +548,7 @@ def other_boards(tmp):
     got = [p for p in d.timeline.read(time.time() - 60, time.time() + 1) if p[2] == 'sat:' + B]
     assert len(got) == 1 and got[0][3] == 'Board 34:99', got
     lanes = [l['key'] for l in d.timeline_range(1)['lanes']]
-    assert lanes[:2] == ['board', 'sat:' + B], lanes
+    assert [k for k in lanes if k != 'house'][:2] == ['board', 'sat:' + B], lanes
     d.feed(f'SAT,{B},-41,10,0,0,0,0,-127,0,5\n')               # restarted: calibrating
     assert d.slow(30)['boards'][0]['state'] == 'calibrating'
     ok, msg = d.command({'cmd': 'board_name', 'mac': B.upper(), 'name': ' Kitchen '})

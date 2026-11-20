@@ -112,7 +112,8 @@ static poke_gate_t gate;          // which APs / devices are worth poking
 static seen_list_t seen;          // devices heard on our network
 static peer_list_t peers;         // other ackwave boards heard (under seen_mux too)
 static sat_report_t my_rep;       // what our hellos say (under seen_mux; print_task fills it)
-typedef struct { uint8_t f[HELLO_LEN]; int8_t rssi; } sat_rx_t;
+typedef struct { uint8_t f[REPORT_MAX_LEN]; int16_t len; int8_t rssi; } sat_rx_t;
+static rep_extra_t my_links;      // our links' scores (print_task fills, under seen_mux)
 static QueueHandle_t sat_q;       // other boards' sealed hellos: opened and printed by the control task
 
 // Keys (from the PC over USB, saved): our own seals our reports; the hub
@@ -187,6 +188,26 @@ static void print_peerkeys(void) {
             printf("PEERKEY," MACF ",%02x%02x%02x%02x\n", MACA(pkeys.k[i].mac), fp[0], fp[1], fp[2], fp[3]);
         }
     xSemaphoreGive(key_lock);
+}
+
+// A board's links (SATL,<board>,<target>:<flags>:<ks>:<kl>,...) and, every
+// 10 s, who it hears (SURV,<board>,<mac>:<kind>:<rssi>,...); hub only
+static void print_extra(const uint8_t *who, const rep_extra_t *x) {
+    static char line[24 + REP_SEEN_MAX * 28];
+    if (x->n_links) {
+        int k = snprintf(line, sizeof line, "SATL," MACF, MACA(who));
+        for (int i = 0; i < x->n_links && k < (int)sizeof line - 32; i++)
+            k += snprintf(line + k, sizeof line - (size_t)k, "," MACF ":%u:%u:%u", MACA(x->link[i].mac),
+                          x->link[i].flags, x->link[i].ks, x->link[i].kl);
+        printf("%s\n", line);
+    }
+    if (x->n_seen) {
+        int k = snprintf(line, sizeof line, "SURV," MACF, MACA(who));
+        for (int i = 0; i < x->n_seen && k < (int)sizeof line - 32; i++)
+            k += snprintf(line + k, sizeof line - (size_t)k, "," MACF ":%u:%d", MACA(x->seen[i].mac),
+                          x->seen[i].kind, x->seen[i].rssi);
+        printf("%s\n", line);
+    }
 }
 
 // HUB,<mac>,<channel found>,<reports sent>,<answered> or HUB,none
@@ -684,8 +705,9 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         if (memcmp(pmac, my_mac, 6) == 0) return;
         if (hl.sealed) {                           // a report to us (the hub): opened in the control task
             if (sat_q && memcmp(pkt->payload + 4, my_mac, 6) == 0) {
-                sat_rx_t r = { .rssi = (int8_t)pkt->rx_ctrl.rssi };
-                memcpy(r.f, pkt->payload, HELLO_LEN);
+                int fl = (int)pkt->rx_ctrl.sig_len - 4;
+                sat_rx_t r = { .rssi = (int8_t)pkt->rx_ctrl.rssi, .len = (int16_t)(fl < REPORT_MAX_LEN ? fl : REPORT_MAX_LEN) };
+                memcpy(r.f, pkt->payload, r.len);
                 xQueueSend(sat_q, &r, 0);          // full: skipped, the next comes in 0.5 s
             }
             return;
@@ -777,7 +799,10 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
 // Two interleaved slots: APs get POKE_HZ/s whatever happens, and devices
 // share another POKE_HZ/s (a slot with no device to poke stays silent).
 static void poke_task(void *arg) {
-    uint8_t frame[NULL_FRAME_LEN], hello[HELLO_LEN];
+    uint8_t frame[NULL_FRAME_LEN];
+    static uint8_t hello[REPORT_MAX_LEN];
+    static rep_extra_t ext;
+    int n_reports = 0;
     uint32_t next_report = HELLO_EVERY_MS / 2;     // between hellos
     int rr[2] = {0, 0}, slot = 0;
     uint32_t next_hello = 0;
@@ -810,8 +835,31 @@ static void poke_task(void *arg) {
             r = my_rep;
             taskEXIT_CRITICAL(&seen_mux);
             if (wrap) { boot_id++; nvs_put("boot", &boot_id, sizeof boot_id); }   // ~97 days at 2/s
+            // our links' scores every time; who we hear (the survey) every 20th report (10 s)
+            taskENTER_CRITICAL(&seen_mux);
+            ext.n_links = my_links.n_links;
+            memcpy(ext.link, my_links.link, sizeof ext.link);
+            ext.n_seen = 0;
+            if (n_reports++ % 20 == 0) {
+                for (int i = 0; i < node_count(&nodes) && ext.n_seen < REP_SEEN_MAX; i++)
+                    if (gate.rssi_x16[i]) {
+                        rep_seen_t *e = &ext.seen[ext.n_seen++];
+                        memcpy(e->mac, nodes.mac[i], 6); e->kind = RS_ROUTER; e->rssi = (int8_t)(gate.rssi_x16[i] / 16);
+                    }
+                for (int i = 0; i < MAX_PEERS && ext.n_seen < REP_SEEN_MAX; i++)
+                    if (peers.p[i].used && (int32_t)(tn - peers.p[i].last_ms) <= PEER_GONE_MS) {
+                        rep_seen_t *e = &ext.seen[ext.n_seen++];
+                        memcpy(e->mac, peers.p[i].mac, 6); e->kind = RS_BOARD; e->rssi = (int8_t)(peers.p[i].rssi_x16 / 16);
+                    }
+                for (int i = 0; i < MAX_SEEN && ext.n_seen < REP_SEEN_MAX; i++)
+                    if (seen.d[i].used && seen.d[i].rssi_x16 && (int32_t)(tn - seen.d[i].last_ms) < 120000) {
+                        rep_seen_t *e = &ext.seen[ext.n_seen++];
+                        memcpy(e->mac, seen.d[i].mac, 6); e->kind = RS_DEVICE; e->rssi = (int8_t)(seen.d[i].rssi_x16 / 16);
+                    }
+            }
+            taskEXIT_CRITICAL(&seen_mux);
             xSemaphoreTake(key_lock, portMAX_DELAY);
-            int hn = build_report(hello, my_mac, hub_mac, nodes.mac[0], cur_ch, &r, boot_id, aes_block, &key_ctx);
+            int hn = build_report(hello, my_mac, hub_mac, nodes.mac[0], cur_ch, &r, &ext, boot_id, aes_block, &key_ctx);
             xSemaphoreGive(key_lock);
             // On the hub's channel for a moment (no detector reset: not a channel change)
             xSemaphoreTake(ch_lock, portMAX_DELAY);
@@ -1250,16 +1298,17 @@ static void control_task(void *arg) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
         poll_cmds();
-        // SAT,<mac>,<rssi>,<seq>,<flags>,<k_short>,<k_long>,<acks>,<router rssi>,<links>,<up_s>
+        // SAT,<mac>,<rssi>,<seq>,<flags>,<k_short>,<k_long>,<acks>,<router rssi>,<links>,<up_s>,<router>,<ch>
         // Only reports sealed with our key, and never one heard before
         sat_rx_t sr;
         while (sat_q && xQueueReceive(sat_q, &sr, 0) == pdTRUE) {
             hello_t hh;
             sat_report_t rp;
-            if (!parse_hello(sr.f, HELLO_LEN, &hh)) continue;
+            static rep_extra_t rx;
+            if (!parse_hello(sr.f, sr.len, &hh)) continue;
             xSemaphoreTake(key_lock, portMAX_DELAY);
             int ki = peer_key_find(&pkeys, hh.mac);       // not one of ours: not read
-            bool ok = ki >= 0 && hello_open(sr.f, aes_block, &peer_ctx[ki], &rp);
+            bool ok = ki >= 0 && hello_open(sr.f, sr.len, aes_block, &peer_ctx[ki], &rp, &rx);
             bool fresh = ok && replay_newer(hh.boot, hh.seq, pkeys.k[ki].boot, pkeys.k[ki].seq);
             if (fresh) {
                 bool rebooted = hh.boot != pkeys.k[ki].boot;
@@ -1271,8 +1320,10 @@ static void control_task(void *arg) {
             if (ki >= 0 && !ok) n_badseal++;
             if (ok && !fresh) n_replay++;
             if (!fresh) continue;
-            printf("SAT," MACF ",%d,%" PRIu32 ",%u,%u,%u,%u,%d,%u,%" PRIu32 "\n", MACA(hh.mac), sr.rssi,
-                   rp.seq, rp.flags, rp.k_short, rp.k_long, rp.acks, rp.rssi, rp.n_dev, rp.up_s);
+            printf("SAT," MACF ",%d,%" PRIu32 ",%u,%u,%u,%u,%d,%u,%" PRIu32 "," MACF ",%d\n", MACA(hh.mac),
+                   sr.rssi, rp.seq, rp.flags, rp.k_short, rp.k_long, rp.acks, rp.rssi, rp.n_dev, rp.up_s,
+                   MACA(hh.bssid), hh.ch);          // + its router and its own channel
+            print_extra(hh.mac, &rx);
         }
         led_update(!my_ssid[0] && !aps.n); // no network chosen yet: yellow
 
@@ -1445,6 +1496,27 @@ static void print_task(void *arg) {
                 led_strength = k > 255 ? 255 : k < 0 ? 0 : (uint8_t)k;
                 if (!det.motion && ms > det.c.on_short * f) led_blip_ms = clock_ms() | 1;
             }
+        }
+        static int64_t next_links;           // our links' scores for the report, 4 times a second
+        if (p.ts >= next_links) {
+            next_links = p.ts + 250000;
+            rep_extra_t lx = {0};
+            int64_t stale = (int64_t)(det.c.stale_s * 1e6f);
+            for (int node = 0; node < MAX_NODES && lx.n_links < REP_LINKS_MAX; node++) {
+                if (!node_active(&nodes, node)) continue;
+                const md_stream_t *ack = &det.s[node * 2 + CSI_KIND_ACK], *own = &det.s[node * 2 + CSI_KIND_AP];
+                const md_stream_t *st = md_live(ack, p.ts, stale) && ack->score_s >= 0 ? ack
+                                      : md_live(own, p.ts, stale) && own->score_s >= 0 ? own : NULL;
+                if (!st) continue;
+                rep_link_t *e = &lx.link[lx.n_links++];
+                memcpy(e->mac, nodes.mac[node], 6);
+                e->flags = (uint8_t)((st == ack ? RL_ACK : 0) | (node < MAX_APS ? RL_AP : RL_DEVICE));
+                e->ks = rep_k20(st->score_s, det.floor);
+                e->kl = rep_k20(st->score_l, det.floor);
+            }
+            taskENTER_CRITICAL(&seen_mux);
+            my_links = lx;
+            taskEXIT_CRITICAL(&seen_mux);
         }
         {                                    // what our hellos say about us
             float ms, ml, f = det.floor;

@@ -1078,7 +1078,8 @@ int main(void) {
         if (len) buf[0] = 0xD0;                               // ...and as a peer's hello
         if (len >= 32 && (it & 8)) memcpy(buf + 24, HELLO_MAGIC, sizeof HELLO_MAGIC);
         { hello_t fh; sat_report_t fr;
-          if (parse_hello(buf, len, &fh) && fh.sealed) hello_open(buf, aes128_block, &fz_key, &fr); }
+          rep_extra_t fx;
+          if (parse_hello(buf, len, &fh) && fh.sealed) hello_open(buf, len, aes128_block, &fz_key, &fr, &fx); }
         free(buf);
         fuzzed++;
     }
@@ -1127,12 +1128,12 @@ int main(void) {
             CHECK(memcmp(o3, PY3, 48) == 0);                  // no associated data, 3 blocks
         }
 
-        uint8_t h[HELLO_LEN], HUBM[6] = {0x98,0xa3,0x16,0x01,0x02,0x03};
+        uint8_t h[REPORT_MAX_LEN], HUBM[6] = {0x98,0xa3,0x16,0x01,0x02,0x03};
         hello_t hl;
         sat_report_t rp = { .seq = 0x123456, .flags = REP_MOTION | REP_CALIBRATED, .k_short = 77,
                             .k_long = 255, .acks = 96, .rssi = -57, .n_dev = 3, .up_s = 0x01020304 }, got;
         // the report: to the hub, from a made-up sender, the real one inside
-        CHECK(build_report(h, B1, HUBM, AP1, 6, &rp, 42, aes128_block, &ak) == HELLO_LEN);
+        CHECK(build_report(h, B1, HUBM, AP1, 6, &rp, NULL, 42, aes128_block, &ak) == HELLO_LEN);
         uint8_t rta[6]; poke_ta(B1, REPORT_NODE, rta);
         CHECK(memcmp(h + 4, HUBM, 6) == 0 && memcmp(h + 10, rta, 6) == 0 && memcmp(h + 10, B1, 6) != 0);
         CHECK(poke_ta_node(B1, rta) < 0);                    // never taken for a poke's ACK
@@ -1140,7 +1141,7 @@ int main(void) {
         memcpy(hp, h, HELLO_LEN);
         CHECK(parse_hello(hp, HELLO_LEN, &hl) && memcmp(hl.mac, B1, 6) == 0 &&
               memcmp(hl.bssid, AP1, 6) == 0 && hl.ch == 6 && hl.sealed && hl.boot == 42 && hl.seq == 0x123456);
-        CHECK(hello_open(hp, aes128_block, &ak, &got));
+        CHECK(hello_open(hp, HELLO_LEN, aes128_block, &ak, &got, NULL));
         CHECK(got.seq == 0x123456 && got.flags == (REP_MOTION | REP_CALIBRATED) &&
               got.k_short == 77 && got.k_long == 255 && got.acks == 96 &&
               got.rssi == -57 && got.n_dev == 3 && got.up_s == 0x01020304);
@@ -1150,18 +1151,55 @@ int main(void) {
         {   // nothing readable, nothing changeable
             static const uint8_t OTHER[16] = {9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9};
             aes128_t bk; aes128_init(&bk, OTHER);
-            CHECK(!hello_open(h, aes128_block, &bk, &got));             // another key
+            CHECK(!hello_open(h, HELLO_LEN, aes128_block, &bk, &got, NULL));   // another key
             bool leak = false;                                           // the plain bytes aren't on air
             for (int i = 53; i < 63; i++) leak |= h[i] == 77 && h[i + 1] == 255;
             CHECK(!leak);
             const int at[] = {24, 31, 32, 33, 34, 40, 45, 46, 50, 52, 53, 62, 63, 70};  // magic, version, channel,
             for (unsigned i = 0; i < sizeof at / sizeof at[0]; i++) {           // router, sender, boot, seq,
                 h[at[i]] ^= 0x04;                                               // report, tag
-                CHECK(!hello_open(h, aes128_block, &ak, &got) || at[i] == 32);
+                CHECK(!hello_open(h, HELLO_LEN, aes128_block, &ak, &got, NULL));
                 h[at[i]] ^= 0x04;
             }
-            CHECK(hello_open(h, aes128_block, &ak, &got));
+            CHECK(hello_open(h, HELLO_LEN, aes128_block, &ak, &got, NULL));
             h[40] |= 1; CHECK(parse_hello(h, HELLO_LEN, &hl) && !hl.sealed); h[40] &= 0xFE;  // group sender inside
+        }
+        {   // version 5: per-link scores and the survey, inside the seal
+            rep_extra_t x = {0}, y;
+            x.n_links = 3;
+            for (int i = 0; i < 3; i++) {
+                memcpy(x.link[i].mac, PLUG, 6); x.link[i].mac[5] = (uint8_t)i;
+                x.link[i].flags = (uint8_t)(i ? RL_DEVICE : RL_AP | RL_ACK);
+                x.link[i].ks = (uint8_t)(20 + i); x.link[i].kl = (uint8_t)(200 + i);
+            }
+            x.n_seen = REP_SEEN_MAX + 5;                     // too many: only REP_SEEN_MAX go out
+            for (int i = 0; i < REP_SEEN_MAX + 5 && i < REP_SEEN_MAX; i++) {
+                memcpy(x.seen[i].mac, AP1, 6); x.seen[i].mac[5] = (uint8_t)i;
+                x.seen[i].kind = (uint8_t)(i % 3); x.seen[i].rssi = (int8_t)(-40 - i);
+            }
+            int n = build_report(h, B1, HUBM, AP1, 6, &rp, &x, 43, aes128_block, &ak);
+            CHECK(n == 53 + REPORT_LEN + 2 + 27 + 2 + 8 * REP_SEEN_MAX + CCM_TAG && n <= REPORT_MAX_LEN);
+            CHECK(parse_hello(h, n, &hl) && hl.sealed && hl.version == 5);
+            CHECK(hello_open(h, n, aes128_block, &ak, &got, &y) && got.k_short == 77);
+            CHECK(y.n_links == 3 && y.link[2].mac[5] == 2 && y.link[2].flags == RL_DEVICE &&
+                  y.link[2].ks == 22 && y.link[2].kl == 202 && y.link[0].flags == (RL_AP | RL_ACK));
+            CHECK(y.n_seen == REP_SEEN_MAX && y.seen[29].rssi == -69 && y.seen[29].kind == 29 % 3 &&
+                  y.seen[29].mac[5] == 29);
+            CHECK(hello_open(h, n, aes128_block, &ak, &got, NULL));      // sections not wanted
+            CHECK(!hello_open(h, n - 1, aes128_block, &ak, &got, &y));   // cut frame: the tag fails
+            CHECK(!hello_open(h, REPORT_MAX_LEN + 1, aes128_block, &ak, &got, &y));
+            h[53 + 15] ^= 1;                                  // inside a section: refused too
+            CHECK(!hello_open(h, n, aes128_block, &ak, &got, &y));
+            h[53 + 15] ^= 1;
+            // a section whose length runs past the end is skipped, never read past
+            uint8_t m[64] = {0};
+            m[REPORT_LEN] = TLV_LINKS; m[REPORT_LEN + 1] = 200;
+            uint8_t fr[128] = {0}, nn[CCM_NONCE], aa[HELLO_AAD_LEN];
+            memcpy(fr, h, 53);
+            hello_nonce(fr, nn); hello_aad(fr, aa);
+            ccm_seal(aes128_block, &ak, nn, aa, HELLO_AAD_LEN, m, REPORT_LEN + 2, fr + 53);
+            CHECK(hello_open(fr, 53 + REPORT_LEN + 2 + CCM_TAG, aes128_block, &ak, &got, &y) && y.n_links == 0);
+            CHECK(rep_k20(1.0f, 1.0f) == 20 && rep_k20(20.0f, 1.0f) == 255 && rep_k20(1.0f, 0.0f) == 0);
         }
         // the hello: broadcast, from the real MAC, nothing about motion
         CHECK(build_hello(h, B1, AP1, 6) == HELLO_V1_LEN);

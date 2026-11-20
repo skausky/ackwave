@@ -54,7 +54,7 @@ WHYS = ('boot', 'button', 'rssi', 'channel')
 
 def parse_line(line):
     """Returns (kind, dict) for the board's lines (CSI, CHANNEL, LEARNED, STATE,
-    STATS, CALIB, GATE, DEV, PEER, SAT, POKING, UNPOKED, REFUSED), else None."""
+    STATS, CALIB, GATE, DEV, PEER, SAT, SATL, SURV, POKING, UNPOKED, REFUSED), else None."""
     line = line.strip()
     try:
         if line.startswith('CSI,'):
@@ -114,7 +114,27 @@ def parse_line(line):
             return 'sat', dict(mac=p[1].lower(), rssi=int(p[2]), seq=int(p[3]),
                                motion=bool(fl & 1), calibrated=bool(fl & 2), weak=bool(fl & 4),
                                k_short=int(p[5]) / 50, k_long=int(p[6]) / 50, acks=int(p[7]),
-                               router_rssi=int(p[8]), links=int(p[9]), up_s=int(p[10]))
+                               router_rssi=int(p[8]), links=int(p[9]), up_s=int(p[10]),
+                               bssid=p[11].lower() if len(p) > 12 and len(p[11]) == 17 else None,
+                               ch=int(p[12]) if len(p) > 12 and p[12].isdigit() else None)
+        if line.startswith(('SATL,', 'SURV,')):          # another board's links / who it hears
+            p = line.strip().split(',')
+            if len(p) < 2 or len(p[1]) != 17:
+                return None
+            out = []
+            for e in p[2:]:
+                q = e.split(':')
+                if len(q) != (9 if p[0] == 'SATL' else 8):
+                    return None
+                mac = ':'.join(q[:6]).lower()
+                if p[0] == 'SATL':
+                    out.append(dict(mac=mac, flags=int(q[6]), ks=int(q[7]) / 20, kl=int(q[8]) / 20))
+                else:
+                    out.append(dict(mac=mac, kind=('router', 'board', 'device')[int(q[6])] if q[6] in '012' else '?',
+                                    rssi=int(q[7])))
+            if p[0] == 'SATL':
+                return 'satl', dict(mac=p[1].lower(), links=out)
+            return 'surv', dict(mac=p[1].lower(), seen=out)
         if line.startswith('POKING,'):
             p = line.split(',')
             return 'poking', dict(idx=int(p[1]), mac=p[2].lower())

@@ -129,9 +129,9 @@ class Recorder:
         if line.startswith('EXT,'):              # the alerts: a device link the PC watches
             v = line.strip()[4:]
             if v in ('0', '1') and v != getattr(self, 'ext', '0'):
-                self.say("Alert: a device link sees motion (the board's own verdict: "
+                self.say("Alert: a device link or another board sees motion (this board's own verdict: "
                          + ('motion)' if self.motion_since is not None else 'still)') if v == '1'
-                         else "Alert over: the device link is still")
+                         else "Alert over: the device links and other boards are still")
             if v in ('0', '1'):
                 self.ext = v
             return

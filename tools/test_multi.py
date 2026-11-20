@@ -6,7 +6,7 @@ import os
 import tempfile
 import time
 
-from boards import ClockMap, House, board_ts, split_tag
+from boards import ClockMap, House, SatLink, board_ts, split_tag
 from compare import compare, report
 from fake_csi import OTHER_BOARDS, generate_boards
 from gui import State
@@ -173,10 +173,48 @@ def house():
         assert json.load(f)['house_rule'] == 'two'
 
 
+def sat_links():
+    """Other boards' links (SATL) judged per link against each link's own quiet
+    level; the survey (SURV) kept; the map gets each link's far end."""
+    from analyze import parse_line
+    import tempfile
+    from web import Dashboard
+    R, D, S = mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf1), mac(0x50, 0x02, 0x91, 1, 2, 3), mac(0xc4, 0x9e, 0x7e, 9, 9, 9)
+    ev = parse_line(f'SATL,{S},{R}:3:44:30,{D}:4:60:20')
+    assert ev == ('satl', dict(mac=S, links=[dict(mac=R, flags=3, ks=2.2, kl=1.5),
+                                              dict(mac=D, flags=4, ks=3.0, kl=1.0)])), ev
+    assert parse_line(f'SURV,{S},{R}:0:-60,{D}:2:-71')[1]['seen'][1] == dict(mac=D, kind='device', rssi=-71)
+    assert parse_line(f'SATL,{S},{R}:3:44') is None and parse_line('SATL,nope') is None
+    ln = SatLink(4)                                   # a noisy device link: quiet at 2.5x the floor
+    t = 0.0
+    for _ in range(600):
+        t += 0.5
+        assert not ln.feed(2.5, 2.4, t), "its own noise is not motion"
+    assert ln.feed(9.0, 3.0, t + 0.5), "well above its own quiet level: motion"
+    assert ln.feed(6.0, 2.6, t + 1.0), "still over the off level"
+    assert not ln.feed(2.4, 2.4, t + 1.5)
+    tmp = tempfile.mkdtemp()
+    d = Dashboard(State(60), settings=os.path.join(tmp, 'dashboard.json'))
+    d.feed(f'ME,{FIRST}\n')
+    d.feed(f'LEARNED,1,{R}\n')
+    d.feed(f'SATL,{S},{R}:3:22:21\n')               # before its sealed report: not taken
+    assert S not in d.sat_links
+    d.feed(f'SAT,{S},-40,1,2,20,15,96,-57,2,60,{R},6\n')
+    for i in range(10):
+        d.feed(f'SATL,{S},{R}:3:22:21,{FIRST}:4:25:24,{D}:4:30:28\n')
+    d.feed(f'SURV,{S},{R}:0:-60,{FIRST}:1:-58\n')
+    mb = d.slow(30)['map_boards'][0]
+    keys = {l['key']: l for l in mb['links']}
+    assert set(keys) == {'ap:1', 'hub', D} and keys['ap:1']['router'] and not keys[D]['router'], keys
+    assert mb['router'] == 'ap:1', "a router the hub watches shares its dot"
+    assert d.surveys[S][FIRST]['rssi'] == -58
+
+
 if __name__ == '__main__':
     clock()
     comparing()
     house()
+    sat_links()
     tagged_stream()
     ports()
     print("MULTI TESTS PASSED")

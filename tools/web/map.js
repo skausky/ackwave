@@ -36,6 +36,10 @@ window.AckMap = (() => {
   let stageMark = null;                     // where the map lives on the Map page (it visits Home)
   let pageView = null, homeFit = false;     // the Map page's view, kept while Home fits its own
   let radio = [], channel = 6, boardMotion = false;
+  let others = [];                          // the other boards (slow.map_boards): each a point with its router
+  let autoFit = true;                       // refit as things appear, until you pan, zoom or drag
+  let viewByUser = false;                   // only a view you set is saved
+  let nodeCount = 0;
   let loaded = false, visible = false, raf = 0, saveTimer = 0, dirty = true;
   let cv, ctx, W = 0, H = 0, dpr = 1;
   const ptrs = new Map();                   // pointerId -> {x, y}
@@ -78,21 +82,122 @@ window.AckMap = (() => {
     n.name = r.label;
     return n;
   }
-  function links() {                        // [{r, n, color, d}] for the live links, router first
-    const live = [...radio].sort((a, b) => (a.key === 'ap:0' ? -1 : b.key === 'ap:0' ? 1 : a.src - b.src));
-    return live.map((r, k) => {
-      const n = nodeFor(r, k);
-      return { r, n, color: PALETTE[k % PALETTE.length], d: Math.hypot(n.x, n.y) };
-    });
+  const HUB = { x: 0, y: 0 };                // positions are metres from the hub
+  // Another board: first placed from how strongly the hub hears it
+  function boardNode(b, k) {
+    let n = M.nodes.get(b.key);
+    if (!n) {
+      const d = b.rssi ? guessDist({ ap: false, rssi: b.rssi }) : 6, ang = Math.PI - 0.6 + 0.6 * k;
+      n = { key: b.key, name: b.label, x: d * Math.cos(ang), y: d * Math.sin(ang), placed: false };
+      M.nodes.set(b.key, n);
+      scheduleSave();
+    }
+    n.name = b.label; n.board = true;
+    return n;
   }
-  const moving = (r) => (r.key === 'ap:0' ? boardMotion : !!r.moving);
+  // A link's far end by key: the hub, another board's square, or a dot (a
+  // router or device the hub may share), first placed near the board that sees it
+  function nodeAt(key, name, near, rssi, ap) {
+    if (key === 'hub') return HUB;
+    if (key.startsWith('sat:')) {
+      const k = others.findIndex((o) => o.key === key);
+      return k >= 0 ? boardNode(others[k], k) : null;
+    }
+    let n = M.nodes.get(key);
+    if (!n) {
+      const d = rssi ? guessDist({ ap, rssi }) : 4, ang = Math.random() * 2 * Math.PI;
+      n = { key, name: name || key, x: near.x + d * Math.cos(ang), y: near.y + d * Math.sin(ang), placed: false };
+      M.nodes.set(key, n);
+      scheduleSave();
+    }
+    if (name) n.name = name;
+    return n;
+  }
+  // [{r, a, n, color, d}]: the hub's live links (a = the hub), then each other
+  // board's link to its router (a = that board)
+  function links() {
+    const live = [...radio].sort((a, b) => (a.key === 'ap:0' ? -1 : b.key === 'ap:0' ? 1 : a.src - b.src));
+    const out = live.map((r, k) => {
+      const bk = others.findIndex((o) => o.key === 'sat:' + r.key);   // a board the hub pokes: its square
+      const n = bk >= 0 ? boardNode(others[bk], bk) : nodeFor(r, k);
+      return { r, a: HUB, n, color: PALETTE[k % PALETTE.length], d: Math.hypot(n.x, n.y) };
+    });
+    others.forEach((b, k) => {
+      const a = boardNode(b, k);
+      // its links as it reports them (newer firmware); else just its router
+      const ls = b.links && b.links.length ? b.links
+        : b.router ? [{ key: b.router, name: b.router_name, moving: b.state === 'motion', router: true }] : [];
+      ls.forEach((l, j) => {
+        const n = nodeAt(l.key, l.name, a, l.router ? b.router_rssi : null, !!l.router);
+        if (!n || n === a) return;
+        const r = { key: `${b.key}>${l.key}`, label: `${b.label} → ${l.name || 'its router'}`, ap: !!l.router,
+          rssi: l.router && l.key === b.router ? b.router_rssi : null, board: b, link: l,
+          state: b.state === 'gone' ? 'silent' : l.moving ? 'motion' : b.state === 'calibrating' ? 'calibrating' : 'still' };
+        out.push({ r, a, n, color: PALETTE[(live.length + 3 * k + j) % PALETTE.length], d: Math.hypot(n.x - a.x, n.y - a.y) });
+      });
+    });
+    return out;
+  }
+  const moving = (r) => (r.link ? !!r.link.moving && r.board.state !== 'gone'
+    : r.board ? r.board.state === 'motion' : r.key === 'ap:0' ? boardMotion : !!r.moving);
+
+  // ---------- sensitivity: where a person changes each link ----------
+  // An estimate, not a measurement. A body changes a link most inside its
+  // first Fresnel zone (path through the point at most lambda/2 longer than
+  // the direct one); multipath carries the change well beyond it, fading over
+  // the outer zones; and a body next to either end changes every path at
+  // once. Walls and furniture bend all of this: the walk test measures it.
+  function sensitivity(px, py, a, n, d, lam) {
+    const d1 = Math.hypot(px - a.x, py - a.y), d2 = Math.hypot(px - n.x, py - n.y);
+    const zones = (d1 + d2 - d) / (lam / 2);           // which Fresnel zone the point is in
+    const along = 1 / (1 + 0.22 * zones);               // ~0.8 at the first zone's edge, ~0.2 at 1.5 m out
+    const ends = 0.55 * Math.exp(-Math.min(d1, d2) / 0.7);
+    return Math.min(1, along * along + ends);
+  }
+  const heatCv = document.createElement('canvas'), heatMv = document.createElement('canvas');
+  let heatKey = '';
+  function rgbOf(hex) { const v = parseInt(hex.slice(1), 16); return [v >> 16 & 255, v >> 8 & 255, v & 255]; }
+  // Two layers at a third of the screen's resolution: still links in their
+  // colour, moving ones in the motion colour (pulsed when drawn). Rebuilt only
+  // when the view, a position or a link's state changes.
+  function heat(L) {
+    const S = 3, w = Math.max(1, Math.ceil(W / S)), h = Math.max(1, Math.ceil(H / S));
+    const key = JSON.stringify([M.view, w, h, channel, L.map(({ a, n, color, r }) => [a.x, a.y, n.x, n.y, color, moving(r)])]);
+    if (key === heatKey) return;
+    heatKey = key;
+    const lam = lambda(), motionRgb = rgbOf(css('--motion'));
+    const still = new ImageData(w, h), mov = new ImageData(w, h);
+    const spec = L.filter(({ d }) => d >= 0.05).map(({ a, n, color, d, r }) => ({ a, n, d, mv: moving(r), rgb: rgbOf(color) }));
+    for (let j = 0; j < h; j++) {
+      const wy = M.view.y + (j * S - H / 2) / M.view.s;
+      for (let i = 0; i < w; i++) {
+        const wx = M.view.x + (i * S - W / 2) / M.view.s;
+        // overlapping links blend: opacity adds up, colour is their weighted mix
+        let clear = 1, r = 0, g = 0, b = 0, sum = 0, clearMv = 1;
+        for (const l of spec) {
+          const v = sensitivity(wx, wy, l.a, l.n, l.d, lam);
+          if (l.mv) { clearMv *= 1 - 0.75 * v ** 1.6; continue; }
+          const a = 0.45 * v * v;
+          clear *= 1 - a;
+          r += l.rgb[0] * a; g += l.rgb[1] * a; b += l.rgb[2] * a; sum += a;
+        }
+        const o = 4 * (j * w + i);
+        if (sum > 0) { still.data[o] = r / sum; still.data[o + 1] = g / sum; still.data[o + 2] = b / sum; still.data[o + 3] = 255 * (1 - clear); }
+        if (clearMv < 1) { mov.data[o] = motionRgb[0]; mov.data[o + 1] = motionRgb[1]; mov.data[o + 2] = motionRgb[2]; mov.data[o + 3] = 255 * (1 - clearMv); }
+      }
+    }
+    for (const [c, img] of [[heatCv, still], [heatMv, mov]]) {
+      c.width = w; c.height = h;
+      c.getContext('2d').putImageData(img, 0, 0);
+    }
+  }
 
   // ---------- view ----------
   const X = (x) => W / 2 + (x - M.view.x) * M.view.s;
   const Y = (y) => H / 2 + (y - M.view.y) * M.view.s;
   const toWorld = (px, py) => [M.view.x + (px - W / 2) / M.view.s, M.view.y + (py - H / 2) / M.view.s];
   function fit() {
-    const pts = [[0, 0], ...[...M.nodes.values()].filter((n) => radio.some((r) => r.key === n.key)).map((n) => [n.x, n.y])];
+    const pts = [[0, 0], ...links().flatMap(({ a, n }) => [[a.x, a.y], [n.x, n.y]])];
     for (const p of M.plans) {                       // and every picture's corners
       if (p.hidden || !p.img) continue;
       const h = p.w * p.ih / p.iw, c = Math.cos(p.rot), s = Math.sin(p.rot);
@@ -106,6 +211,7 @@ window.AckMap = (() => {
   }
   function zoomAt(px, py, k) {
     if (!M.view) return;
+    autoFit = false; viewByUser = true;
     const [wx, wy] = toWorld(px, py);
     M.view.s = Math.min(2000, Math.max(2, M.view.s * k));
     M.view.x = wx - (px - W / 2) / M.view.s;
@@ -184,29 +290,29 @@ window.AckMap = (() => {
   function draw(t) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    if (!M.view) fit();
+    const cnt = links().length;                    // something new appeared: show it (a saved view stays at load)
+    if (!M.view || (cnt > nodeCount && (nodeCount > 0 || autoFit))) fit();
+    nodeCount = cnt;
     drawPlans();
     grid();
     const L = links(), lam = lambda(), motionC = css('--motion');
     const pulse = 0.5 + 0.5 * Math.sin(t / 260);
-    for (const { r, n, color, d } of L) {          // zones first, dots on top
+    heat(L);                                       // where each link is sensitive (estimate)
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(heatCv, 0, 0, W, H);
+    ctx.globalAlpha = 0.45 + 0.55 * pulse;
+    ctx.drawImage(heatMv, 0, 0, W, H);
+    ctx.globalAlpha = 1;
+    for (const { r, a: e, n, color, d } of L) {    // zones first, dots on top
       if (d < 0.05) continue;
-      const rot = Math.atan2(n.y, n.x), cx = n.x / 2, cy = n.y / 2;
-      for (const z of [2, 1]) {
-        const a = (d + z * lam / 2) / 2, b = Math.sqrt(Math.max(a * a - d * d / 4, 0));
-        ellipse(cx, cy, a, b, rot);
-        if (z === 1) {
-          const mv = moving(r);
-          ctx.fillStyle = mv ? alpha(motionC, 0.18 + 0.32 * pulse) : alpha(color, 0.16);
-          ctx.fill();
-          ctx.strokeStyle = mv ? motionC : alpha(color, 0.9); ctx.lineWidth = mv ? 2 : 1.4; ctx.setLineDash([]);
-          ctx.stroke();
-        } else {
-          ctx.strokeStyle = alpha(color, 0.45); ctx.lineWidth = 1; ctx.setLineDash([5, 5]); ctx.stroke(); ctx.setLineDash([]);
-        }
-      }
+      const rot = Math.atan2(n.y - e.y, n.x - e.x), cx = (e.x + n.x) / 2, cy = (e.y + n.y) / 2;
+      const a = (d + lam / 2) / 2, b = Math.sqrt(Math.max(a * a - d * d / 4, 0));
+      ellipse(cx, cy, a, b, rot);                  // the first Fresnel zone: a thin outline
+      const mv = moving(r);
+      ctx.strokeStyle = mv ? motionC : alpha(color, 0.8); ctx.lineWidth = mv ? 1.8 : 1; ctx.setLineDash([]);
+      ctx.stroke();
       ctx.strokeStyle = alpha(color, 0.55); ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(n.x), Y(n.y)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(X(e.x), Y(e.y)); ctx.lineTo(X(n.x), Y(n.y)); ctx.stroke();
       // the distance, at the middle, kept upright
       ctx.save();
       ctx.translate(X(cx), Y(cy));
@@ -221,8 +327,23 @@ window.AckMap = (() => {
     ctx.fillStyle = css('--card'); ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx - 9, by - 9, 18, 18, 4) : ctx.rect(bx - 9, by - 9, 18, 18);
     ctx.fill(); ctx.stroke();
-    label(bx, by + 14, 'board', null, css('--accent'));
+    label(bx, by + 14, others.length ? 'hub' : 'board', null, css('--accent'));
+    for (const b of others) {                      // the other boards: squares too, in their state's colour
+      const n = M.nodes.get(b.key);
+      if (!n) continue;
+      const x = X(n.x), y = Y(n.y), mv = b.state === 'motion';
+      ctx.fillStyle = css('--card'); ctx.strokeStyle = mv ? motionC : b.state === 'gone' ? css('--muted') : css('--accent');
+      ctx.lineWidth = mv ? 3.5 : 2.5;
+      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x - 9, y - 9, 18, 18, 4) : ctx.rect(x - 9, y - 9, 18, 18);
+      ctx.fill(); ctx.stroke();
+      if (!n.placed) { ctx.strokeStyle = alpha(css('--accent'), 0.7); ctx.lineWidth = 1.2; ctx.setLineDash([3, 3]);
+        ctx.strokeRect(x - 14, y - 14, 28, 28); ctx.setLineDash([]); }
+      label(x, y + 14, b.label, { motion: 'MOTION', still: 'still', calibrating: 'calibrating', gone: 'not heard' }[b.state] || b.state, mv ? motionC : css('--fg'));
+    }
+    const drawn = new Set();                      // a router two boards share: one dot, its own name
     for (const { r, n, color } of L) {
+      if (n === HUB || n.board || drawn.has(n.key)) continue;   // boards are squares, drawn above
+      drawn.add(n.key);
       const x = X(n.x), y = Y(n.y);
       ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2);
       ctx.fillStyle = color; ctx.fill();
@@ -233,7 +354,7 @@ window.AckMap = (() => {
       }
       const sub = [r.rssi !== null && r.rssi !== undefined ? `${r.rssi} dBm` : '',
         r.breathing ? `breathing ${Math.round(r.breathing.rate)}/min` : ''].filter(Boolean).join(' · ');
-      label(x, y + 15, r.label, sub || null, css('--fg'));
+      label(x, y + 15, r.board ? n.name : r.label, r.board ? null : sub || null, css('--fg'));
     }
     $('#map-msg').textContent = L.length ? '' : 'Waiting for live links: the router appears once the board hears it.';
   }
@@ -248,7 +369,7 @@ window.AckMap = (() => {
   }
   function loop(t) {
     if (!visible) { raf = 0; return; }
-    const anyMotion = links().some(({ r }) => moving(r));
+    const anyMotion = links().some(({ r }) => moving(r)) || others.some((b) => b.state === 'motion');
     if (dirty || anyMotion) { draw(t); dirty = false; }
     raf = requestAnimationFrame(loop);
   }
@@ -261,7 +382,8 @@ window.AckMap = (() => {
     if (!L.length) box.append(el('p', { className: 'muted small', textContent: 'No live links yet.' }));
     for (const { r, n, color, d } of L) {
       const mv = moving(r);
-      const st = r.key === 'ap:0' ? (boardMotion ? 'MOTION' : 'still') :
+      const st = r.board ? { motion: 'MOTION', still: 'still', calibrating: 'calibrating', silent: 'not heard' }[r.state] || r.state :
+        r.key === 'ap:0' ? (boardMotion ? 'MOTION' : 'still') :
         r.state ? { motion: 'MOTION', still: 'still', calibrating: 'calibrating', weak: 'too weak to judge', silent: 'no signal' }[r.state] || r.state
           : 'turn on per-link analysis (Links page) to judge it';
       const dot = el('span', { className: 'map-dot' }); dot.style.background = color;
@@ -273,7 +395,7 @@ window.AckMap = (() => {
         const exp = expected(r, d), diff = Math.round(r.rssi - exp);
         const q = r.rssi <= LIMIT_WEAK ? 'too weak: below ackwave’s ' + LIMIT_WEAK + ' dBm limit'
           : r.rssi <= LIMIT_DROP ? 'weak: below ' + LIMIT_DROP + ' dBm' : r.rssi > -60 ? 'strong' : 'good';
-        rows.push(`${r.rssi} dBm (${q}) · ${r.rate} answers a second`);
+        rows.push(r.rate !== undefined ? `${r.rssi} dBm (${q}) · ${r.rate} answers a second` : `${r.rssi} dBm (${q}), as that board hears it`);
         rows.push(`Distance ${fmtLen(d)} · motion zone ${fmtLen(2 * zoneR(1, d / 2, d / 2))} wide in the middle`);
         rows.push(Math.abs(diff) <= 3 ? `About what open air would give here (${Math.round(exp)} dBm)`
           : diff < 0 ? `${-diff} dB weaker than open air would give here (${Math.round(exp)} dBm): walls, furniture or people in between`
@@ -288,6 +410,10 @@ window.AckMap = (() => {
 
   // ---------- touch / mouse ----------
   function hit(px, py) {
+    for (const b of others) {
+      const n = M.nodes.get(b.key);
+      if (n && Math.hypot(X(n.x) - px, Y(n.y) - py) <= 18) return n;
+    }
     for (const { n } of links().reverse()) if (Math.hypot(X(n.x) - px, Y(n.y) - py) <= 18) return n;
     return null;
   }
@@ -318,6 +444,7 @@ window.AckMap = (() => {
       return;
     }
     drag = n ? { key: n.key } : { pan: true, x0: x, y0: y, vx: M.view.x, vy: M.view.y, tap: true };
+    autoFit = false; viewByUser = true;
   }
   function move(e) {
     if (!ptrs.has(e.pointerId)) return;
@@ -365,7 +492,7 @@ window.AckMap = (() => {
   async function save() {
     const body = { unit: M.unit, env: M.env, nodes: [...M.nodes.values()].slice(0, 64).map((n) =>
       ({ key: n.key, name: String(n.name).slice(0, 64), x: n.x, y: n.y, placed: !!n.placed })) };
-    if (M.view) body.view = M.view;
+    if (M.view && viewByUser) body.view = M.view;
     body.plans = M.plans.map((p) => ({ id: p.id, name: String(p.name).slice(0, 64), x: p.x, y: p.y, w: p.w,
       rot: p.rot, opacity: p.opacity, hidden: !!p.hidden }));
     try {
@@ -375,7 +502,7 @@ window.AckMap = (() => {
   function apply(m) {
     if (m.unit) M.unit = m.unit;
     if (m.env) M.env = m.env;
-    if (m.view) M.view = m.view;
+    if (m.view) { M.view = m.view; autoFit = false; viewByUser = true; }
     for (const n of m.nodes || []) M.nodes.set(n.key, { key: n.key, name: n.name || n.key, x: n.x, y: n.y, placed: !!n.placed });
     if (m.plans) {
       M.plans = m.plans.map((p) => Object.assign({ name: p.id, rot: 0, opacity: 1, hidden: false }, p));
@@ -531,7 +658,7 @@ window.AckMap = (() => {
     for (const [k, v] of Object.entries(ENVS)) $('#map-env').append(el('option', { value: k, textContent: v.label }));
     $('#map-env').onchange = (e) => { M.env = e.target.value; dirty = true; renderList(); scheduleSave(); };
     for (const b of $('#map-unit').children) b.onclick = () => { M.unit = b.dataset.u; syncControls(); dirty = true; renderList(); scheduleSave(); };
-    $('#map-fit').onclick = () => { fit(); scheduleSave(); };
+    $('#map-fit').onclick = () => { fit(); viewByUser = true; scheduleSave(); };
     $('#map-file').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) addPicture(f); };
     $('#map-hint-done').onclick = () => setTool(null);
     renderLayers();
@@ -549,6 +676,9 @@ window.AckMap = (() => {
     // redraw at the box's real size whenever it changes, so it never stretches
     if (window.ResizeObserver) new ResizeObserver(() => { if (visible) resize(); }).observe(cv.parentElement);
   }
+
+  // The hub's own verdict (the badge may show another board's motion)
+  const hubMoving = (h) => !!(h && h.badge && (h.badge.hub !== undefined ? h.badge.hub : h.badge.word === 'MOTION'));
 
   let started = false;
   return {
@@ -580,14 +710,14 @@ window.AckMap = (() => {
       if (!started) { init(); started = true; }
       apply(m || {}); loaded = true; visible = true;
       syncControls(); resize();
-      radio = slow.radio || []; if (slow.channel) channel = slow.channel;
-      boardMotion = header && header.badge && header.badge.word === 'MOTION';
+      radio = slow.radio || []; others = slow.map_boards || []; if (slow.channel) channel = slow.channel;
+      boardMotion = hubMoving(header);
       renderList(); draw(performance.now());
     },
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
-      if (slow) { radio = slow.radio || []; if (slow.channel) channel = slow.channel; }
-      if (header) boardMotion = header.badge && header.badge.word === 'MOTION';
+      if (slow) { radio = slow.radio || []; others = slow.map_boards || []; if (slow.channel) channel = slow.channel; }
+      if (header) boardMotion = hubMoving(header);
       if (!visible || !loaded) return;
       dirty = true;
       renderList();

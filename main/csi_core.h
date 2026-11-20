@@ -713,13 +713,14 @@ static inline int poke_ta_node(const uint8_t me[6], const uint8_t *dmac) {
 // anything, so two boards give a link across the rooms between them.
 // The hello carries no network name, but it is not encrypted: anyone nearby
 // with a sniffer could read whether a board sees motion.
-#define HELLO_LEN    71         // a report (version 4): sealed, sent to the hub
+#define HELLO_LEN    71         // a report with no extra sections (version 4's size)
+#define REPORT_MAX_LEN 432      // a report with every section (version 5)
 #define HELLO_V1_LEN 40         // a hello: who and where (broadcast, every board)
 #define HELLO_EVERY_MS 500      // hellos and reports each at a fixed rate: timing says nothing
 #define MAX_PEERS    8          // boards one board lists, and keys a hub holds
 #define PEER_GONE_MS 10000      // not heard this long: forgotten
 static const uint8_t HELLO_MAGIC[8] = { 127, 0x02, 0xAC, 0x57, 'A', 'C', 'K', 'W' };  // vendor action, made-up local OUI
-#define HELLO_VERSION 4
+#define HELLO_VERSION 5
 #define HELLO_SEQ_MAX 0xFFFFFFu // 24 bits; then the boot counter goes up, so a nonce is never reused
 #define REPORT_LEN   10         // sealed: flags, k_short, k_long, acks, rssi, n_dev, up_s
 #define HELLO_AAD_LEN 29        // bytes 24..52 (magic .. seq, with the sender's MAC), checked by the tag
@@ -749,6 +750,29 @@ typedef struct {
     uint8_t  n_dev;             // device (and board) links it pokes
     uint32_t up_s;              // seconds since it started
 } sat_report_t;
+
+// Version 5 adds sections after those 10 bytes, inside the seal: tag, length, entries.
+//  - links (every report): each link's target, and its short and long scores
+//    relative to the board's quiet level (x20, so 20 = at the quiet level)
+//  - survey (every 10 s): who the board hears and how strongly (the map lays itself out)
+enum { TLV_LINKS = 1, TLV_SURVEY = 2 };
+enum { RL_ACK = 1, RL_AP = 2, RL_DEVICE = 4 };           // link flags
+enum { RS_ROUTER = 0, RS_BOARD = 1, RS_DEVICE = 2 };     // survey kinds
+#define REP_LINKS_MAX 12
+#define REP_SEEN_MAX  30
+typedef struct { uint8_t mac[6]; uint8_t flags, ks, kl; } rep_link_t;      // 9 bytes on air
+typedef struct { uint8_t mac[6]; uint8_t kind; int8_t rssi; } rep_seen_t;  // 8 bytes on air
+typedef struct {
+    int n_links, n_seen;
+    rep_link_t link[REP_LINKS_MAX];
+    rep_seen_t seen[REP_SEEN_MAX];
+} rep_extra_t;
+
+static inline uint8_t rep_k20(float score, float floor) {
+    if (!(floor > 0) || !(score > 0)) return 0;
+    float k = score / floor * 20.0f;
+    return k >= 255.0f ? 255 : (uint8_t)k;
+}
 
 typedef struct {
     uint8_t mac[6], bssid[6];   // the sender (its real MAC), its router
@@ -786,26 +810,45 @@ static inline int build_hello(uint8_t out[HELLO_V1_LEN], const uint8_t me[6], co
     return HELLO_V1_LEN;
 }
 
-// The report to `hub`, sealed with our key. Returns its length.
-static inline int build_report(uint8_t out[HELLO_LEN], const uint8_t me[6], const uint8_t hub[6],
-                               const uint8_t *bssid, int ch, const sat_report_t *r, uint32_t boot,
-                               aes_block_fn enc, void *key) {
+// The report to `hub`, sealed with our key; extra (or NULL) adds the
+// version 5 sections. Returns its length.
+static inline int build_report(uint8_t out[REPORT_MAX_LEN], const uint8_t me[6], const uint8_t hub[6],
+                               const uint8_t *bssid, int ch, const sat_report_t *r, const rep_extra_t *x,
+                               uint32_t boot, aes_block_fn enc, void *key) {
     uint8_t ta[6];
-    memset(out, 0, HELLO_LEN);
+    memset(out, 0, REPORT_MAX_LEN);
     poke_ta(me, REPORT_NODE, ta);
     hello_head(out, hub, ta, bssid, ch);
     out[32] = HELLO_VERSION;
     memcpy(out + 40, me, 6);
     for (int i = 0; i < 4; i++) out[46 + i] = (uint8_t)(boot >> (8 * i));
     for (int i = 0; i < 3; i++) out[50 + i] = (uint8_t)(r->seq >> (8 * i));
-    uint8_t m[REPORT_LEN] = { r->flags, r->k_short, r->k_long, r->acks, (uint8_t)r->rssi, r->n_dev,
-                              (uint8_t)r->up_s, (uint8_t)(r->up_s >> 8), (uint8_t)(r->up_s >> 16),
-                              (uint8_t)(r->up_s >> 24) };
-    uint8_t n[CCM_NONCE], a[HELLO_AAD_LEN];
-    hello_nonce(out, n);
+    uint8_t m[REPORT_MAX_LEN];
+    int n = 0;
+    m[n++] = r->flags; m[n++] = r->k_short; m[n++] = r->k_long; m[n++] = r->acks;
+    m[n++] = (uint8_t)r->rssi; m[n++] = r->n_dev;
+    for (int i = 0; i < 4; i++) m[n++] = (uint8_t)(r->up_s >> (8 * i));
+    if (x && x->n_links > 0) {
+        int k = x->n_links < REP_LINKS_MAX ? x->n_links : REP_LINKS_MAX;
+        m[n++] = TLV_LINKS; m[n++] = (uint8_t)(9 * k);
+        for (int i = 0; i < k; i++) {
+            memcpy(m + n, x->link[i].mac, 6); n += 6;
+            m[n++] = x->link[i].flags; m[n++] = x->link[i].ks; m[n++] = x->link[i].kl;
+        }
+    }
+    if (x && x->n_seen > 0) {
+        int k = x->n_seen < REP_SEEN_MAX ? x->n_seen : REP_SEEN_MAX;
+        m[n++] = TLV_SURVEY; m[n++] = (uint8_t)(8 * k);
+        for (int i = 0; i < k; i++) {
+            memcpy(m + n, x->seen[i].mac, 6); n += 6;
+            m[n++] = x->seen[i].kind; m[n++] = (uint8_t)x->seen[i].rssi;
+        }
+    }
+    uint8_t nn[CCM_NONCE], a[HELLO_AAD_LEN];
+    hello_nonce(out, nn);
     hello_aad(out, a);
-    ccm_seal(enc, key, n, a, HELLO_AAD_LEN, m, REPORT_LEN, out + 53);
-    return HELLO_LEN;
+    ccm_seal(enc, key, nn, a, HELLO_AAD_LEN, m, n, out + 53);
+    return 53 + n + CCM_TAG;
 }
 
 // f = frame without FCS. True if it is a hello or a report (any version).
@@ -828,17 +871,40 @@ static inline bool parse_hello(const uint8_t *f, int len, hello_t *h) {
     return true;
 }
 
-// The sealed part of a report (f, at least HELLO_LEN bytes).
-// False if the key differs or anything was changed.
-static inline bool hello_open(const uint8_t *f, aes_block_fn enc, void *key, sat_report_t *r) {
-    uint8_t n[CCM_NONCE], a[HELLO_AAD_LEN], m[REPORT_LEN];
+// The sealed part of a report (f, len bytes, at least HELLO_LEN). False if
+// the key differs or anything was changed. x (or NULL) gets the sections;
+// an unknown or cut section is skipped, never read past.
+static inline bool hello_open(const uint8_t *f, int len, aes_block_fn enc, void *key, sat_report_t *r,
+                              rep_extra_t *x) {
+    uint8_t n[CCM_NONCE], a[HELLO_AAD_LEN], m[REPORT_MAX_LEN];
+    int mlen = len - 53 - CCM_TAG;
+    if (len < HELLO_LEN || len > REPORT_MAX_LEN || mlen < REPORT_LEN) return false;
     hello_nonce(f, n);
     hello_aad(f, a);
-    if (!ccm_open(enc, key, n, a, HELLO_AAD_LEN, f + 53, REPORT_LEN, m)) return false;
+    if (!ccm_open(enc, key, n, a, HELLO_AAD_LEN, f + 53, mlen, m)) return false;
     r->seq = (uint32_t)f[50] | (uint32_t)f[51] << 8 | (uint32_t)f[52] << 16;
     r->flags = m[0]; r->k_short = m[1]; r->k_long = m[2]; r->acks = m[3];
     r->rssi = (int8_t)m[4]; r->n_dev = m[5];
     r->up_s = (uint32_t)m[6] | (uint32_t)m[7] << 8 | (uint32_t)m[8] << 16 | (uint32_t)m[9] << 24;
+    if (x) {
+        x->n_links = x->n_seen = 0;
+        for (int i = REPORT_LEN; i + 2 <= mlen;) {
+            int tag = m[i], tl = m[i + 1];
+            const uint8_t *v = m + i + 2;
+            if (i + 2 + tl > mlen) break;                // cut: stop
+            if (tag == TLV_LINKS)
+                for (int k = 0; k + 9 <= tl && x->n_links < REP_LINKS_MAX; k += 9) {
+                    rep_link_t *e = &x->link[x->n_links++];
+                    memcpy(e->mac, v + k, 6); e->flags = v[k + 6]; e->ks = v[k + 7]; e->kl = v[k + 8];
+                }
+            else if (tag == TLV_SURVEY)
+                for (int k = 0; k + 8 <= tl && x->n_seen < REP_SEEN_MAX; k += 8) {
+                    rep_seen_t *e = &x->seen[x->n_seen++];
+                    memcpy(e->mac, v + k, 6); e->kind = v[k + 6]; e->rssi = (int8_t)v[k + 7];
+                }
+            i += 2 + tl;
+        }
+    }
     return true;
 }
 

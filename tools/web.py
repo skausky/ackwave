@@ -37,7 +37,7 @@ from analyze import MAX_APS, MotionDetector, open_port, parse_line
 from breathing import Breathing
 from timeline import Timeline
 from keys import SECRET_RE, Pairing, new_secret, redact
-from boards import HOUSE_RULES, HOUSE_TEXT, House, OtherBoard, split_tag
+from boards import HOUSE_RULES, HOUSE_TEXT, House, OtherBoard, SatLink, split_tag
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
@@ -210,6 +210,8 @@ class Dashboard:
         state.devices.board_name = lambda m: self.cfg['board_names'].get(m)
         self.sats = {}                   # other boards heard through ours: MAC -> latest report
         self.house = House()             # every board's verdict combined (boards.py)
+        self.sat_links = {}              # other board -> {its link's far end: SatLink}
+        self.surveys = {}                # other board -> {who it hears: {kind, rssi, at}}
         self.house_now = (False, [])     # (motion, the boards that count)
         # Several boards on USB (boards.py): the primary is self.s; the rest are watched
         self.others = {}                 # MAC -> OtherBoard
@@ -574,6 +576,43 @@ class Dashboard:
         return {m: dict(name=self.board_label(m), sound=ob.s.sound, sens=ob.s.sens, led=ob.s.led)
                 for m, ob in sorted(self.others.items()) if ob.send}
 
+    def _sat_extra(self, line):
+        """Another board's links (SATL) and who it hears (SURV), from the hub."""
+        ev = parse_line(line)
+        if not ev or ev[1]['mac'] not in self.sats:      # only boards whose sealed report opened
+            return
+        kind, d = ev
+        now = time.time()
+        if kind == 'satl':
+            if d['mac'] not in self.sat_links:           # once per board: the add-on's log says so
+                print(f"{self.board_label(d['mac'])}: {len(d['links'])} links reporting", flush=True)
+            links = self.sat_links.setdefault(d['mac'], {})
+            for e in d['links'][:16]:
+                ln = links.get(e['mac'])
+                if ln is None:
+                    if len(links) >= 16:
+                        continue
+                    ln = links[e['mac']] = SatLink(e['flags'])
+                ln.flags = e['flags']
+                ln.feed(e['ks'], e['kl'], now)
+        else:
+            self.surveys[d['mac']] = {e['mac']: dict(kind=e['kind'], rssi=e['rssi'], at=now) for e in d['seen'][:40]}
+
+    def _target_key(self, mac, flags):
+        """A satellite link's far end as the Map names it: the hub, another
+        board, one of the hub's routers (ap:N), another router (r:<bssid>), or a device (its MAC)."""
+        hub = self.cfg['hub'] or self.s.me
+        if mac == hub:
+            return 'hub', 'Hub'
+        if mac in self.sats or mac in self.cfg['paired']:
+            return 'sat:' + mac, self.board_label(mac)
+        if flags & 2:                                    # a router
+            for i, m in self.s.nodes.items():
+                if 0 <= i < MAX_APS and m and m.lower() == mac:
+                    return f'ap:{i}', self._router_name(i)
+            return 'r:' + mac, self.cfg['router_names'].get(mac) or f'Router {mac[-5:]}'
+        return mac, self.s.devices.name(mac) or mac[-8:]
+
     def _sats_gone(self):
         """A board that went quiet: its open motion period ends when it was last heard."""
         now = time.time()
@@ -743,6 +782,8 @@ class Dashboard:
         with self.lock:
             if line.startswith('SAT,'):
                 self._sat(line)
+            elif line.startswith(('SATL,', 'SURV,')):
+                self._sat_extra(line)
             if self.pair.feed(line) or line.startswith('ME,'):
                 self._pair_cmds()
             self.s.feed(line)
@@ -831,6 +872,36 @@ class Dashboard:
             self._period('house', motion, now, 'House')
         self.house_now = (motion, by)
         return motion, by
+
+    def _map_boards(self):
+        """For the Map: every other board as a point, with its link to its own
+        router. A router the hub also watches shares the hub's dot (ap:N)."""
+        now = time.time()
+        hub_aps = {m.lower(): i for i, m in self.s.nodes.items() if 0 <= i < MAX_APS and m}
+        out = []
+        for mac, d in sorted(self.sats.items()):
+            gone = now - d['at'] > SAT_GONE_S
+            b = d.get('bssid')
+            if b and b in hub_aps:
+                rkey, rname = f'ap:{hub_aps[b]}', self._router_name(hub_aps[b])
+            elif b:
+                rkey, rname = f'r:{b}', self.cfg['router_names'].get(b) or f'Router {b[-5:]}'
+            else:
+                rkey = rname = None
+            now_l = []
+            for tmac, ln in sorted(self.sat_links.get(mac, {}).items()):
+                if ln.at is None or now - ln.at > SAT_GONE_S:
+                    continue
+                tkey, tname = self._target_key(tmac, ln.flags)
+                now_l.append(dict(key=tkey, name=tname, moving=ln.moving and not gone,
+                                  level=round(ln.level(), 2), router=bool(ln.flags & 2)))
+            out.append(dict(key='sat:' + mac, label=self.board_label(mac), links=now_l,
+                            state='gone' if gone else 'calibrating' if not d['calibrated'] else
+                            'motion' if d['motion'] else 'still',
+                            rssi=d.get('rssi') or None, router=rkey, router_name=rname,
+                            router_rssi=d.get('router_rssi') or None, level=round(max(d['k_short'], d['k_long']), 2),
+                            via=d.get('via', 'air')))
+        return out
 
     def _house_slow(self):
         motion, by = self.house_now
@@ -1196,6 +1267,7 @@ class Dashboard:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        routers=self._routers(), boards=self._boards(), house=self._house_slow(), tz=PC_TZ,
+                       map_boards=self._map_boards(),
                        board_settings=self._board_settings(), primary=self.primary or self.s.me,
                        pairing=self.pair.status(self.pair.me == self.cfg['hub'], self._hub_boards()),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
@@ -1483,12 +1555,12 @@ class Dashboard:
         else:
             head, sub = self._meaning()          # the verdict stays the board's
             badge = dict(word='MOTION' if det.motion else 'STILL', head=head,
-                         color=MOTION_C if det.motion else STILL_C, sub=sub)
+                         color=MOTION_C if det.motion else STILL_C, sub=sub, hub=bool(det.motion))
             hm, hby = self.house_now
             others = [self.board_label(b) for b in hby if b != 'board']
             if hm and others and not det.motion:  # another board sees what the hub doesn't
                 badge = dict(word='MOTION', head=f"Motion at {', '.join(others)}", color=MOTION_C,
-                             sub="seen by another board; the hub's own links are still")
+                             sub="seen by another board; the hub's own links are still", hub=False)
         hw, hc, hd = s.link_health()
         tiles = {}
         r = (br or s.br).last
