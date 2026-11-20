@@ -509,6 +509,66 @@ class Dashboard:
             if line.startswith(('STATE,', 'STATS,', 'CALIB,')) or mac not in self.sats:
                 self.sats[mac] = ob.report()
 
+    BOARD_CMDS = ('cal', 'sound', 'sens', 'led')
+
+    def _board_command(self, mac, c):
+        """A command for another board on USB (step B): recalibrate, buzzer,
+        sensitivity, LED. The board saves each one itself."""
+        what = c.get('cmd')
+        with self.lock:
+            ob = self.others.get(mac) if isinstance(mac, str) else None
+            if ob is None or not ob.send:
+                return False, 'that board is not on USB here'
+            if what not in self.BOARD_CMDS:
+                return False, 'only the hub takes that command'
+            name = self.board_label(mac)
+            if what == 'cal':
+                line, msg = 'CAL', f'{name}: recalibrating, step away'
+            elif what == 'sound':
+                if c.get('test'):
+                    line, msg = 'SOUND,test', f'{name}: playing the motion sound'
+                elif c.get('mode') == 'default':
+                    line, msg = 'SOUND,default', f"{name}: buzzer back to the firmware's settings"
+                else:
+                    try:
+                        mode, vol, hz = c.get('mode'), int(c.get('vol')), int(c.get('hz'))
+                    except (TypeError, ValueError):
+                        return False, 'bad buzzer setting'
+                    if mode not in SOUND_MODES or not 1 <= vol <= 50 or not 500 <= hz <= 6000:
+                        return False, 'bad buzzer setting'
+                    line, msg = f'SOUND,{mode},{vol},{hz}', f'{name}: buzzer {mode}'
+            elif what == 'sens':
+                x = c.get('x100')
+                if x == 'default':
+                    line, msg = 'SENS,default', f"{name}: sensitivity back to the firmware's"
+                elif isinstance(x, int) and not isinstance(x, bool) and SENS_RANGE[0] <= x <= SENS_RANGE[1]:
+                    line, msg = f'SENS,{x}', f'{name}: long-window threshold x{x / 100:.1f}'
+                else:
+                    return False, 'bad sensitivity'
+            else:
+                if c.get('mode') == 'default':
+                    line, msg = 'LEDSET,default', f"{name}: LED back to the firmware's settings"
+                else:
+                    color, bright = c.get('color'), c.get('bright')
+                    if c.get('mode') not in LED_MODES or c.get('pattern') not in LED_PATTERNS \
+                            or not isinstance(bright, int) or isinstance(bright, bool) or not 1 <= bright <= 255 \
+                            or not isinstance(color, str) or not re.fullmatch(r'#?[0-9a-fA-F]{6}', color):
+                        return False, 'bad LED setting'
+                    line = f"LEDSET,{c['mode']},{bright},{c['pattern']},{color.lstrip('#').lower()}"
+                    msg = f"{name}: LED {c['mode']}"
+            try:
+                ob.send(line)
+            except Exception as e:
+                self.refused.append((self._now(), f'not sent: {e}'[:120], line))
+                return False, f'not sent: {e}'
+            self.sent_cmds.append((self._now(), f'{mac[-5:]}: {line}'))
+            return True, msg
+
+    def _board_settings(self):
+        """Each other board on USB: what its buzzer, sensitivity and LED are now."""
+        return {m: dict(name=self.board_label(m), sound=ob.s.sound, sens=ob.s.sens, led=ob.s.led)
+                for m, ob in sorted(self.others.items()) if ob.send}
+
     def _sats_gone(self):
         """A board that went quiet: its open motion period ends when it was last heard."""
         now = time.time()
@@ -779,6 +839,9 @@ class Dashboard:
     def command(self, c):
         """Run one command dict; returns (ok, message)."""
         what = c.get('cmd')
+        board = c.get('board')
+        if board is not None and board != self.primary and board != self.s.me:
+            return self._board_command(board, c)
         with self.lock:
             if what == 'cal':
                 if not self.send:
@@ -1097,6 +1160,7 @@ class Dashboard:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        routers=self._routers(), boards=self._boards(), tz=PC_TZ,
+                       board_settings=self._board_settings(), primary=self.primary or self.s.me,
                        pairing=self.pair.status(self.pair.me == self.cfg['hub'], self._hub_boards()),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
                        thresholds=self._thresholds(), today=self._today_totals(),

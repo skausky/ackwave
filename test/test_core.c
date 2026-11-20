@@ -1186,8 +1186,8 @@ int main(void) {
         hub_link_t hk = {0};
         CHECK(hub_next_ch(&hk, 6, 13) == 6);
         CHECK(!hub_result(&hk, true, 13) && hk.ch == 6);              // answered: stay
-        CHECK(!hub_result(&hk, false, 13) && !hub_result(&hk, false, 13) && hk.ch == 6);  // 2 misses: stay
-        CHECK(!hub_result(&hk, false, 13) && hk.search && hk.ch == 7);  // 3rd: search
+        for (int i = 1; i < HUB_MISS_MAX; i++) CHECK(!hub_result(&hk, false, 13) && hk.ch == 6);  // a few: stay
+        CHECK(!hub_result(&hk, false, 13) && hk.search && hk.ch == 7);  // then: search
         CHECK(!hub_result(&hk, false, 13) && hk.ch == 8);
         for (int i = 0; i < 4; i++) hub_result(&hk, false, 13);
         CHECK(hk.ch == 12 && !hub_result(&hk, false, 13) && hk.ch == 13);

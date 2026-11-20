@@ -820,7 +820,7 @@ static void poke_task(void *arg) {
             rep_acked = 0;
             pk.node = -1;                                  // no poke ACK to match meanwhile
             esp_wifi_80211_tx(WIFI_IF_STA, hello, hn, true);
-            vTaskDelay(pdMS_TO_TICKS(3));                  // the ACK comes within microseconds
+            vTaskDelay(pdMS_TO_TICKS(5));                  // the ACK comes within µs; the frame may wait to go out
             bool acked = rep_acked;
             if (ch != home) esp_wifi_set_channel(home, WIFI_SECOND_CHAN_NONE);
             xSemaphoreGive(ch_lock);

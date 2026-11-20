@@ -844,10 +844,11 @@ static inline bool hello_open(const uint8_t *f, aes_block_fn enc, void *key, sat
 
 // ---------- Finding the hub's channel ----------
 // Reports go out on the channel the hub was last found on (saved), first our
-// own. The hub's radio ACKs each one; after HUB_MISS_MAX reports in a row
+// own. The hub's radio ACKs each one; after HUB_MISS_MAX (5) reports in a row
 // without an ACK, each further report tries the next channel until one is
-// answered (13 channels: ~7 s at 2 reports/s).
-#define HUB_MISS_MAX 3
+// answered (13 channels: ~7 s at 2 reports/s). An ACK is sometimes missed
+// (about 1 in 4 seen) while the report arrived, so one miss means little.
+#define HUB_MISS_MAX 5
 typedef struct { int ch; int miss; bool search; } hub_link_t;
 
 static inline int hub_next_ch(hub_link_t *h, int own_ch, int max_ch) {
