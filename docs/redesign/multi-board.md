@@ -88,7 +88,13 @@ line, about ±100 ms. Restart detection runs per board.
    periods real.
 3. **Two boards agree.** For alarms (Guard / Away later).
 
-## Build order
+## Build order (first plan; status 2026-11-20)
+
+Done and on main: A, C, D (map with every board and link), E (the Pi, as a
+Home Assistant add-on), the airtime check (no drop with 3 boards: 92-94 ACK/s
+each). B is half done (server side; the Settings picker is not). The roadmap
+at the end of this file replaces this list from here on.
+
 
 - **A** (USB boards only): `./csi web <port> <port> ...`; the primary board
   (saved MAC) behaves exactly as today; other boards get their own state,
@@ -190,3 +196,155 @@ gives:
 Needs first: the report carries per-link scores and the activity
 features (item 3), and a survey every ~10 s: who the board hears and how
 strongly. One reflash of the satellites, then each of 1-6 is PC side.
+
+
+## Roadmap (revised 2026-11-20)
+
+Ordered by what makes the rest possible and what you will notice first. Each
+phase says when it is done; a phase goes to main only after it was tried on
+the boards and you said so.
+
+### Phase 1: measure and harden (first, small)
+
+The extra boards are only worth what they can be shown to add, and a house
+system must survive weeks without anyone watching.
+
+- **Ground truth from a phone.** A "label" button on the dashboard (works on
+  a phone through HA): tap the room you walk into, or "nobody home". Kept
+  next to the timeline. Every later claim (a board helps, the location is
+  right, a room is recognised) is scored against these labels.
+- **Daily report.** compare.py run by the add-on every night: per board,
+  periods seen, seen by it alone, blips confirmed, and against the labels
+  (hit rate, false alarms per day). On the Stats page.
+- **Board health.** Each board's answered-report rate, last heard, channel,
+  key state, restarts; Home warns "Kitchen board not heard for 5 min" and the
+  log says so. A board's motion never counts while it is stale.
+- **Keep the Pi tidy.** Retention for /share/ackwave (events and timeline
+  for a year, raw only while switched on, oldest deleted first), and the
+  disk space on the Health card.
+- **Pairing housekeeping.** Remove a board (its key taken back from the hub);
+  rotate every key (new secret, boards re-keyed as each is plugged in).
+
+Done when: a week of labels, a daily report on the Pi, and a board pulled
+out of the wall shows up as such within 5 min.
+
+### Phase 2: geometry (the map lays itself out)
+
+- **Survey to distances.** Every report's survey (who a board hears, how
+  strongly; both directions between boards) → distance per pair with a path
+  loss fitted to the house (and to the PC side's own signal readings).
+- **Placement.** Weighted multidimensional scaling (stress majorisation),
+  held by the dots you placed by hand and the floor plan's scale; each guess
+  gets an uncertainty ring, smaller as more pairs agree.
+- **Facing.** Each board gets a direction (drag the arrow on its square). A
+  rough pattern for the S3's PCB antenna (strongest ahead, a few dB down to
+  the sides, weakest behind the USB end) corrects its readings and tilts its
+  glow. Optionally learned: the board pair readings that fit worst hint which
+  way a board faces.
+- **Walls.** Drawn on the floor plan (two taps, a material each: drywall,
+  brick, concrete, glass, metal, door), or suggested where pairs lose much
+  more than open air (shown as "a wall here?" to confirm). Paths through
+  walls lose their material's dB; the glow bends toward doors and thin walls.
+
+Done when: with 3 dots placed by hand, the rest land within ~1.5 m of where
+they are, and the walls suggested match real ones.
+
+### Phase 3: where people are
+
+- **A simulator first.** fake_csi gets a house: the floor plan, boards,
+  routers, devices, and people walking paths; each link responds by the
+  sensitivity model. It tests everything below without walking around, and
+  scores it (location error, rooms right).
+- **Location.** Every link's motion score against its sensitivity map gives
+  how likely a person is at each spot (the product over links, with each
+  link's own noise); a blob on the map, "someone in the hall by the kitchen".
+  Two people: two blobs when the links allow it; the map says when it can't.
+- **Paths and rooms over time.** The blob over minutes: a faint path on the
+  map; time per room in Where and when (rooms are areas you draw, or the
+  rooms the walk test learned).
+
+Done when: in the simulator, median error under 1.5 m with 4 boards; in the
+house, the right room for 8 of 10 labelled walks.
+
+### Phase 4: learning that adapts
+
+- **Rooms by walking.** Stand in each room, tap its name: the pattern of
+  which links respond (and how) is that room's fingerprint (kNN, as for
+  activities); ✓/✗ while using it add examples.
+- **Activities from every board.** Each satellite computes the activity
+  features itself (energy over 3 s and 20 s, burst, power by band, breathing)
+  and sends them in its report; the dashboard trains and recognises per
+  board, from clips recorded on any board.
+- **Adapting, not retraining.** Movement features don't depend on where the
+  board is, so they carry over; what does depend (the channel's shape, a
+  link's quiet level) is kept per placement and re-learned on its own:
+  a board moved or a router changed is noticed (signal step, new channel
+  shape), its placement-bound parts start over, the rest stays. Corrections
+  you make weigh more than old clips; very old clips fade.
+- **Breathing per board.** A cheap on-board rhythm estimate per link, sent
+  in the report: "someone still in the bedroom" without USB.
+
+Done when: after moving a board, movement is recognised at once and rooms
+again after one short walk test.
+
+### Phase 5: coverage and the radio
+
+- **Shared devices, chosen together.** The dashboard picks which devices each
+  board pokes (sent to each board as POKE over the air, sealed, or over USB
+  when plugged): links that cross rooms the others don't cover, no device
+  poked by every board.
+- **A time beacon.** The hub stamps its own clock into an acknowledged
+  message; each board keeps the offset, so reports carry hub time
+  (milliseconds across the house).
+- **Taking turns.** With hub time, each board pokes in its own slots, so
+  boards stop overhearing each other's pokes as noise (the drop counter) and
+  more boards fit the same airtime.
+- **Router glitch filter.** With hub time: every board's router link jumping
+  within ~100 ms while board-to-board links stay quiet is the router, not a
+  person: dropped from every verdict.
+
+Done when: 4 boards, each with 2-3 devices, still over 90 % answered; a
+router glitch makes no motion period anywhere.
+
+### Phase 6: Home Assistant
+
+- **Entities over MQTT** (the broker is already there): house motion, each
+  board / room's motion, the person's room, the activity, each board's
+  health; with discovery, so they appear by themselves.
+- **Its automations instead of URL hooks:** lights per room, "nobody home"
+  modes, notifications for Guard / Away (motion while nobody should be
+  there).
+- Done when: a light follows the room's motion through an HA automation.
+
+### Phase 7: living with it
+
+- **New board wizard:** plug it in → it's found, flashed, paired, named,
+  placed on the map; one screen.
+- **Satellite updates over the air, through the hub.** Firmware in sealed,
+  numbered chunks, the image signed (Ed25519, the private key only on the PC,
+  the board checks before it switches), the old image kept to fall back to.
+  Then no board ever needs a cable again. Large and security-critical: after
+  everything above works.
+- **The 5 GHz boards (C5, Christmas):** the same protocol, a link between
+  bands' boards through the hub.
+
+### Order and why
+
+1 → 2 → 3 is the backbone: measure, then place, then locate. Phase 4's
+"rooms by walking" can start right after 1 (it needs no geometry), and
+Phase 6's entities are small, so both can slot in early if you want HA
+automations sooner. Phase 5 matters once more boards poke more devices.
+Phase 7 last.
+
+### Risks
+
+- RSSI distances indoors are rough (±30-50 %): the auto-layout needs the
+  hand-placed anchors and will say how sure it is.
+- The sensitivity model is an estimate until walk tests correct it; the
+  location is only as good as the links crossing a room (a room with none
+  can't be told apart).
+- Two people close together look like one.
+- Every report's size and every board's airtime grow with links and
+  sections: the airtime check is repeated at each phase.
+- Over-the-air updates can brick a board if done wrong: signed, verified,
+  with a fallback image, and last.
