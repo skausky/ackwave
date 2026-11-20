@@ -124,6 +124,12 @@ static uint8_t key_fp[4];          // fingerprint the PC compares with its own
 static peer_keys_t pkeys;          // under key_lock
 static SemaphoreHandle_t key_lock;
 static uint32_t boot_id;           // boot counter (saved, +1 per start): with seq, the nonce
+static uint8_t hub_mac[6];         // where our reports go (HUB from the PC, saved)
+static volatile bool have_hub;
+static hub_link_t hubl;            // the hub's channel as last found (poke task)
+static uint8_t rep_ta[6];          // our reports' made-up sender: the hub's ACK comes to it
+static volatile uint32_t rep_acked; // set by the Wi-Fi callback when that ACK arrives
+static uint32_t n_rep, n_rep_ack;  // reports sent / answered (poke task)
 static void nvs_put(const char *key, const void *v, size_t n);
 static bool nvs_take(const char *key, void *v, size_t n);
 #define MACF "%02x:%02x:%02x:%02x:%02x:%02x"
@@ -181,6 +187,12 @@ static void print_peerkeys(void) {
             printf("PEERKEY," MACF ",%02x%02x%02x%02x\n", MACA(pkeys.k[i].mac), fp[0], fp[1], fp[2], fp[3]);
         }
     xSemaphoreGive(key_lock);
+}
+
+// HUB,<mac>,<channel found>,<reports sent>,<answered> or HUB,none
+static void print_hub(void) {
+    if (!have_hub) { printf("HUB,none\n"); return; }
+    printf("HUB," MACF ",%d,%" PRIu32 ",%" PRIu32 "\n", MACA(hub_mac), hubl.ch, n_rep, n_rep_ack);
 }
 
 static void print_key(void) {
@@ -294,10 +306,16 @@ static uint32_t n_badseal, n_replay;             // reports that didn't open (wr
 static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static inline uint32_t now_us(void) { return (uint32_t)esp_timer_get_time(); }
 
+// The poke task visits the hub's channel for a moment to send a report; ch_lock
+// keeps that from crossing a real channel change. Created in app_main.
+static SemaphoreHandle_t ch_lock;
+
 static void set_ch(int ch) {
+    if (ch_lock) xSemaphoreTake(ch_lock, portMAX_DELAY);
     esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
     cur_ch = ch;
     ch_epoch++;
+    if (ch_lock) xSemaphoreGive(ch_lock);
 }
 
 // ---------------- Optional buzzer ----------------
@@ -624,6 +642,8 @@ static void probe_task(void *arg) {
 // Beacon sniffer: learns BSSIDs by SSID, tracks real channel, catches CSA
 static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     const wifi_promiscuous_pkt_t *pkt = buf;
+    if (type == WIFI_PKT_CTRL && is_ack_to(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, rep_ta))
+        rep_acked = 1;                                 // the hub got our report
 #if CSI_PROBE
     if (type == WIFI_PKT_CTRL) {
         const uint8_t *f = pkt->payload;
@@ -662,17 +682,21 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (parse_hello(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, &hl)) {
         const uint8_t *pmac = hl.mac;
         if (memcmp(pmac, my_mac, 6) == 0) return;
+        if (hl.sealed) {                           // a report to us (the hub): opened in the control task
+            if (sat_q && memcmp(pkt->payload + 4, my_mac, 6) == 0) {
+                sat_rx_t r = { .rssi = (int8_t)pkt->rx_ctrl.rssi };
+                memcpy(r.f, pkt->payload, HELLO_LEN);
+                xQueueSend(sat_q, &r, 0);          // full: skipped, the next comes in 0.5 s
+            }
+            return;
+        }
         int rssi = pkt->rx_ctrl.rssi;
         taskENTER_CRITICAL(&seen_mux);
         bool fresh = peer_find(&peers, pmac, now_ms()) < 0;
         peer_note(&peers, pmac, hl.bssid, pkt->rx_ctrl.channel, rssi, now_ms());
         if (fresh) seen_forget_peer(&seen, pmac);
         taskEXIT_CRITICAL(&seen_mux);
-        if (hl.sealed && sat_q) {
-            sat_rx_t r = { .rssi = (int8_t)rssi };
-            memcpy(r.f, pkt->payload, HELLO_LEN);
-            xQueueSend(sat_q, &r, 0);              // full: this one is skipped, the next comes in 1 s
-        }
+
         int dn = node_find(&nodes, pmac);          // poked like a device: its signal and channel
         if (dn >= MAX_APS) {
             gate_rssi(&gate, dn, rssi);
@@ -754,6 +778,7 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
 // share another POKE_HZ/s (a slot with no device to poke stays silent).
 static void poke_task(void *arg) {
     uint8_t frame[NULL_FRAME_LEN], hello[HELLO_LEN];
+    uint32_t next_report = HELLO_EVERY_MS / 2;     // between hellos
     int rr[2] = {0, 0}, slot = 0;
     uint32_t next_hello = 0;
     TickType_t wake = xTaskGetTickCount();
@@ -764,11 +789,19 @@ static void poke_task(void *arg) {
         int devs = slot;
         slot ^= 1;
         if (scanning) continue;
-        // Once a second a device slot says hello to the other boards
-        // (only once our router is found, so the channel is the right one)
+        // Twice a second a device slot says hello to the other boards, on our
+        // channel; between those, a report goes to the hub on its channel.
+        // Both at a fixed rate (only once our router is found)
         uint32_t tn = now_ms();
         if (devs && node_count(&nodes) > 0 && deadline_passed(tn, next_hello)) {
-            next_hello = tn + HELLO_EVERY_MS;           // fixed: a change never sends sooner
+            next_hello = tn + HELLO_EVERY_MS;
+            int hn = build_hello(hello, my_mac, nodes.mac[0], cur_ch);
+            esp_wifi_80211_tx(WIFI_IF_STA, hello, hn, true);
+            continue;
+        }
+        if (devs && node_count(&nodes) > 0 && deadline_passed(tn, next_report)) {
+            next_report = tn + HELLO_EVERY_MS;
+            if (!have_key || !have_hub || memcmp(hub_mac, my_mac, 6) == 0) continue;
             sat_report_t r;
             taskENTER_CRITICAL(&seen_mux);
             bool wrap = ++my_rep.seq > HELLO_SEQ_MAX;
@@ -778,10 +811,25 @@ static void poke_task(void *arg) {
             taskEXIT_CRITICAL(&seen_mux);
             if (wrap) { boot_id++; nvs_put("boot", &boot_id, sizeof boot_id); }   // ~97 days at 2/s
             xSemaphoreTake(key_lock, portMAX_DELAY);
-            int hn = build_hello(hello, my_mac, nodes.mac[0], cur_ch, &r, boot_id,
-                                 have_key ? aes_block : NULL, &key_ctx);
+            int hn = build_report(hello, my_mac, hub_mac, nodes.mac[0], cur_ch, &r, boot_id, aes_block, &key_ctx);
             xSemaphoreGive(key_lock);
+            // On the hub's channel for a moment (no detector reset: not a channel change)
+            xSemaphoreTake(ch_lock, portMAX_DELAY);
+            int home = cur_ch, ch = hub_next_ch(&hubl, home, MAX_CH);
+            if (ch != home) esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+            rep_acked = 0;
+            pk.node = -1;                                  // no poke ACK to match meanwhile
             esp_wifi_80211_tx(WIFI_IF_STA, hello, hn, true);
+            vTaskDelay(pdMS_TO_TICKS(3));                  // the ACK comes within microseconds
+            bool acked = rep_acked;
+            if (ch != home) esp_wifi_set_channel(home, WIFI_SECOND_CHAN_NONE);
+            xSemaphoreGive(ch_lock);
+            n_rep++;
+            if (acked) n_rep_ack++;
+            if (hub_result(&hubl, acked, MAX_CH)) {        // found it on another channel: remember
+                int32_t c = hubl.ch;
+                nvs_put("hubch", &c, sizeof c);
+            }
             continue;
         }
         int target = next_poke_target(&nodes, node_ch, cur_ch, &rr[devs], &gate, devs);
@@ -910,7 +958,7 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
-    int snd, smode, svol, shz, sens, sx, na, ledc, ext, kc, pk;
+    int snd, smode, svol, shz, sens, sx, na, ledc, ext, kc, pk, hc;
     uint8_t newkey[16], pmac[6];
     ap_list_t new_aps;
     led_cfg_t new_led;
@@ -982,6 +1030,16 @@ static void run_cmd(const char *line) {
         memset(newkey, 0, sizeof newkey);
         printf("PEERKEYS,%s\n", full ? "full" : changed ? "saved" : "unchanged");
         print_peerkeys();
+    } else if ((hc = parse_hub(line, pmac)) != HUB_BAD) {
+        if (hc == HUB_SET && (!have_hub || memcmp(hub_mac, pmac, 6) != 0)) {
+            memcpy(hub_mac, pmac, 6);
+            nvs_put("hub", hub_mac, 6);
+            have_hub = true;
+        } else if (hc == HUB_CLEAR && have_hub) {
+            nvs_put("hub", NULL, 0);
+            have_hub = false;
+        }
+        print_hub();
     } else if ((ext = parse_ext(line)) >= 0) {
         ext_until_ms = ext ? (clock_ms() + EXT_HOLD_MS) | 1 : 0;   // print_task reports changes
     } else if ((ledc = parse_led(line, &new_led)) != LED_BAD) {
@@ -1261,6 +1319,7 @@ static void control_task(void *arg) {
             print_devices();
             print_peers();
             print_peerkeys();                // then KEY, which closes the list for the PC
+            print_hub();
             print_key();
             if (n_badseal || n_replay)
                 printf("SEAL,%" PRIu32 ",%" PRIu32 "\n", n_badseal, n_replay);
@@ -1500,6 +1559,11 @@ void app_main(void) {
     boot_id++;                               // every start: a new nonce space, newer than any recording
     nvs_put("boot", &boot_id, sizeof boot_id);
     pkeys_load();
+    ch_lock = xSemaphoreCreateMutex();
+    configASSERT(ch_lock);
+    have_hub = nvs_take("hub", hub_mac, 6);
+    int32_t hch;
+    if (nvs_take("hubch", &hch, sizeof hch)) hubl.ch = hch;
     uint8_t k[16];
     if (nvs_take("key", k, sizeof k)) key_apply(k);
     memset(k, 0, sizeof k);
@@ -1539,6 +1603,7 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, my_mac));
+    poke_ta(my_mac, REPORT_NODE, rep_ta);
     // 6 Mbps OFDM, so the AP's ACK is OFDM too (1 Mbps 11b ACKs have no CSI)
     ESP_ERROR_CHECK(esp_wifi_config_80211_tx_rate(WIFI_IF_STA, WIFI_PHY_RATE_6M));
 

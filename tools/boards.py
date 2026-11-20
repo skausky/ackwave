@@ -106,10 +106,6 @@ class OtherBoard:
                 if self.period:
                     self.period('sat:' + self.mac, on, w)
 
-    def key_commands(self, hub_boards, now):
-        """Its own key only (it is not the hub): sent even in step A."""
-        return self.pair.commands(False, hub_boards, now)
-
     def report(self):
         """The same fields a sealed report gives, from its own lines."""
         s = self.s
@@ -127,4 +123,5 @@ class OtherBoard:
                     k_short=round(ks, 2), k_long=round(kl, 2), acks=round(s.rate((0, 1))) if s.now else 0,
                     router_rssi=(g or {}).get('rssi', 0) or 0, links=len(s.devices.poking),
                     up_s=int((st.get('ts') or 0) / 1e6), rssi=0, seq=0,
-                    at=self.last or 0, since=self.since or self.last or 0, via='usb')
+                    at=self.last or 0, since=self.since or self.last or 0, via='usb',
+                    hub_ch=self.pair.hub_ch, reports=self.pair.reports, answered=self.pair.answered)

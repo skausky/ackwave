@@ -1127,11 +1127,15 @@ int main(void) {
             CHECK(memcmp(o3, PY3, 48) == 0);                  // no associated data, 3 blocks
         }
 
-        uint8_t h[HELLO_LEN];
+        uint8_t h[HELLO_LEN], HUBM[6] = {0x98,0xa3,0x16,0x01,0x02,0x03};
         hello_t hl;
         sat_report_t rp = { .seq = 0x123456, .flags = REP_MOTION | REP_CALIBRATED, .k_short = 77,
                             .k_long = 255, .acks = 96, .rssi = -57, .n_dev = 3, .up_s = 0x01020304 }, got;
-        CHECK(build_hello(h, B1, AP1, 6, &rp, 42, aes128_block, &ak) == HELLO_LEN);
+        // the report: to the hub, from a made-up sender, the real one inside
+        CHECK(build_report(h, B1, HUBM, AP1, 6, &rp, 42, aes128_block, &ak) == HELLO_LEN);
+        uint8_t rta[6]; poke_ta(B1, REPORT_NODE, rta);
+        CHECK(memcmp(h + 4, HUBM, 6) == 0 && memcmp(h + 10, rta, 6) == 0 && memcmp(h + 10, B1, 6) != 0);
+        CHECK(poke_ta_node(B1, rta) < 0);                    // never taken for a poke's ACK
         uint8_t *hp = malloc(HELLO_LEN);                     // exact size: ASan catches over-reads
         memcpy(hp, h, HELLO_LEN);
         CHECK(parse_hello(hp, HELLO_LEN, &hl) && memcmp(hl.mac, B1, 6) == 0 &&
@@ -1141,38 +1145,72 @@ int main(void) {
               got.k_short == 77 && got.k_long == 255 && got.acks == 96 &&
               got.rssi == -57 && got.n_dev == 3 && got.up_s == 0x01020304);
         CHECK(!parse_hello(hp, 39, &hl));                    // short
-        CHECK(parse_hello(hp, HELLO_LEN - 1, &hl) && !hl.sealed);   // cut: a peer, no report
+        CHECK(parse_hello(hp, HELLO_LEN - 1, &hl) && !hl.sealed);   // cut: not a report
         free(hp);
         {   // nothing readable, nothing changeable
             static const uint8_t OTHER[16] = {9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9};
             aes128_t bk; aes128_init(&bk, OTHER);
             CHECK(!hello_open(h, aes128_block, &bk, &got));             // another key
             bool leak = false;                                           // the plain bytes aren't on air
-            for (int i = 47; i < 57; i++) leak |= h[i] == 77 && h[i + 1] == 255;
+            for (int i = 53; i < 63; i++) leak |= h[i] == 77 && h[i + 1] == 255;
             CHECK(!leak);
-            const int at[] = {10, 15, 24, 33, 34, 40, 44, 46, 47, 56, 57, 64};   // sender, magic, channel,
-            for (unsigned i = 0; i < sizeof at / sizeof at[0]; i++) {           // router, boot, seq, report, tag
-                h[at[i]] ^= 0x04;
-                CHECK(!hello_open(h, aes128_block, &ak, &got));
+            const int at[] = {24, 31, 32, 33, 34, 40, 45, 46, 50, 52, 53, 62, 63, 70};  // magic, version, channel,
+            for (unsigned i = 0; i < sizeof at / sizeof at[0]; i++) {           // router, sender, boot, seq,
+                h[at[i]] ^= 0x04;                                               // report, tag
+                CHECK(!hello_open(h, aes128_block, &ak, &got) || at[i] == 32);
                 h[at[i]] ^= 0x04;
             }
             CHECK(hello_open(h, aes128_block, &ak, &got));
+            h[40] |= 1; CHECK(parse_hello(h, HELLO_LEN, &hl) && !hl.sealed); h[40] &= 0xFE;  // group sender inside
         }
-        CHECK(build_hello(h, B1, AP1, 6, &rp, 42, NULL, NULL) == HELLO_V1_LEN);   // no key: no report
-        CHECK(parse_hello(h, HELLO_V1_LEN, &hl) && !hl.sealed && hl.version == 1 && hl.ch == 6);
-        h[32] = 2;                                           // version 2 (report in the clear): not used
+        // the hello: broadcast, from the real MAC, nothing about motion
+        CHECK(build_hello(h, B1, AP1, 6) == HELLO_V1_LEN);
+        CHECK(h[4] == 0xFF && memcmp(h + 10, B1, 6) == 0);
+        CHECK(parse_hello(h, HELLO_V1_LEN, &hl) && !hl.sealed && hl.version == 1 && hl.ch == 6 &&
+              memcmp(hl.mac, B1, 6) == 0);
+        h[32] = 3;                                           // version 3 (broadcast report): not used
         CHECK(parse_hello(h, HELLO_LEN, &hl) && !hl.sealed);
         h[32] = 1;
         CHECK(!parse_hello(NULL, HELLO_LEN, &hl));
         h[28] ^= 1; CHECK(!parse_hello(h, HELLO_LEN, &hl)); h[28] ^= 1;   // not ours
         h[0] = 0x80; CHECK(!parse_hello(h, HELLO_LEN, &hl)); h[0] = 0xD0; // a beacon
         h[10] |= 1; CHECK(!parse_hello(h, HELLO_LEN, &hl)); h[10] &= 0xFE; // group sender
-        build_hello(h, B1, NULL, 3, NULL, 0, NULL, NULL);    // no router found yet: zeros
-        CHECK(parse_hello(h, HELLO_LEN, &hl) && hl.ch == 3 && hl.bssid[0] == 0 && hl.bssid[5] == 0);
-        beacon_info_t hb; parse_beacon(h, HELLO_LEN, "MyNetwork", &hb);
+        build_hello(h, B1, NULL, 3);                         // no router found yet: zeros
+        CHECK(parse_hello(h, HELLO_V1_LEN, &hl) && hl.ch == 3 && hl.bssid[0] == 0 && hl.bssid[5] == 0);
+        beacon_info_t hb; parse_beacon(h, HELLO_V1_LEN, "MyNetwork", &hb);
         CHECK(!hb.ssid_match);                               // never mistaken for our router
         CHECK(rep_k(0.5f, 1.0f) == 25 && rep_k(1.0f, 1.0f) == 50 && rep_k(9.0f, 1.0f) == 255);
         CHECK(rep_k(1.0f, 0.0f) == 0 && rep_k(-1.0f, 1.0f) == 0 && rep_k(0.0f / 0.0f, 1.0f) == 0);
+
+        // Finding the hub: our own channel first; after 3 misses, one channel per report
+        hub_link_t hk = {0};
+        CHECK(hub_next_ch(&hk, 6, 13) == 6);
+        CHECK(!hub_result(&hk, true, 13) && hk.ch == 6);              // answered: stay
+        CHECK(!hub_result(&hk, false, 13) && !hub_result(&hk, false, 13) && hk.ch == 6);  // 2 misses: stay
+        CHECK(!hub_result(&hk, false, 13) && hk.search && hk.ch == 7);  // 3rd: search
+        CHECK(!hub_result(&hk, false, 13) && hk.ch == 8);
+        for (int i = 0; i < 4; i++) hub_result(&hk, false, 13);
+        CHECK(hk.ch == 12 && !hub_result(&hk, false, 13) && hk.ch == 13);
+        CHECK(!hub_result(&hk, false, 13) && hk.ch == 1);             // wraps
+        CHECK(hub_result(&hk, true, 13) && hk.ch == 1 && !hk.search);  // found: save channel 1
+        CHECK(!hub_result(&hk, true, 13));                            // already known: nothing to save
+        hub_link_t bad = { .ch = 40 };
+        CHECK(hub_next_ch(&bad, 11, 11) == 11 && hub_next_ch(&bad, 11, 11) == 11);  // a saved 5 GHz / bad one
+        hub_link_t none = {0};
+        CHECK(hub_next_ch(&none, 0, 13) == 1);                        // no channel of our own yet
+        uint8_t hm[6];
+        CHECK(parse_hub("HUB", hm) == HUB_QUERY && parse_hub("HUB,clear\r\n", hm) == HUB_CLEAR);
+        {
+            char line[32];
+            snprintf(line, sizeof line, "HUB,%02x:%02x:%02x:%02x:%02x:%02x", HUBM[0], HUBM[1], HUBM[2],
+                     HUBM[3], HUBM[4], HUBM[5]);
+            CHECK(parse_hub(line, hm) == HUB_SET && memcmp(hm, HUBM, 6) == 0);
+            line[4] = '9'; line[5] = '9';                             // 99: a group address
+            CHECK(parse_hub(line, hm) == HUB_BAD);
+            strcat(line, "x");
+            CHECK(parse_hub(line, hm) == HUB_BAD);
+        }
+        CHECK(parse_hub("HUBX", hm) == HUB_BAD && parse_hub("HUB,", hm) == HUB_BAD);
 
         // Replays: only newer (boot, seq) passes; a new boot is always newer
         CHECK(replay_newer(5, 1, 4, 999) && replay_newer(5, 11, 5, 10));

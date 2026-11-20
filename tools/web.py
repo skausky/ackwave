@@ -232,7 +232,7 @@ class Dashboard:
         self.lock = threading.Lock()
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
-        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, board_names={}, act_place=0, hub=None)   # sound, sens: kept on the board; None = its own
+        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, board_names={}, act_place=0, hub=None, paired=[])   # sound, sens: kept on the board; None = its own
         # Device links that drive the alerts (light, buzzer, LED) besides the board:
         # src -> True once that link's slow window confirmed its current motion
         self.confirmed = {}
@@ -282,6 +282,9 @@ class Dashboard:
         hub = got.get('hub')
         if isinstance(hub, str) and MAC_RE.fullmatch(hub):
             self.cfg['hub'] = hub.lower()
+        pr = got.get('paired')
+        if isinstance(pr, list) and len(pr) <= SAT_MAX:
+            self.cfg['paired'] = sorted({m.lower() for m in pr if isinstance(m, str) and MAC_RE.fullmatch(m)})
         # Light on motion: web hooks called when motion starts / the room goes still
         self.light = Light(got.get('light') if isinstance(got.get('light'), dict) else None,
                            call=light_call, run=light_run)
@@ -402,8 +405,17 @@ class Dashboard:
         self._period('sat:' + d['mac'], d['motion'] and d['calibrated'], now, self.board_label(d['mac']))
 
     def _hub_boards(self):
-        """The other boards the hub should hold keys for: those it hears on our router."""
-        return [m for m, dv in self.s.devices.devs.items() if dv.board and dv.same]
+        """The other boards the hub should hold keys for: every board paired on
+        this PC (its reports find the hub on any channel) and those it hears."""
+        heard = {m for m, dv in self.s.devices.devs.items() if dv.board and dv.same}
+        return sorted((heard | set(self.cfg['paired'])) - {self.cfg['hub']})
+
+    def _note_paired(self, pair):
+        """A board now holds its key: remember it, so the hub gets its key too."""
+        if pair.key_ok() and pair.me != self.cfg['hub'] and pair.me not in self.cfg['paired'] \
+                and len(self.cfg['paired']) < SAT_MAX:
+            self.cfg['paired'] = sorted(self.cfg['paired'] + [pair.me])
+            self._save_settings()
 
     def _pair_cmds(self):
         """Hand the connected board its key and, if it is the hub, its boards' keys."""
@@ -418,7 +430,9 @@ class Dashboard:
             changed = True
         if changed:
             self._save_settings()
-        self.s.outbox += self.pair.commands(self.pair.me == self.cfg['hub'], self._hub_boards(), time.time())
+        self._note_paired(self.pair)
+        self.s.outbox += self.pair.commands(self.pair.me == self.cfg['hub'], self._hub_boards(), time.time(),
+                                            hub_mac=self.cfg['hub'])
 
     # ---------- several ports (step A) ----------
     def set_sources(self, sends, log=None):
@@ -485,7 +499,8 @@ class Dashboard:
                 ob.send = send
             ob.feed(line, now)
             if ob.send and line.startswith('KEY,') and self.board_secret:
-                for c in ob.key_commands(self._hub_boards(), now):
+                self._note_paired(ob.pair)
+                for c in ob.pair.commands(False, self._hub_boards(), now, hub_mac=self.cfg['hub']):
                     try:
                         ob.send(c)
                         self.sent_cmds.append((now, f'{mac[-5:]}: {redact(c)}'))

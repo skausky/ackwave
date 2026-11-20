@@ -57,6 +57,8 @@ class Pairing:
         self._cycle = {}
         self.bad = self.replays = 0
         self.sent_at = {}           # command kind -> when last sent (no flood while it saves)
+        self.hub = None             # where it sends its reports: MAC, 'none', or None (not said yet)
+        self.hub_ch = self.reports = self.answered = 0
 
     def feed(self, line):
         """Returns True if the line was one of ours."""
@@ -72,14 +74,21 @@ class Pairing:
         if p[0] == 'PEERKEY' and len(p) == 3 and MAC_RE.fullmatch(p[1]) and FP_RE.fullmatch(p[2]):
             self._cycle[p[1]] = p[2]
             return True
+        if p[0] == 'HUB' and len(p) == 2 and p[1] == 'none':
+            self.hub = 'none'
+            return True
+        if p[0] == 'HUB' and len(p) == 5 and MAC_RE.fullmatch(p[1]) and all(x.lstrip('-').isdigit() for x in p[2:]):
+            self.hub, self.hub_ch, self.reports, self.answered = p[1], int(p[2]), int(p[3]), int(p[4])
+            return True
         if p[0] == 'SEAL' and len(p) == 3 and p[1].isdigit() and p[2].isdigit():
             self.bad, self.replays = int(p[1]), int(p[2])
             return True
-        return p[0] in ('PEERKEY', 'PEERKEYS', 'KEY')
+        return p[0] in ('PEERKEY', 'PEERKEYS', 'KEY', 'HUB')
 
-    def commands(self, hub, boards, now, every=10.0):
+    def commands(self, hub, boards, now, every=10.0, hub_mac=None):
         """Commands for the connected board. hub: is it the hub; boards: the
-        other boards' MACs it should hold keys for (only if it is the hub)."""
+        other boards' MACs it should hold keys for (only if it is the hub);
+        hub_mac: where a board that isn't the hub sends its reports."""
         if not self.me or self.key_fp is None or not self.secret:
             return []
         out = []
@@ -87,6 +96,10 @@ class Pairing:
         if self.key_fp != own:
             out.append(('key', 'KEY,' + board_key(self.secret, self.me).hex()))
         want = {m: board_key(self.secret, m) for m in sorted(boards)[:MAX_PEERS] if m != self.me} if hub else {}
+        if hub and self.hub not in (None, 'none'):
+            out.append(('hub', 'HUB,clear'))                 # the hub sends no reports
+        elif not hub and hub_mac and self.hub is not None and self.hub != hub_mac:
+            out.append(('hub', f'HUB,{hub_mac}'))
         if not hub and self.peer_fps:
             out.append(('peers', 'PEERKEY,clear'))
         else:
@@ -110,3 +123,7 @@ class Pairing:
                                            fingerprint(board_key(self.secret, m)))
                     if hub and self.secret else [],
                     bad=self.bad, replays=self.replays)
+
+    def key_ok(self):
+        """True once the board says it holds its own key."""
+        return bool(self.me and self.secret and self.key_fp == fingerprint(board_key(self.secret, self.me)))

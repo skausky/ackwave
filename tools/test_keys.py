@@ -63,6 +63,19 @@ def pairing():
     assert q.commands(False, [], 100) == [f'KEY,{board_key(s, SAT1).hex()}']
     q.feed(f'ME,{SAT2}')
     assert q.key_fp is None and q.commands(False, [], 200) == []
+    # where reports go: a satellite is told the hub; the hub sends none
+    r = Pairing(s)
+    r.feed(f'ME,{SAT1}')
+    r.feed('HUB,none')
+    r.feed(f'KEY,{fingerprint(board_key(s, SAT1))}')
+    assert r.key_ok() and r.commands(False, [], 0, hub_mac=HUB) == [f'HUB,{HUB}']
+    r.feed(f'HUB,{HUB},6,40,38')
+    assert r.commands(False, [], 100, hub_mac=HUB) == [] and (r.hub_ch, r.reports, r.answered) == (6, 40, 38)
+    h = Pairing(s)
+    h.feed(f'ME,{HUB}')
+    h.feed(f'HUB,{SAT1},6,0,0')
+    h.feed(f'KEY,{fingerprint(board_key(s, HUB))}')
+    assert h.commands(True, [], 0, hub_mac=HUB) == ['HUB,clear']
     # at most 8 boards' keys; junk lines never count
     many = [mac(0x24, 0, 0, 0, 0, i) for i in range(12)]
     p2 = Pairing(s)
@@ -109,6 +122,21 @@ def dashboard():
     d2.feed('KEY,none\n')
     assert d2.board_secret == secret and d2.cfg['hub'] == HUB
     assert [c for c in sent2 if 'KEY' in c] == [f'KEY,{board_key(secret, SAT2).hex()}', 'PEERKEY,clear'], sent2
+    # a satellite plugged in alone gets the hub's address and is remembered as
+    # paired, so the hub gets its key even when it can't hear its hellos
+    sent3 = []
+    d4 = Dashboard(State(60), send=sent3.append, settings=path)
+    d4.feed(f'ME,{SAT1}\n')
+    d4.feed('HUB,none\n')
+    d4.feed(f'KEY,{fingerprint(board_key(secret, SAT1))}\n')
+    assert f'HUB,{HUB}' in sent3 and SAT1 in d4.cfg['paired'], (sent3, d4.cfg['paired'])
+    with open(path) as f:
+        assert SAT1 in json.load(f)['paired']
+    sent4 = []
+    d5 = Dashboard(State(60), send=sent4.append, settings=path)
+    d5.feed(f'ME,{HUB}\n')
+    d5.feed('KEY,none\n')                      # nothing heard over the air: still paired
+    assert f'PEERKEY,{SAT1},{board_key(secret, SAT1).hex()}' in sent4, sent4
     # a file input (no board to talk to): no secret is made
     d3 = Dashboard(State(60), settings=os.path.join(tmp, 'other.json'))
     d3.feed(f'ME,{HUB}\n')
