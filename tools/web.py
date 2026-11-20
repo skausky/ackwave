@@ -582,10 +582,13 @@ class Dashboard:
         now = time.time()
         out = []
         for mac in sorted(set(self._hub_boards()) - set(self.sats)):
-            dv = self.s.devices.devs[mac]
+            dv = self.s.devices.devs.get(mac)              # paired boards may not be heard at all
+            paired = mac in self.cfg['paired']
             out.append(dict(mac=mac, name=self.board_label(mac), nick=self.cfg['board_names'].get(mac, ''),
-                            state='unpaired', level=0, weak=False, acks=0, router_rssi=0, links=0, up_s=0,
-                            heard_s=round(now - dv.last_heard, 1), rssi=dv.rssi, since=None))
+                            state='quiet' if paired else 'unpaired', level=0, weak=False, acks=0,
+                            router_rssi=0, links=0, up_s=0,
+                            heard_s=round(now - dv.last_heard, 1) if dv else None,
+                            rssi=dv.rssi if dv else 0, since=None))
         for mac, d in sorted(self.sats.items()):
             gone = now - d['at'] > SAT_GONE_S
             out.append(dict(mac=mac, name=self.board_label(mac), nick=self.cfg['board_names'].get(mac, ''),
@@ -1811,8 +1814,14 @@ def make_handler(dash, allowed_hosts):
                     now = time.monotonic()
                     msgs = [('fast', dash.fast(win, link))]
                     if now >= next_slow:
-                        msgs.append(('slow', dash.slow(win, link)))
                         next_slow = now + SLOW_S
+                        try:
+                            msgs.append(('slow', dash.slow(win, link)))
+                        except Exception as e:        # one broken part must not stop the page
+                            if not getattr(dash, '_slow_err', None):
+                                import traceback
+                                traceback.print_exc()
+                            dash._slow_err = repr(e)
                     if now >= next_debug:
                         msgs.append(('debug', dash.debug(win)))
                         next_debug = now + DEBUG_S

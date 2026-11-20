@@ -137,6 +137,8 @@ def dashboard():
     d5.feed(f'ME,{HUB}\n')
     d5.feed('KEY,none\n')                      # nothing heard over the air: still paired
     assert f'PEERKEY,{SAT1},{board_key(secret, SAT1).hex()}' in sent4, sent4
+    b = {x['mac']: x for x in d5.slow(30)['boards']}   # paired, never heard: listed, no crash
+    assert b[SAT1]['state'] == 'quiet' and b[SAT1]['heard_s'] is None, b
     # a file input (no board to talk to): no secret is made
     d3 = Dashboard(State(60), settings=os.path.join(tmp, 'other.json'))
     d3.feed(f'ME,{HUB}\n')

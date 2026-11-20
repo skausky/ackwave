@@ -490,6 +490,7 @@ body.simple .nav a[data-adv] { display: none; }
 .board-tile.calibrating { --c: var(--cal); }
 .board-tile.gone { --c: var(--scan); opacity: .6; }
 .board-tile.unpaired { --c: var(--brief); }
+.board-tile.quiet { --c: var(--scan); opacity: .7; }
 .board-tile .name { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .board-tile .name > span { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .board-tile .name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -290,11 +290,12 @@ function renderBoards() {
   if (!bs.length) return;
   const n = bs.filter((b) => b.state === 'motion').length;
   $('#boards-state').textContent = `${bs.length} heard${n ? ` · ${n} see${n > 1 ? '' : 's'} motion` : ''}`;
-  const WORD = { motion: 'Motion', still: 'Still', calibrating: 'Calibrating', gone: 'Not heard', unpaired: 'Needs its key' };
+  const WORD = { motion: 'Motion', still: 'Still', calibrating: 'Calibrating', gone: 'Not heard', unpaired: 'Needs its key', quiet: 'No reports' };
   const nowS = Date.now() / 1000;
   $('#boards').replaceChildren(...bs.map((b) => {
     const pct = Math.max(0, Math.min(100, b.level * 50));            // 1.0 = threshold = middle
-    const sub = b.state === 'unpaired' ? 'plug it into this PC once while the dashboard runs: it gets its key, then its reports show here'
+    const sub = b.state === 'quiet' ? 'paired, but no reports reach the hub: is it powered and in range? It finds the hub within ~10 s of starting'
+      : b.state === 'unpaired' ? 'plug it into this PC once while the dashboard runs: it gets its key, then its reports show here'
       : b.state === 'gone' ? `last heard ${fmtSpan(b.heard_s)} ago`
       : b.state === 'calibrating' ? 'measuring the quiet level'
       : `${b.state === 'motion' ? 'moving' : 'still'} for ${fmtSpan(nowS - b.since)}`;
@@ -309,7 +310,7 @@ function renderBoards() {
       el('div', { className: 'muted small', textContent: sub }),
       el('div', { className: 'bt-meter', title: 'How close its link is to the motion threshold (the mark)' },
         el('div', { className: 'bt-fill', style: `width:${pct}%` })),
-      b.state === 'unpaired' ? null : el('div', { className: 'muted small', textContent:
+      ['unpaired', 'quiet'].includes(b.state) ? null : el('div', { className: 'muted small', textContent:
         `router ${b.acks}/s · ${b.router_rssi} dBm${b.weak ? ' · weak link' : ''} · ${b.links} other link${b.links === 1 ? '' : 's'} · ${b.via === 'usb' ? 'on USB' : `heard at ${b.rssi} dBm, sealed`}` }),
       ren);
   }));

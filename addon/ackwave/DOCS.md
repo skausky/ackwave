@@ -13,3 +13,8 @@ Data, settings and the secret the boards' keys come from are in
 `/share/ackwave` (owner-only). Flash and pair boards from a PC with the
 ackwave repository; copy that PC's `sessions/dashboard.json` here once so the
 boards keep their keys.
+
+Firmware for the hub: the PC builds it and copies `flash_args` with the
+files it names into `/share/ackwave/firmware`, plus an empty `FLASH_ME`.
+The next start of the add-on flashes the hub (on the Pi's USB) once, then
+renames the marker. The hub never has to come back to the PC.
