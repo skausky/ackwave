@@ -51,7 +51,8 @@ def dashboard():
     r = d.timeline_range(24)
     keys = {s[2] for s in r['spans']}
     assert {'board', 'ap:0'} <= keys, keys
-    assert r['lanes'][0] == {'key': 'board', 'name': 'Board'} and r['per_link']
+    lanes = [l for l in r['lanes'] if l['key'] != 'house']    # the demo has a satellite: a house row too
+    assert lanes[0] == {'key': 'board', 'name': 'Board'} and r['per_link']
     assert [l['name'] for l in r['lanes'] if l['key'] == 'ap:0'] == ['Router 1']
     assert all(s[0] <= s[1] for s in r['spans'])
     with open(os.path.join(tmp, f"timeline-{datetime.now().strftime('%Y-%m-%d')}.jsonl")) as f:
@@ -81,7 +82,7 @@ def activity_periods():
     got = [(p[2], p[3]) for p in d.timeline.read(w - 1, w + 100)]
     assert got == [('activity', 'walking'), ('activity', 'sitting')], got   # no 'unknown' on disk
     r = d.timeline_range(1)
-    assert [l['key'] for l in r['lanes']][:2] == ['board', 'activity']
+    assert [l['key'] for l in r['lanes'] if l['key'] != 'house'][:2] == ['board', 'activity']
     assert {s[4] for s in r['spans'] if s[2] == 'activity'} >= {'Walking', 'Sitting', 'Still'}
     # "I moved the board or router": a new placement, kept in the settings
     ok, msg = d.command({'cmd': 'act_moved'})

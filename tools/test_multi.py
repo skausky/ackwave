@@ -6,7 +6,7 @@ import os
 import tempfile
 import time
 
-from boards import ClockMap, board_ts, split_tag
+from boards import ClockMap, House, board_ts, split_tag
 from compare import compare, report
 from fake_csi import OTHER_BOARDS, generate_boards
 from gui import State
@@ -64,7 +64,7 @@ def tagged_stream():
     keys = {p[2] for p in d.timeline.read(time.time() - 600, time.time() + 600)} | set(d._open)
     assert {'sat:' + m for m in macs} <= keys, keys
     lanes = [l['key'] for l in d.timeline_range(1)['lanes']]
-    assert lanes[0] == 'board' and all(k.startswith('sat:') for k in lanes[1:3]), lanes
+    assert lanes[:2] == ['house', 'board'] and all(k.startswith('sat:') for k in lanes[2:4]), lanes
 
 
 class Log:
@@ -117,9 +117,66 @@ def comparing():
     assert 'nothing to compare' in report([(0, 1, 'board', 'Board')])[0]
 
 
+def house():
+    """Combining the boards' verdicts: one board is always its own verdict;
+    'confirm' lets a blip through only with a second board; 'two' needs two."""
+    h = House()
+    h.update({'board': True}, 0.0)
+    for rule in ('any', 'confirm', 'two'):
+        assert h.verdict(rule, 0.1, 1) == (True, ['board']), "one board: exactly its verdict"
+    h = House()
+    h.update({'board': False, 'K': True}, 10.0)
+    assert h.verdict('any', 10.5, 2)[0]
+    assert not h.verdict('confirm', 10.5, 2)[0], "a lone blip waits"
+    assert h.verdict('confirm', 12.1, 2) == (True, ['K']), "lasting 2 s: counts alone"
+    assert not h.verdict('two', 12.1, 2)[0]
+    h.update({'board': True, 'K': True}, 12.5)
+    assert h.verdict('two', 12.6, 2)[0] and h.verdict('confirm', 12.6, 2)[1] == ['K', 'board']
+    # a short one confirmed by another board that just stopped (within 1.5 s)
+    h2 = House()
+    h2.update({'board': True, 'K': False}, 20.0)
+    h2.update({'board': False, 'K': False}, 21.0)
+    h2.update({'board': False, 'K': True}, 21.5)
+    assert h2.verdict('confirm', 21.6, 2)[0] and h2.verdict('two', 21.6, 2)[0]
+    h2.update({'board': False, 'K': True}, 24.0)
+    assert not h2.verdict('two', 24.0, 2)[0], "too long ago"
+    h2.update({'board': False}, 25.0)                # K went quiet: its motion ended
+    assert not h2.verdict('any', 25.0, 2)[0]
+    # in the dashboard: a satellite's report drives the light, the badge and the timeline
+    import tempfile
+    from web import Dashboard
+    tmp = tempfile.mkdtemp()
+    d = Dashboard(State(60), send=lambda c: None, settings=os.path.join(tmp, 'dashboard.json'),
+                  sessions_dir=tmp)
+    d.light.update = lambda on: setattr(d, '_light_on', on)
+    for line, _t in generate_boards(1, seed=4):
+        if not line.startswith('SAT,'):              # the demo's own satellite: not here
+            d.feed(line + '\n')
+    assert d.slow(30)['house']['boards'] == 1
+    sat = mac(0xc4, 0x9e, 0x7e, 1, 2, 3)
+    for i in range(6):                               # 3 s of motion from the satellite alone
+        d.feed(f'SAT,{sat},-40,{i},3,90,70,95,-60,1,{i}\n')
+        d.house.since[sat] -= 0.6                    # time passes
+        d.tick()
+    hs = d.slow(30)['house']
+    assert hs['boards'] == 2 and hs['motion'] and hs['by'] == [f'Board {sat[-5:]}'], hs
+    assert d._light_on is True, "a satellite's motion switches the light"
+    b = d.fast(30)['header']['badge']
+    assert b['word'] == 'MOTION' and sat[-5:] in b['head'], b
+    if not d._motion_now():                          # the instant replay: the hub's motion is old
+        d.house.ended.pop('board', None)
+    assert d.command({'cmd': 'house_rule', 'rule': 'two'})[0] and d.cfg['house_rule'] == 'two'
+    d.tick()
+    assert not d.slow(30)['house']['motion'], "two boards needed now"
+    assert not d.command({'cmd': 'house_rule', 'rule': 'nope'})[0]
+    with open(os.path.join(tmp, 'dashboard.json')) as f:
+        assert json.load(f)['house_rule'] == 'two'
+
+
 if __name__ == '__main__':
     clock()
     comparing()
+    house()
     tagged_stream()
     ports()
     print("MULTI TESTS PASSED")

@@ -37,7 +37,7 @@ from analyze import MAX_APS, MotionDetector, open_port, parse_line
 from breathing import Breathing
 from timeline import Timeline
 from keys import SECRET_RE, Pairing, new_secret, redact
-from boards import OtherBoard, split_tag
+from boards import HOUSE_RULES, HOUSE_TEXT, House, OtherBoard, split_tag
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
@@ -209,6 +209,8 @@ class Dashboard:
         state.devices.router_name = self._router_name   # nicknames on every page
         state.devices.board_name = lambda m: self.cfg['board_names'].get(m)
         self.sats = {}                   # other boards heard through ours: MAC -> latest report
+        self.house = House()             # every board's verdict combined (boards.py)
+        self.house_now = (False, [])     # (motion, the boards that count)
         # Several boards on USB (boards.py): the primary is self.s; the rest are watched
         self.others = {}                 # MAC -> OtherBoard
         self.log = None                  # the session log, when lines come from several ports
@@ -232,7 +234,8 @@ class Dashboard:
         self.lock = threading.Lock()
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
-        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, board_names={}, act_place=0, hub=None, paired=[])   # sound, sens: kept on the board; None = its own
+        self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, board_names={}, act_place=0, hub=None, paired=[],
+                        house_rule='confirm')   # sound, sens: kept on the board; None = its own
         # Device links that drive the alerts (light, buzzer, LED) besides the board:
         # src -> True once that link's slow window confirmed its current motion
         self.confirmed = {}
@@ -282,6 +285,8 @@ class Dashboard:
         hub = got.get('hub')
         if isinstance(hub, str) and MAC_RE.fullmatch(hub):
             self.cfg['hub'] = hub.lower()
+        if got.get('house_rule') in HOUSE_RULES:
+            self.cfg['house_rule'] = got['house_rule']
         pr = got.get('paired')
         if isinstance(pr, list) and len(pr) <= SAT_MAX:
             self.cfg['paired'] = sorted({m.lower() for m in pr if isinstance(m, str) and MAC_RE.fullmatch(m)})
@@ -799,10 +804,11 @@ class Dashboard:
         Only a live board drives them: demo or file input (no board to send to)
         never does, or a demo's fake motion would switch a real plug. The board's
         own verdict counts, plus the device links you ticked."""
+        motion, by = self._house()
         if not self.send:
             return
-        ext = bool(self._alerting())
-        self.light.update(self._motion_now() or ext)
+        ext = bool(self._alerting()) or any(b != 'board' for b in by)   # another board: LED, buzzer too
+        self.light.update(motion or ext)
         now = time.monotonic()
         if ext and (not self.ext_sent or now - self.ext_at >= EXT_EVERY_S):
             self.s.outbox.append('EXT,1')
@@ -810,6 +816,27 @@ class Dashboard:
         elif not ext and self.ext_sent:
             self.s.outbox.append('EXT,0')
             self.ext_sent = False
+
+    def _house(self):
+        """Every board's own verdict combined by the rule you chose (boards.House).
+        One board alone: its verdict, exactly as before."""
+        now = time.time()
+        states = {'board': self._motion_now()}
+        for mac, d in self.sats.items():
+            if now - d['at'] <= SAT_GONE_S and d['calibrated']:
+                states[mac] = bool(d['motion'])
+        self.house.update(states, now)
+        motion, by = self.house.verdict(self.cfg['house_rule'], now, len(states))
+        if len(states) > 1:
+            self._period('house', motion, now, 'House')
+        self.house_now = (motion, by)
+        return motion, by
+
+    def _house_slow(self):
+        motion, by = self.house_now
+        return dict(motion=motion, by=['Hub' if b == 'board' else self.board_label(b) for b in by],
+                    rule=self.cfg['house_rule'], rules={k: HOUSE_TEXT[k] for k in HOUSE_RULES},
+                    boards=1 + sum(1 for d in self.sats.values() if time.time() - d['at'] <= SAT_GONE_S))
 
     def _debug_line(self, line):
         t = self._now()
@@ -891,6 +918,12 @@ class Dashboard:
                     return False, 'choosing a network needs a board'
                 self.s.outbox.append('USE_DEFAULT')
                 msg = 'Back to the default network: the board restarts (about 15 s)'
+            elif what == 'house_rule':
+                if c.get('rule') not in HOUSE_RULES:
+                    return False, 'bad rule'
+                self.cfg['house_rule'] = c['rule']
+                self._save_settings()
+                msg = f"Motion when {HOUSE_TEXT[c['rule']]}"
             elif what == 'settings':
                 changed = {k: bool(v) for k, v in c.items() if k in SETTINGS}
                 if not changed:
@@ -1162,7 +1195,7 @@ class Dashboard:
         with self.lock:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
-                       routers=self._routers(), boards=self._boards(), tz=PC_TZ,
+                       routers=self._routers(), boards=self._boards(), house=self._house_slow(), tz=PC_TZ,
                        board_settings=self._board_settings(), primary=self.primary or self.s.me,
                        pairing=self.pair.status(self.pair.me == self.cfg['hub'], self._hub_boards()),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
@@ -1384,12 +1417,12 @@ class Dashboard:
                     names[k] = self.board_label(k[4:])
                 elif k != 'board' and k in self.s.devices.devs:
                     names[k] = self.s.devices.name(k) or names[k]
-            order = lambda k: (0 if k == 'board' else 1 if k.startswith('sat:') else 2 if k == 'activity'
-                               else 3 if k.startswith('ap:') else 4, k)
+            order = lambda k: (-1 if k == 'house' else 0 if k == 'board' else 1 if k.startswith('sat:')
+                               else 2 if k == 'activity' else 3 if k.startswith('ap:') else 4, k)
             lanes = [dict(key=k, name='Board' if k == 'board' else names[k])
                      for k in sorted(names, key=order)]
             if not any(l['key'] == 'board' for l in lanes):
-                lanes.insert(0, dict(key='board', name='Board'))
+                lanes.insert(1 if lanes and lanes[0]['key'] == 'house' else 0, dict(key='board', name='Board'))
             return dict(t0=r2(t0), t1=r2(now), hours=hours, lanes=lanes,
                         spans=[[r2(p[0]), r2(p[1]), p[2], len(p) > 4,
                                 label_info(p[3])['name'] if p[2] == 'activity' else p[3]] for p in spans],
@@ -1451,6 +1484,11 @@ class Dashboard:
             head, sub = self._meaning()          # the verdict stays the board's
             badge = dict(word='MOTION' if det.motion else 'STILL', head=head,
                          color=MOTION_C if det.motion else STILL_C, sub=sub)
+            hm, hby = self.house_now
+            others = [self.board_label(b) for b in hby if b != 'board']
+            if hm and others and not det.motion:  # another board sees what the hub doesn't
+                badge = dict(word='MOTION', head=f"Motion at {', '.join(others)}", color=MOTION_C,
+                             sub="seen by another board; the hub's own links are still")
         hw, hc, hd = s.link_health()
         tiles = {}
         r = (br or s.br).last

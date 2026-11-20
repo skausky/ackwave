@@ -318,6 +318,9 @@ function renderBoards() {
 
 function renderHome() {
   renderBoards();
+  const h = slow && slow.house, hh = $('#home-house');
+  hh.hidden = !h || h.boards < 2;
+  if (h && h.boards >= 2) hh.textContent = h.motion ? `House: motion · seen by ${h.by.join(', ')}` : `House: still · ${h.boards} boards watching`;
   // Where now: the links that see motion (with per-link analysis on)
   const mv = ((slow && slow.radio) || []).filter((r) => r.moving).map((r) => r.label);
   const wn = $('#home-where');
@@ -431,7 +434,7 @@ function drawWhere() {
   lanes.forEach((ln, i) => {
     const y = i * LH;
     ctx.fillStyle = C.grid; ctx.fillRect(G, y + 4, w - G, LH - 8);
-    ctx.fillStyle = ln.key === 'board' ? C.fg : C.muted;
+    ctx.fillStyle = ln.key === 'board' || ln.key === 'house' ? C.fg : C.muted;
     let label = ln.name;
     while (label.length > 3 && ctx.measureText(label).width > G - 10) label = label.slice(0, -2) + '…';
     ctx.fillText(label, 0, y + LH / 2);
@@ -441,7 +444,7 @@ function drawWhere() {
     if (i === undefined) continue;
     const xa = Math.max(G, X(a)), xb = Math.min(w, X(b));
     if (xb < G || xa > w) continue;
-    ctx.fillStyle = key === 'board' ? C.motion : key === 'activity' ? C.blue : C.brief;
+    ctx.fillStyle = key === 'board' || key === 'house' ? C.motion : key === 'activity' ? C.blue : C.brief;
     ctx.fillRect(xa, i * LH + 4, Math.max(2, xb - xa), LH - 8);   // at least 2 px: a short one still shows
   }
   ctx.font = '11px ui-sans-serif, system-ui, sans-serif'; ctx.fillStyle = C.bg || '#0d1116';
@@ -879,7 +882,7 @@ function renderSlow() {
   else if (page === 'map') window.AckMap.update(slow, fast && fast.header);
   else if (page === 'debug') renderRaw();
   else if (page === 'activity') renderActCal();
-  else if (page === 'settings') { renderNet(); renderSound(); renderSens(); renderThresholds(); renderLed(); }
+  else if (page === 'settings') { renderHouse(); renderNet(); renderSound(); renderSens(); renderThresholds(); renderLed(); }
   if (page !== 'links') syncLinkFocus();
 }
 
@@ -939,6 +942,21 @@ function setLed(change) {
     color: $('#led-color').value || l.color }, change));
 }
 
+function renderHouse() {
+  const h = slow && slow.house;
+  $('#house-card').hidden = !h || h.boards < 2;
+  if (!h) return;
+  const seg = $('#house-rule');
+  if (!seg.childElementCount)
+    for (const [k, text] of Object.entries(h.rules)) {
+      const b = el('button', { type: 'button', textContent: text });
+      b.dataset.r = k;
+      b.onclick = () => cmd({ cmd: 'house_rule', rule: k });
+      seg.append(b);
+    }
+  for (const b of seg.children) b.classList.toggle('on', b.dataset.r === h.rule);
+  $('#house-state').textContent = `${h.boards} boards`;
+}
 function renderSens() {
   const board = slow && slow.sens, want = slow && slow.settings && slow.settings.sens;
   const cur = want || board;

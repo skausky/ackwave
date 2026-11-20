@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timedelta
 
 FILE_RE = re.compile(r'timeline-(\d{4}-\d{2}-\d{2})\.jsonl$')
-KEY_RE = re.compile(r'board|activity|ap:[0-7]|(sat:)?[0-9a-f]{2}(:[0-9a-f]{2}){5}')   # activity: name = what it was
+KEY_RE = re.compile(r'board|house|activity|ap:[0-7]|(sat:)?[0-9a-f]{2}(:[0-9a-f]{2}){5}')   # activity: name = what it was
 MAX_SPAN_S = 24 * 3600            # a period longer than this is cut (a stuck verdict)
 MAX_RANGE_S = 7 * 24 * 3600       # the longest range read at once
 NAME_MAX = 40

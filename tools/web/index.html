@@ -46,6 +46,7 @@
         <div class="hero-top"><span class="state-dot" id="home-dot"></span><span class="hero-word" id="home-word">WAITING</span></div>
         <div class="hero-head" id="home-head">waiting for data…</div>
         <div class="hero-sub where-now" id="home-where" hidden></div>
+        <div class="hero-sub" id="home-house" hidden></div>
         <div class="hero-sub" id="home-since"></div>
         <div class="hero-sub muted home-act" id="home-act" hidden></div>
         <div class="hero-alert" id="home-alert" hidden></div>
@@ -381,6 +382,11 @@
   </section>
 
   <section class="page" data-page="settings" hidden>
+    <section class="card" id="house-card" hidden>
+      <div class="card-head"><h2>Several boards</h2><span id="house-state" class="muted small"></span></div>
+      <div class="seg" id="house-rule"></div>
+      <p class="muted small">When the house counts as "motion" for the light, the alerts and the board's LED and buzzer. A brief blip from one board is often noise; asking a second board to confirm it cuts most of those without losing longer motion.</p>
+    </section>
     <section class="card">
       <div class="card-head"><h2>Network</h2>
         <div class="dlg-tools"><button type="button" id="net-scan">Scan</button><button type="button" id="net-default" class="ghost">Back to default</button></div></div>

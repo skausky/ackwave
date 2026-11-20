@@ -125,3 +125,54 @@ class OtherBoard:
                     up_s=int((st.get('ts') or 0) / 1e6), rssi=0, seq=0,
                     at=self.last or 0, since=self.since or self.last or 0, via='usb',
                     hub_ch=self.pair.hub_ch, reports=self.pair.reports, answered=self.pair.answered)
+
+
+# ---------- The house verdict (docs/redesign/multi-board.md, step C) ----------
+HOUSE_RULES = ('any', 'confirm', 'two')
+HOUSE_TEXT = {'any': 'any board', 'confirm': 'any board; a blip needs a second board',
+              'two': 'two boards must agree'}
+
+
+class House:
+    """Combines the boards' own verdicts. Sources are 'board' (the hub) and
+    other boards' MACs; each says moving or not, every update.
+
+      any      motion when any board sees it
+      confirm  (default) motion lasting BRIEF_S counts from one board alone;
+               a shorter one only if another board also saw motion within TOL_S
+      two      at least two boards seeing motion within TOL_S of each other
+
+    With a single board every rule gives exactly its own verdict."""
+    BRIEF_S = 2.0
+    TOL_S = 1.5
+
+    def __init__(self):
+        self.since = {}                  # source -> when its current motion started
+        self.ended = {}                  # source -> when its last motion ended
+
+    def update(self, states, now):
+        for src, on in states.items():
+            if on and src not in self.since:
+                self.since[src] = now
+            elif not on and src in self.since:
+                self.ended[src] = now
+                del self.since[src]
+        for src in [s for s in self.since if s not in states]:   # gone: its motion ended
+            self.ended[src] = now
+            del self.since[src]
+
+    def _near(self, src, now):
+        """Another source moving now, or whose motion ended within TOL_S."""
+        return any(o != src for o in self.since) or any(
+            o != src and now - t <= self.TOL_S for o, t in self.ended.items())
+
+    def verdict(self, rule, now, n_sources):
+        """(motion, the sources that count)."""
+        moving = sorted(self.since)
+        if n_sources <= 1 or rule == 'any':
+            return bool(moving), moving
+        if rule == 'two':
+            ok = [s for s in moving if self._near(s, now)]
+            return bool(ok), ok
+        ok = [s for s in moving if now - self.since[s] >= self.BRIEF_S or self._near(s, now)]
+        return bool(ok), ok
