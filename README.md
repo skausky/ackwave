@@ -16,8 +16,10 @@ Most ESP32 CSI motion sensors, such as [ESPectre](https://github.com/francescopa
 - **Decides on the board.** The detector runs on the ESP32 itself and works from a phone charger: LED colours and optional sounds. It ignores the router's periodic background scans, which otherwise look like movement, and stays quiet when its link is too weak to trust.
 - **Switch routers without reflashing.** The board scans for networks and you pick one in the GUI. The choice is saved on the board.
 - **A lab GUI.** Live scores against the thresholds, a Doppler view, a breathing-rate estimate, link health, and logs of every session for later analysis. The C detector and a Python twin are tested to give the same answers.
+- **Several boards, still on no network.** Boards find and poke each other (links across rooms) and send their verdicts, sealed with a key per board, to one hub board on USB, whatever channel each one watches ([below](#several-boards-and-home-assistant)).
+- **A Home Assistant add-on.** The dashboard in HA's sidebar, behind HA's login, with the hub on the Pi's USB.
 
-Trade-offs: no Home Assistant integration yet (ESPectre has one), and on 2.4 GHz it can only use devices that are on 2.4 GHz.
+Trade-offs: no Home Assistant sensors (entities) yet, only the dashboard in its sidebar, and on 2.4 GHz it can only use devices that are on 2.4 GHz.
 
 ## Quick start
 
@@ -81,6 +83,27 @@ Commands from the page need a header that other websites can't send, and the ser
 **Light on motion.** Settings → *Light on motion* switches a light when the board sees motion: it calls one URL when motion starts and another once the room has been still for a time you pick (2 min by default). Only changes are sent, never a call per packet, and it only switches off a light it switched on. Any URL that switches something works (Home Assistant, IFTTT webhooks). For a smart plug only Alexa can switch, such as an Amazon Smart Plug, use [Voice Monkey](https://voicemonkey.io): enable its Alexa skill, create two Routine Triggers (`ackwave motion`, `ackwave still`), make two Alexa Routines that turn the plug on / off when each one fires, and paste their trigger URLs (`https://api-v3.voicemonkey.io/trigger?token=…&device=…`) into the card. The URLs hold your token, so they are kept only in `sessions/dashboard.json` (readable by you alone) and never shown on the page again. It works only while `./csi web` is running.
 
 **First-time setup** (already done on this PC): `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`.
+
+## Several boards and Home Assistant
+
+Any number of ESP32-S3 boards (8 per hub) can work together without joining any network. One is the **hub**: it sits on USB at the PC (or the Pi running Home Assistant) and runs the dashboard. The others, **satellites**, only need power and can be anywhere in range.
+
+- **Boards find each other.** Each board broadcasts a short hello twice a second on its own channel (who it is, its channel and router: nothing about motion). A board can poke another board like a device: an unjoined ESP32 answers pokes too (78-92 % answered between two boards), so every pair of boards is one more motion link across the rooms between them.
+- **Satellites report to the hub, sealed.** Twice a second, at a fixed rate whatever happens, each satellite sends the hub its own verdict, scores, each link's scores and, every 10 s, who it hears and how strongly. The report is sealed with AES-CCM under the satellite's own key, so nobody nearby can read or forge it, and a recorded one played back is refused. The hub's radio acknowledges each report; a satellite that stops getting acknowledgements searches the channels until it finds the hub again, so the hub can watch a different network from the satellites.
+- **Pairing: plug each board into the PC once** while `./csi web` runs. The dashboard derives every board's key from one secret in `sessions/dashboard.json` (readable by you alone, never in git), gives each board its own key and the hub its address, and gives the hub the keys of the boards it collects. The first board ever connected is the hub. A factory-fresh board's first flash needs BOOT held while you press RST; after that `./csi flash /dev/ttyACM1` resets it by itself.
+- **The dashboard:** every satellite gets a tile on Home (name it after its room) and its own row in Where and when; the **Map** shows every board, router and device and each link's sensitivity (an estimate: strongest in the first Fresnel zone, fading outward, strong next to either end), lit while that link sees motion. **Settings → Several boards** chooses when the house counts as motion for the light and alerts: any board, any board with a second one confirming brief blips (default), or two boards agreeing. With one board everything is as before.
+- **Several boards on USB:** `./csi web` uses every board plugged in (or name them: `./csi web /dev/ttyACM0 /dev/ttyACM1`); the hub, by its saved address, is the dashboard as before, the others are watched. `python tools/compare.py` then counts, per pair of boards, the motion periods both saw, those only one saw, and blips the other confirmed: whether a second board helps.
+
+**Home Assistant add-on** (Home Assistant OS on a Pi; the hub moves to its USB for good):
+
+```bash
+addon/build.sh                                     # assembles build/addon/ackwave
+scp -r build/addon/ackwave <you>@<ha-host>:/addons/  # (sudo on the host if needed)
+# HA: Settings → Add-ons → Add-on store → ⋮ Check for updates → Local: ackwave → Install, Start
+scp sessions/dashboard.json <you>@<ha-host>:/share/ackwave/   # keep the boards' pairing (chmod 600)
+```
+
+It shows up as **ackwave** in HA's sidebar and answers only HA's own proxy. Its data stays in `/share/ackwave` (events and timeline; every raw line only with the `keep_raw` option). New firmware for the hub never needs it back at the PC: `addon/firmware.sh <you>@<ha-host>` copies a build and the add-on flashes the hub as it restarts.
 
 ## How it gets a steady CSI stream: "Polite Wi-Fi"
 
@@ -296,6 +319,15 @@ LINK,<ts>,<weak|ok>,<acks/s>,<rssi>   router link quality changed (weak = no mot
 LED,<off|gpioN|error,...>
 LEDSET,<status|motion|off>,<1-255>,<strength|steady|pulse|blink>,<rrggbb>   LED settings: at boot, every 5 s and after each LEDSET command
 BUTTON,<gpioN|error,gpioN|recalibrate|recalibrate,pc>
+PEER,<mac>,<rssi>,<hellos>,<age_ms>,<ch>,<same router 1|0>   other boards heard, every 5 s
+KEY,<fingerprint|none>   whether the board holds its key (never the key), every 5 s
+PEERKEY,<mac>,<fingerprint>   the hub: a board whose reports it can open, every 5 s
+HUB,<mac>,<channel found>,<reports sent>,<answered>   or HUB,none: where its reports go, every 5 s
+SAT,<mac>,<rssi>,<seq>,<flags>,<short×50/thr>,<long×50/thr>,<router acks/s>,<router rssi>,<links>,<up_s>,<router>,<ch>
+                    the hub: another board's verdict, from its sealed report (flags: 1 motion, 2 calibrated, 4 weak link)
+SATL,<mac>,<target>:<flags>:<short×20>:<long×20>,...   the hub: that board's links (× its quiet level)
+SURV,<mac>,<who>:<0 router|1 board|2 device>:<rssi>,...   the hub: who that board hears, every 10 s
+SEAL,<bad>,<replayed>   the hub: reports that didn't open or weren't newer (only once any)
 PROBE,...                                        only with CSI_PROBE=1
 ```
 
@@ -330,13 +362,19 @@ LEDSET,<mode>,<bright>,<pattern>,<rrggbb>   change them (saved on the board): mo
                 (everything), motion (only motion) or off; brightness 1-255; how motion
                 looks: strength (brighter = stronger), steady, pulse or blink; its colour
 LEDSET,default  back to the build's (status, LED_BRIGHT, strength, red)
+KEY,<32 hex>    this board's own key (saved; the dashboard sends it); KEY,clear forgets it; KEY reports it
+PEERKEY,<mac>,<32 hex>   the hub: another board's key (8 at most); PEERKEY,<mac>,clear; PEERKEY,clear
+HUB,<mac>       send reports to this hub (saved); HUB,clear sends none; HUB reports it
 ```
+
+Commands and keys travel only over USB, never over the air.
 
 ## Project layout
 
 ```
 ├── main/
-│   ├── csi_core.h          pure logic: parsing, ACK classifier, motion detector
+│   ├── csi_core.h          pure logic: parsing, ACK classifier, motion detector, hellos and reports
+│   ├── seal.h              AES-CCM (RFC 3610) for the boards' sealed reports
 │   └── main.c              ESP-IDF firmware
 ├── test/
 │   ├── test_core.c         host-side C tests + fuzzer
@@ -348,17 +386,24 @@ LEDSET,default  back to the build's (status, LED_BRIGHT, strength, red)
 │   ├── doppler.py          Doppler spectrogram of a link (experimental)
 │   ├── breathing.py        breathing-rate estimate of a link (experimental)
 │   ├── devices.py          device names (OUI), stationary check, which to poke
+│   ├── boards.py           several boards: other boards' state and clocks, the house verdict, their links
+│   ├── keys.py             each board's key, handed out over USB
+│   ├── compare.py          what a second board adds: motion periods per pair of boards
+│   ├── timeline.py         where and when motion happened (sessions/timeline-*.jsonl)
+│   ├── activity.py         activity recognition by example
 │   ├── analyze.py          text analyzer + Python detector
 │   ├── record.py           session recorder: readable motion log + summary
 │   ├── probe_report.py     hardware bring-up report
 │   ├── fake_csi.py         synthetic data generator
 │   └── test_*.py           Python tests
-└── docs/dashboard.png
+├── addon/                  the Home Assistant add-on (build.sh, firmware.sh)
+└── docs/                   dashboard.png; redesign/ holds the plans (multi-board.md)
 ```
 
 ## Limitations
 
-- Detects motion *presence* only, with no localisation or activity classification. Device links (experimental) are the first step toward telling "near the board" from "near the router".
+- Detects motion *presence*; where it is comes only from which link or board sees it (the Map), not a position yet. Activity recognition (experimental) uses the hub's router link.
+- Several boards: the satellites send their verdict and per-link scores, not their raw signal, so graphs, breathing and activities need a board on USB.
 - The quiet level is measured automatically, but the threshold multipliers come from one room and position. If you get false alarms or miss movement, adjust `MD_ON_SHORT`/`MD_ON_LONG`.
 - Right after a (re)calibration during constant movement, sensitivity is reduced for up to about 30 s. Moved somewhere noisier without a change in signal strength, the board may report motion for up to about 1.5 minutes while the quiet level catches up (BOOT skips that).
 - Anything that moves continuously for minutes without pauses (a fan, curtains) slowly becomes part of the background. You are still detected on top of it.
