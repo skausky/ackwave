@@ -226,16 +226,58 @@ def generate(seed=0, scenario=DEFAULT):
                    f"{int((ms or 0) * 1000)},{int((ml or 0) * 1000)}"), 'state', None, t
 
 
+# Other boards for --boards: each its own MAC, boot time (clock offset),
+# crystal error (drift) and scene. Against DEFAULT (motion 15-21 s and 45-49 s):
+# board 2 sees the first one late and the second one, board 3 only its own.
+OTHER_BOARDS = [
+    (_mac(0xc4, 0x9e, 0x7e, 0x10, 0x20, 0x31), 7.3, 15e-6,
+     [('still', 18), ('motion', 6), ('still', 20), ('motion', 4), ('still', 11)]),
+    (_mac(0x68, 0x9d, 0xd2, 0x10, 0x20, 0x32), 31.9, -12e-6,
+     [('still', 33), ('motion', 4), ('still', 22)]),
+]
+TS_KINDS = ('CSI,', 'STATE,', 'CALIB,', 'STATS,', 'CHANNEL,')
+OWN_ONLY = ('DEV,', 'PEER,', 'SAT,', 'POKING,')        # the demo's devices: the first board's
+
+
+def generate_boards(n, seed=0):
+    """n boards in one stream, as the hub will send them: the first board's
+    lines as they are, the others' tagged '@<mac>,' with their own clocks.
+    Yields (line, t) in time order."""
+    import heapq
+
+    def other(k):
+        mac, boot, drift, scene = OTHER_BOARDS[k]
+        for line, _kind, _label, t in generate(seed + 100 * (k + 1), scene):
+            if line.startswith(OWN_ONLY):
+                continue
+            if line.startswith('ME,'):
+                line = 'ME,' + mac
+            elif line.startswith(TS_KINDS):
+                p = line.split(',', 2)
+                if len(p) > 1 and p[1].isdigit():        # junk lines stay junk
+                    p[1] = str(int((int(p[1]) / 1e6 + boot) * (1 + drift) * 1e6))
+                    line = ','.join(p)
+            yield (t if t is not None else -1.0), f'@{mac},{line}'
+
+    first = (((t if t is not None else -1.0), line) for line, _k, _l, t in generate(seed))
+    streams = [first] + [other(k) for k in range(min(n, len(OTHER_BOARDS) + 1) - 1)]
+    for t, line in heapq.merge(*streams, key=lambda x: x[0]):
+        yield line, (t if t >= 0 else None)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--realtime', action='store_true', help='pace output in real time')
     ap.add_argument('--loop', action='store_true', help='repeat forever (with --realtime)')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--boards', type=int, default=1, help=f'boards in the stream (1-{len(OTHER_BOARDS) + 1}); '
+                    "the others' lines are tagged @<mac>,")
     a = ap.parse_args()
     seed = a.seed
     while True:
         start = time.monotonic()
-        for line, _kind, _label, t in generate(seed):
+        rows = ((line, t) for line, _k, _l, t in generate(seed)) if a.boards <= 1 else generate_boards(a.boards, seed)
+        for line, t in rows:
             if a.realtime and t is not None:
                 delay = start + t - time.monotonic()
                 if delay > 0:

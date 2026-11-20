@@ -37,6 +37,7 @@ from analyze import MAX_APS, MotionDetector, open_port, parse_line
 from breathing import Breathing
 from timeline import Timeline
 from keys import SECRET_RE, Pairing, new_secret, redact
+from boards import OtherBoard, split_tag
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
@@ -208,6 +209,13 @@ class Dashboard:
         state.devices.router_name = self._router_name   # nicknames on every page
         state.devices.board_name = lambda m: self.cfg['board_names'].get(m)
         self.sats = {}                   # other boards heard through ours: MAC -> latest report
+        # Several boards on USB (boards.py): the primary is self.s; the rest are watched
+        self.others = {}                 # MAC -> OtherBoard
+        self.log = None                  # the session log, when lines come from several ports
+        self.src_board = {}              # port index -> the MAC its ME line said
+        self.src_send = {}               # port index -> send() to that board
+        self.primary = None              # the primary board's MAC, once chosen
+        self.n_src = 1
         self.sessions = Sessions(sessions_dir) if sessions_dir else None
         # Where and when motion happened, on disk (timeline.py): the periods
         # still open are kept here until they end
@@ -386,6 +394,8 @@ class Dashboard:
             return
         if old and old['seq'] == d['seq'] and now - old['at'] < SAT_GONE_S:
             return                                   # the same hello, heard twice
+        if old and old.get('via') == 'usb' and now - old['at'] < SAT_GONE_S:
+            return                                   # on USB too: its own lines say more
         d['at'] = now
         d['since'] = old['since'] if old and old['motion'] == d['motion'] and now - old['at'] < SAT_GONE_S else now
         self.sats[d['mac']] = d
@@ -409,6 +419,80 @@ class Dashboard:
         if changed:
             self._save_settings()
         self.s.outbox += self.pair.commands(self.pair.me == self.cfg['hub'], self._hub_boards(), time.time())
+
+    # ---------- several ports (step A) ----------
+    def set_sources(self, sends, log=None):
+        """Lines will come from several ports (feed_src); sends[i] writes to port i."""
+        self.n_src = len(sends)
+        self.src_send = dict(enumerate(sends))
+        self.log = log
+        self.send = None                             # until the primary is known
+
+    def _choose_primary(self, now):
+        """The hub's saved MAC if it is plugged in, else the first board that
+        said who it is. Waits (up to 8 s) until every port has said."""
+        known = {i: m for i, m in self.src_board.items()}
+        if not known:
+            return
+        if self.cfg['hub'] in known.values():
+            pick = self.cfg['hub']
+        elif len(known) == self.n_src or now - self._started_src > 8:
+            pick = known[min(known)]
+        else:
+            return
+        self.primary = pick
+        port = next(i for i, m in known.items() if m == pick)
+        self.send = self.src_send.get(port)
+        self.s.live = self.send is not None
+
+    def feed_src(self, src, line, now=None):
+        """One line from port `src`. Tagged lines ('@<mac>,') name their board."""
+        now = time.time() if now is None else now
+        mac, body = split_tag(line)
+        if mac is None:
+            if body.startswith('ME,'):
+                m = body.strip()[3:].lower()
+                if len(m) == 17:
+                    self.src_board[src] = m
+            mac = self.src_board.get(src)
+        if self.primary is None:
+            if not hasattr(self, '_started_src'):
+                self._started_src = now
+            with self.lock:
+                self._choose_primary(now)
+            if self.primary is None:
+                return                               # the first seconds: who is who
+        if mac is None or mac == self.primary:
+            if self.log and mac == self.primary:
+                self.log.feed(body)
+            self.feed(body)
+            return
+        if self.log:
+            self.log.feed_raw(f'@{mac},{body}')
+        self.feed_other(mac, body, self.src_send.get(src) if self.src_board.get(src) == mac else None, now)
+
+    def feed_other(self, mac, line, send=None, now=None):
+        """A line of a board that isn't the primary one."""
+        now = time.time() if now is None else now
+        with self.lock:
+            ob = self.others.get(mac)
+            if ob is None:
+                if len(self.others) >= SAT_MAX:
+                    return
+                ob = self.others[mac] = OtherBoard(mac, State(WINDOWS[-1]), send, self.board_secret,
+                                                   lambda k, on, w: self._period(k, on, w, self.board_label(k[4:])))
+            if send is not None:
+                ob.send = send
+            ob.feed(line, now)
+            if ob.send and line.startswith('KEY,') and self.board_secret:
+                for c in ob.key_commands(self._hub_boards(), now):
+                    try:
+                        ob.send(c)
+                        self.sent_cmds.append((now, f'{mac[-5:]}: {redact(c)}'))
+                    except Exception as e:
+                        print(f"command not sent ({redact(c)[:40]!r}): {e}", file=sys.stderr)
+            if line.startswith(('STATE,', 'STATS,', 'CALIB,')) or mac not in self.sats:
+                self.sats[mac] = ob.report()
 
     def _sats_gone(self):
         """A board that went quiet: its open motion period ends when it was last heard."""
@@ -435,7 +519,7 @@ class Dashboard:
                             level=round(max(d['k_short'], d['k_long']), 2), weak=d['weak'],
                             acks=d['acks'], router_rssi=d['router_rssi'], links=d['links'],
                             up_s=d['up_s'], heard_s=round(now - d['at'], 1), rssi=d['rssi'],
-                            since=r2(d['since'])))
+                            since=r2(d['since']), via=d.get('via', 'air')))
         return out
 
     def _link_key(self, src):
@@ -1748,14 +1832,51 @@ def pump(dash, q):
                 s.lost = line[5:].strip() or 'connection lost'
             continue
         try:
+            if line.startswith('@'):             # another board, in a tagged stream
+                mac, body = split_tag(line)
+                if mac:
+                    dash.feed_other(mac, body)
+                    continue
             dash.feed(line)
         except Exception as e:                   # one odd line must not stop the dashboard
             print(f"skipped a line ({e})", file=sys.stderr)
 
 
+def reader_src(i, lines, q):
+    """One port of several: (port index, line) into the queue."""
+    try:
+        for line in lines:
+            if line:
+                q.put((i, line))
+    except Exception as e:                       # unplugged etc.
+        q.put((i, f"#ERR {e}"))
+    q.put((i, None))
+
+
+def pump_multi(dash, q, n):
+    """Lines from several ports until they all end."""
+    open_ = n
+    while open_:
+        i, line = q.get()
+        if line is None:
+            open_ -= 1
+            continue
+        if line.startswith('#ERR'):
+            print(f"port {i + 1}: {line[1:]}", file=sys.stderr)
+            if dash.src_board.get(i) == dash.primary:
+                with dash.lock:
+                    dash.s.lost = line[5:].strip() or 'connection lost'
+            continue
+        try:
+            dash.feed_src(i, line)
+        except Exception as e:
+            print(f"skipped a line ({e})", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('source', help="serial port (/dev/ttyACM0, COM5) or '-' for stdin")
+    ap.add_argument('source', nargs='+', help="serial port(s) (/dev/ttyACM0, COM5), or '-' for stdin; "
+                    "several ports: one board each, the hub (saved) is the primary")
     ap.add_argument('--baud', type=int, default=921600)
     ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--host', default='127.0.0.1',
@@ -1766,8 +1887,11 @@ def main():
     a = ap.parse_args()
 
     state = State(WINDOWS[-1])
+    multi = len(a.source) > 1
+    if multi and '-' in a.source:
+        ap.error("'-' (stdin) can't be mixed with ports: tag its lines '@<mac>,' instead")
     log = awake = None
-    if a.source != '-' and not a.no_log:
+    if a.source[0] != '-' and not a.no_log:
         from record import SessionLog, keep_awake
         log = SessionLog(a.out)
         awake = keep_awake('sleep')
@@ -1775,12 +1899,19 @@ def main():
     prefs = os.path.join(a.out, 'devices.json')
     mode, picks = Devices.load_prefs(prefs)
     state.devices = Devices(oui=Oui(), mode=mode, manual=picks)
-    lines, send = open_port(a.source, a.baud)
+    opened = [open_port(src, a.baud) for src in a.source]
+    lines, send = opened[0]
     state.live = send is not None
     dash = Dashboard(state, send, os.path.basename(log.ev_path) if log else None, prefs,
                      os.path.join(a.out, 'dashboard.json'), sessions_dir=a.out)
     q = queue.Queue()
-    threading.Thread(target=reader, args=(lines, q, log), daemon=True).start()
+    if multi:
+        dash.set_sources([sd for _l, sd in opened], log)
+        for i, (ls, _sd) in enumerate(opened):
+            threading.Thread(target=reader_src, args=(i, ls, q), daemon=True).start()
+        print(f"{len(opened)} boards: the hub (saved) is the primary; the others are watched")
+    else:
+        threading.Thread(target=reader, args=(lines, q, log), daemon=True).start()
     srv = serve(dash, a.host, a.port)
 
     def ticker():
@@ -1802,7 +1933,10 @@ def main():
         import webbrowser
         webbrowser.open(url)
     try:
-        pump(dash, q)
+        if multi:
+            pump_multi(dash, q, len(opened))
+        else:
+            pump(dash, q)
         print("Input ended; the dashboard stays up until Ctrl+C.")
         while True:
             time.sleep(3600)

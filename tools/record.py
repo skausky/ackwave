@@ -345,6 +345,12 @@ class SessionLog:
                 self.raw.write(line if line.endswith('\n') else line + '\n')
             self.rec.feed(line)
 
+    def feed_raw(self, line):
+        """Another board's line ('@<mac>,...'): kept in the raw log only."""
+        with self.lock:
+            if not self.closed and self.raw:
+                self.raw.write(line if line.endswith('\n') else line + '\n')
+
     def idle(self):
         """Call while no line arrives: after SILENT_S, the log says the data stopped."""
         with self.lock:

@@ -310,7 +310,7 @@ function renderBoards() {
       el('div', { className: 'bt-meter', title: 'How close its link is to the motion threshold (the mark)' },
         el('div', { className: 'bt-fill', style: `width:${pct}%` })),
       b.state === 'unpaired' ? null : el('div', { className: 'muted small', textContent:
-        `router ${b.acks}/s · ${b.router_rssi} dBm${b.weak ? ' · weak link' : ''} · ${b.links} other link${b.links === 1 ? '' : 's'} · heard at ${b.rssi} dBm` }),
+        `router ${b.acks}/s · ${b.router_rssi} dBm${b.weak ? ' · weak link' : ''} · ${b.links} other link${b.links === 1 ? '' : 's'} · ${b.via === 'usb' ? 'on USB' : `heard at ${b.rssi} dBm, sealed`}` }),
       ren);
   }));
 }

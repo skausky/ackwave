@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One entry point for everything. Run with no arguments for a menu.
 #   ./csi gui        live view of the board (also logs, like record)
-#   ./csi web        the live view as a web dashboard (localhost:8765; also logs; or: ./csi web /dev/ttyACM1)
+#   ./csi web        the live view as a web dashboard (localhost:8765; also logs); every board plugged in,
+#                    or name them: ./csi web /dev/ttyACM0 /dev/ttyACM1
 #   ./csi record     log motion with clock times until Ctrl+C (e.g. overnight)
 #   ./csi history    look back at a logged session (newest; or: ./csi history --list)
 #   ./csi demo       GUI on fake data (no board needed)
@@ -58,12 +59,22 @@ cmd_gui() {
     exec "$PY" tools/gui.py "$port"
 }
 
-cmd_web() {
+cmd_web() {                        # several boards plugged in: all of them (the hub is the primary)
     need_python
-    local want=""
-    case "${1:-}" in /dev/*) want=$1; shift ;; esac
-    local port; port=$(CMD=web find_port "$want") || exit 1
-    exec "$PY" tools/web.py "$port" --open "$@"
+    local ports=() p
+    while [ $# -gt 0 ]; do case "$1" in /dev/*) ports+=("$1"); shift ;; *) break ;; esac; done
+    if [ ${#ports[@]} -eq 0 ]; then
+        for p in /dev/ttyACM* /dev/ttyUSB*; do [ -e "$p" ] && ports+=("$p"); done
+        [ ${#ports[@]} -le 1 ] && { p=$(CMD=web find_port) || exit 1; ports=("$p"); }
+    fi
+    for p in "${ports[@]}"; do
+        [ -e "$p" ] || { echo "$p doesn't exist." >&2; exit 1; }
+        if command -v fuser >/dev/null && fuser "$p" >/dev/null 2>&1; then
+            echo "$p is in use by another program (another GUI or a recording?)." >&2; exit 1
+        fi
+    done
+    [ ${#ports[@]} -gt 1 ] && echo "Boards on ${ports[*]}"
+    exec "$PY" tools/web.py "${ports[@]}" --open "$@"
 }
 
 cmd_record() {
