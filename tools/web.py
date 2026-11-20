@@ -76,7 +76,9 @@ ROUTER_NAME_MAX, ROUTER_NAMES_MAX = 24, 32    # nicknames you give routers (by B
 BOARD_NAMES_MAX = 16                           # ...and other ackwave boards (by MAC), same length
 SAT_GONE_S = 10                                # another board not heard this long: gone
 SAT_MAX = 16
-OTHERS_HOLD_S = 15.0                           # another board's motion keeps the alert on this long after
+OTHERS_HOLD_S = 15.0
+EVENTS_MAX = 300                               # events kept for the live stream
+EVENT_TYPES = ('motion', 'automation', 'health', 'calib', 'device', 'network')                           # another board's motion keeps the alert on this long after
 ACT_HOLD_S = 3.0                              # an activity counts once it lasts this long (no flicker)
 ACT_NOT_KEPT = ('uncalibrated', 'no-data', 'unknown')   # shown, but not filed in the timeline
 
@@ -205,12 +207,16 @@ class Dashboard:
     """Owns the State; turns it into JSON for the page and runs its commands."""
 
     def __init__(self, state, send=None, log_name=None, prefs=None, settings=None, sessions_dir=None,
-                 light_call=http_call, light_run=None):
+                 light_call=http_call, light_run=None, demo=False):
         self.s, self.send, self.log_name, self.prefs = state, send, log_name, prefs
+        self.demo = demo                 # demo mode: a simulated light, nothing sent anywhere
         state.devices.router_name = self._router_name   # nicknames on every page
         state.devices.board_name = lambda m: self.cfg['board_names'].get(m)
         self.sats = {}                   # other boards heard through ours: MAC -> latest report
         self.house = House()             # every board's verdict combined (boards.py)
+        self.events = deque(maxlen=EVENTS_MAX)   # the live stream on Home: what happened, newest last
+        self.event_id = 0
+        self.started_wall = time.time()
         self.sat_links = {}              # other board -> {its link's far end: SatLink}
         self.surveys = {}                # other board -> {who it hears: {kind, rssi, at}}
         self.house_now = (False, [])     # (motion, the boards that count)
@@ -298,8 +304,12 @@ class Dashboard:
         if isinstance(pr, list) and len(pr) <= SAT_MAX:
             self.cfg['paired'] = sorted({m.lower() for m in pr if isinstance(m, str) and MAC_RE.fullmatch(m)})
         # Light on motion: web hooks called when motion starts / the room goes still
-        self.light = Light(got.get('light') if isinstance(got.get('light'), dict) else None,
-                           call=light_call, run=light_run)
+        if demo:                         # a light that only pretends: the demo shows the automation
+            self.light = Light(dict(enabled=True, on_url='http://demo.invalid/on', off_url='http://demo.invalid/off',
+                                    off_after=20), call=lambda url: (True, 'demo'), run=light_run)
+        else:
+            self.light = Light(got.get('light') if isinstance(got.get('light'), dict) else None,
+                               call=light_call, run=light_run)
         if send and state.sound_want is None:
             state.outbox.append('SOUND')         # ask the board for its buzzer settings
         if send and state.sens_want is None:
@@ -372,15 +382,39 @@ class Dashboard:
             self.timeline.add(w0, w1, 'activity', cur[1])
         self.act_cur, self.act_cand = self.act_cand, None
 
+    def _event(self, kind, text, key=None, important=False, t=None):
+        """One entry of the live stream. key: the map node it is about (or None)."""
+        self.event_id += 1
+        e = dict(id=self.event_id, t=r2(t or time.time()), type=kind, text=str(text)[:120], key=key,
+                 important=important)
+        self.events.append(e)
+        return e
+
+    def _event_name(self, key, name):
+        if key == 'board':
+            return 'Hub' if self.sats else 'Board'
+        if key.startswith('sat:'):
+            return self.board_label(key[4:])
+        return name or key
+
     def _period(self, key, on, wall, name=''):
         """A link's (or the board's) motion period opens or closes; a closed one
-        is filed in the timeline."""
+        is filed in the timeline. Each one is also one entry of the live stream
+        (open: 'now'; closed: its length)."""
         if on and key not in self._open:
             self._open[key] = [wall, name]
+            mk = 'hub' if key == 'board' else None if key == 'house' else key
+            e = self._event('motion', self._event_name(key, name), mk, t=wall)
+            e['open'], e['house'] = True, key == 'house'
+            self._open_ev = getattr(self, '_open_ev', {})
+            self._open_ev[key] = e
         elif not on and key in self._open:
             w0, nm = self._open.pop(key)
             if self.timeline:
                 self.timeline.add(w0, max(w0, wall), key, nm)
+            e = getattr(self, '_open_ev', {}).pop(key, None)
+            if e:
+                e['open'], e['dur'] = False, r2(max(0.0, wall - w0))
 
     def _board_period(self):
         """The board's own verdict as timeline periods."""
@@ -411,6 +445,10 @@ class Dashboard:
             return                                   # the same hello, heard twice
         if old and old.get('via') == 'usb' and now - old['at'] < SAT_GONE_S:
             return                                   # on USB too: its own lines say more
+        if old and old.get('gone_said'):
+            self._event('health', f"{self.board_label(d['mac'])} back", 'sat:' + d['mac'])
+        elif old is None and (self.demo or now - self.started_wall > 60):
+            self._event('health', f"{self.board_label(d['mac'])} joined", 'sat:' + d['mac'])
         d['at'] = now
         d['since'] = old['since'] if old and old['motion'] == d['motion'] and now - old['at'] < SAT_GONE_S else now
         self.sats[d['mac']] = d
@@ -624,6 +662,9 @@ class Dashboard:
         for mac, d in self.sats.items():
             if now - d['at'] > SAT_GONE_S:
                 self._period('sat:' + mac, False, d['at'])
+                if not d.get('gone_said'):
+                    d['gone_said'] = True
+                    self._event('health', f"{self.board_label(mac)} not heard", 'sat:' + mac, important=True)
 
     def _boards(self):
         """The other boards, as the hub hears them (their hellos). A board heard
@@ -791,6 +832,15 @@ class Dashboard:
                 self._sat_extra(line)
             if self.pair.feed(line) or line.startswith('ME,'):
                 self._pair_cmds()
+            if line.startswith('DEV,'):                 # a device heard for the first time
+                mac = line[4:21].lower()
+                if mac not in self.s.devices.devs and (self.demo or time.time() - self.started_wall > 60) \
+                        and self.s.devices.board_seen:
+                    self._event('device', f"New device · {self.s.devices.name(mac) or mac}", mac)
+            elif line.startswith('CHANNEL,'):
+                p = line.strip().split(',')
+                if len(p) > 3 and p[3] in ('csa', 'scan') and self.s.channel and p[2] != str(self.s.channel[0]):
+                    self._event('network', f"Router channel {self.s.channel[0]} → {p[2]}", 'hub', important=True)
             self.s.feed(line)
             self.version += 1
             self._board_period()
@@ -851,13 +901,18 @@ class Dashboard:
         never does, or a demo's fake motion would switch a real plug. The board's
         own verdict counts, plus the device links you ticked."""
         motion, by = self._house()
-        if not self.send:
+        if not self.send and not self.demo:
             return
         now_m = time.monotonic()
         if any(b != 'board' for b in by):            # another board sees motion: held a while, so a
             self.others_until = now_m + OTHERS_HOLD_S  # burst of movement is one alert, not ten
         ext = bool(self._alerting()) or now_m < getattr(self, 'others_until', 0.0)
+        was = self.light.on
         self.light.update(motion or ext)
+        if self.light.on != was and self.light.on is not None and self.light.cfg.get('enabled'):
+            src = ', '.join('Hub' if b == 'board' else self.board_label(b) for b in by) or 'a device link'
+            self._event('automation', f"Light on · motion at {src}" if self.light.on else 'Light off · the house is still',
+                        'light', important=True)
         now = time.monotonic()
         if ext and (not self.ext_sent or now - self.ext_at >= EXT_EVERY_S):
             self.s.outbox.append('EXT,1')
@@ -932,6 +987,11 @@ class Dashboard:
             if c and line.startswith('CALIB,') and (
                     not self.calibs or (self.calibs[-1]['phase'], self.calibs[-1]['why']) != (c['phase'], c['why'])):
                 self.calibs.append(dict(t=r2(t), phase=c['phase'], why=c['why'], floor=c['floor']))
+                prev = self.calibs[-2]['phase'] if len(self.calibs) > 1 else None
+                if c['phase'] in ('wait', 'collect') and prev not in ('wait', 'collect'):
+                    self._event('calib', f"Calibrating ({c['why']})", 'hub')
+                elif c['phase'] in ('fast', 'track') and prev in ('wait', 'collect'):
+                    self._event('calib', 'Calibrated, watching', 'hub')
 
     def _flush(self):
         # Taken off the outbox first: a command that fails (serial unplugged, a
@@ -1293,7 +1353,7 @@ class Dashboard:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        routers=self._routers(), boards=self._boards(), house=self._house_slow(), tz=PC_TZ,
-                       map_boards=self._map_boards(),
+                       map_boards=self._map_boards(), events=list(self.events)[-80:],
                        board_settings=self._board_settings(), primary=self.primary or self.s.me,
                        pairing=self.pair.status(self.pair.me == self.cfg['hub'], self._hub_boards()),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
@@ -1626,7 +1686,7 @@ class Dashboard:
                     devices=f"{len(dv.devs)} heard · poking {len(dv.poking)}/{MAX_DEVS} ({dv.mode})",
                     log=self.log_name, board_connected=bool(self.send),
                     alerting=[s.devices.link_label(x) for x in self._alerting()] if self.send else [],
-                    light=dict(self.light.view(), live=bool(self.send)))
+                    light=dict(self.light.view(), live=bool(self.send) or self.demo))
 
     def _score(self, t0, t1, win):
         s, det = self.s, self.s.det
@@ -2120,6 +2180,7 @@ def main():
                     help=f"Home Assistant add-on: answer only HA's ingress proxy ({INGRESS_PROXY})")
     ap.add_argument('--no-log', action='store_true', help="don't log to sessions/")
     ap.add_argument('--no-raw', action='store_true', help="log events only, not every board line (small disks)")
+    ap.add_argument('--demo', action='store_true', help='demo data: a simulated light, nothing switched for real')
     ap.add_argument('--out', default=os.path.join(os.path.dirname(HERE), 'sessions'), help='log folder')
     a = ap.parse_args()
 
@@ -2148,7 +2209,7 @@ def main():
     lines, send = opened[0]
     state.live = send is not None
     dash = Dashboard(state, send, os.path.basename(log.ev_path) if log else None, prefs,
-                     os.path.join(a.out, 'dashboard.json'), sessions_dir=a.out)
+                     os.path.join(a.out, 'dashboard.json'), sessions_dir=a.out, demo=a.demo)
     q = queue.Queue()
     if multi:
         dash.set_sources([sd for _l, sd in opened], log)

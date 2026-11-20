@@ -504,3 +504,85 @@ body.simple .nav a[data-adv] { display: none; }
 .map-show { margin: 2px 0 10px; flex-wrap: wrap; }
 .house-uses { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 4px 0 8px; }
 .house-use { display: flex; align-items: center; gap: 6px; }
+
+/* =====================================================================
+   Skin (2026-11-20): dark, quiet, one accent. Effects say something: state,
+   activity, cause and effect. No backdrop blur on cards (costly on a Pi).
+   ===================================================================== */
+:root {
+  --bg: #070a0f; --card: rgba(20, 27, 36, .72); --card2: rgba(28, 37, 48, .78); --line: rgba(160, 190, 220, .09);
+  --grid: rgba(120, 160, 200, .06); --fg: #e9eef4; --muted: #7f8c9c;
+  --accent: #39e1d9; --accent-soft: rgba(57, 225, 217, .14); --accent-glow: rgba(57, 225, 217, .35);
+  --warn: #ffb547;            /* the one other colour: things that need you (automations, a board offline) */
+  --r: 14px; --gap: 16px;
+  --spring: cubic-bezier(.34, 1.56, .64, 1); --ease: cubic-bezier(.2, .7, .2, 1);
+  --font: Inter, "SF Pro Text", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+html, body {
+  background: radial-gradient(1200px 700px at 70% -10%, rgba(57, 225, 217, .07), transparent 60%),
+              radial-gradient(900px 600px at -10% 110%, rgba(78, 168, 255, .05), transparent 60%), var(--bg);
+  background-attachment: fixed;
+  font-feature-settings: "tnum" 1, "cv11" 1; -webkit-font-smoothing: antialiased; letter-spacing: .1px;
+}
+.card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, .035), rgba(255, 255, 255, .008)), var(--card);
+  border: 1px solid var(--line); border-radius: var(--r);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045), 0 18px 40px -24px rgba(0, 0, 0, .8);
+}
+.card h2 { letter-spacing: .2px; }
+.top { background: rgba(7, 10, 15, .78); border-bottom-color: var(--line); }
+button { background: var(--card2); border-color: var(--line); border-radius: 10px;
+  transition: background .18s var(--ease), border-color .18s var(--ease), transform .18s var(--ease), box-shadow .18s var(--ease); }
+button:hover { background: rgba(40, 52, 66, .9); border-color: rgba(160, 190, 220, .18); transform: translateY(-1px);
+  box-shadow: 0 6px 18px -10px rgba(0, 0, 0, .7); }
+button:active { transform: translateY(0) scale(.98); }
+button.primary, .seg button.on { background: var(--accent-soft); border-color: rgba(57, 225, 217, .45); color: var(--fg);
+  box-shadow: 0 0 0 1px rgba(57, 225, 217, .12) inset, 0 0 18px -6px var(--accent-glow); }
+/* a press leaves a ripple where you pressed (app.js adds the span) */
+button, .board-tile, .map-link, .link { position: relative; overflow: hidden; }
+.ripple { position: absolute; border-radius: 50%; pointer-events: none; transform: scale(0); opacity: .45;
+  background: radial-gradient(circle, rgba(57, 225, 217, .55), rgba(57, 225, 217, 0) 70%); animation: ripple .55s var(--ease) forwards; }
+@keyframes ripple { to { transform: scale(1); opacity: 0; } }
+/* things you can pick lift a little */
+.board-tile, .map-link, .link { transition: transform .2s var(--ease), border-color .2s var(--ease), box-shadow .2s var(--ease); }
+.board-tile:hover, .map-link:hover, .link:hover { transform: translateY(-2px); border-color: rgba(57, 225, 217, .28);
+  box-shadow: 0 12px 26px -16px rgba(0, 0, 0, .9), 0 0 0 1px rgba(57, 225, 217, .06) inset; }
+/* checkboxes are switches that snap */
+input[type="checkbox"] { appearance: none; -webkit-appearance: none; width: 34px; height: 20px; border-radius: 999px; margin: 0;
+  background: rgba(127, 140, 156, .28); position: relative; cursor: pointer; flex: none; vertical-align: middle;
+  transition: background .2s var(--ease), box-shadow .2s var(--ease); }
+input[type="checkbox"]::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%;
+  background: #dfe6ee; transition: transform .28s var(--spring); }
+input[type="checkbox"]:checked { background: var(--accent); box-shadow: 0 0 12px -2px var(--accent-glow); }
+input[type="checkbox"]:checked::after { transform: translateX(14px); background: #04211f; }
+input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* the state words: the accent glows when something is alive */
+.hero[data-state="motion"] .hero-word, .badge { text-shadow: 0 0 22px currentColor; }
+.chip.motion { box-shadow: 0 0 14px -4px var(--motion); }
+.hero-alert, .alert-important { border-left: 3px solid var(--warn); }
+::selection { background: rgba(57, 225, 217, .3); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important; }
+  .ripple { display: none; }
+  button:hover, .board-tile:hover, .map-link:hover, .link:hover { transform: none; }
+}
+
+/* ---------- the live stream (Home) ---------- */
+.stream { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; max-height: 360px; overflow: auto; }
+.ev { display: grid; grid-template-columns: 22px 1fr auto auto; align-items: center; gap: 10px; padding: 7px 10px;
+  border-radius: 10px; border-left: 2px solid transparent; --c: var(--accent);
+  opacity: calc(1 - .45 * var(--age, 0)); transition: background .18s var(--ease), opacity .6s; }
+.ev svg { width: 18px; height: 18px; fill: none; stroke: var(--c); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ev.motion { --c: var(--motion); } .ev.automation { --c: var(--warn); } .ev.health { --c: #7fb2ff; }
+.ev.calib { --c: var(--cal); } .ev.device { --c: var(--accent); } .ev.network { --c: #b48cff; }
+.ev .ev-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev .ev-meta { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.ev time { font-size: 11.5px; color: var(--muted); opacity: calc(1 - .5 * var(--age, 0)); min-width: 64px; text-align: right; }
+.ev.open .ev-meta { color: var(--c); }
+.ev.open svg { filter: drop-shadow(0 0 6px var(--c)); }
+.ev.important { border-left-color: var(--warn); background: rgba(255, 181, 71, .06); }
+.ev.clickable { cursor: pointer; }
+.ev.clickable:hover { background: rgba(255, 255, 255, .04); }
+.ev.new { animation: ev-in .45s var(--ease); }
+@keyframes ev-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }

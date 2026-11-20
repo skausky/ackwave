@@ -278,13 +278,26 @@ def main():
     ap.add_argument('--realtime', action='store_true', help='pace output in real time')
     ap.add_argument('--loop', action='store_true', help='repeat forever (with --realtime)')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--house', action='store_true', help='a whole house for the demo: boards, a person walking, the light')
+    ap.add_argument('--layout', metavar='FILE', help='with --house: write the Map layout (JSON) here and exit')
     ap.add_argument('--boards', type=int, default=1, help=f'boards in the stream (1-{len(OTHER_BOARDS) + 1}); '
                     "the others' lines are tagged @<mac>,")
     a = ap.parse_args()
     seed = a.seed
     while True:
         start = time.monotonic()
-        rows = ((line, t) for line, _k, _l, t in generate(seed)) if a.boards <= 1 else generate_boards(a.boards, seed)
+        if a.house and a.layout:                # the Map's layout, and the boards' and routers' names
+            import json
+            import os
+            with open(a.layout, 'w') as f:
+                json.dump(house_layout(), f)
+            with open(os.path.join(os.path.dirname(os.path.abspath(a.layout)), 'dashboard.json'), 'w') as f:
+                json.dump(dict(board_names={m: n for m, n, _p, _l, _j in HOUSE_SATS},
+                               router_names={HOUSE_ROUTERS['ap:0'][0]: 'Living room', HOUSE_ROUTERS['ap:1'][0]: 'Upstairs'},
+                               per_link=True), f)
+            return
+        rows = (house_lines(seed=seed) if a.house else
+                ((line, t) for line, _k, _l, t in generate(seed)) if a.boards <= 1 else generate_boards(a.boards, seed))
         for line, t in rows:
             if a.realtime and t is not None:
                 delay = start + t - time.monotonic()
@@ -294,6 +307,128 @@ def main():
         if not a.loop:
             break
         seed += 1
+
+
+# ---------- A whole house for the demo (./csi demo-web) ----------
+# One person walks a route; every link of every board sees motion exactly
+# when the person crosses that link's sensitive zone (the Map's model). The
+# hub's own raw signal follows its links; the satellites send what a real hub
+# prints for them (SAT, SATL, SURV). A device joins and a satellite comes
+# online partway through, so the dashboard shows them arriving.
+HOUSE_ROUTERS = {'ap:0': (_mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf0), (7.0, 1.0)),
+                 'ap:1': (_mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf1), (-1.5, 7.5))}
+HOUSE_SATS = [  # MAC, name, position, its links' far ends (router key, device MAC, 'hub'), joins at (s)
+    (_mac(0xc4, 0x9e, 0x7e, 0x10, 0x20, 0x31), 'Kitchen', (10.0, 6.5), ['ap:0', 'dev0', 'hub'], 0),
+    (_mac(0x68, 0x9d, 0xd2, 0x10, 0x20, 0x32), 'Bedroom', (2.5, 11.0), ['ap:1', 'dev1', 'hub'], 0),
+    (_mac(0x24, 0x0a, 0xc4, 0x10, 0x20, 0x33), 'Office', (13.0, -1.0), ['ap:0', 'dev2'], 25),
+]
+HOUSE_DEVS = {'dev0': (DEMO_DEVICES[0][0], (7.0, 9.0)), 'dev1': (DEMO_DEVICES[1][0], (5.5, 12.5)),
+              'dev2': (DEMO_DEVICES[3][0], (11.0, -3.0))}
+HOUSE_NEW_DEV = (_mac(0x50, 0x02, 0x91, 0x77, 0x66, 0x55), 40)   # a device that joins at 40 s
+HOUSE_LIGHT = (8.5, 8.0)
+HOUSE_ROUTE = [(1.0, 3.0), (6.0, 4.0), (9.5, 8.5), (6.0, 11.5), (2.0, 10.0), (1.0, 3.0), (11.0, 1.0), (12.5, -2.0), (1.0, 3.0)]
+HOUSE_SPEED = 0.9                    # m/s, a slow walk
+HOUSE_PAUSE = 6.0                    # s standing still at each stop
+LAMBDA = 0.1235                      # m, channel 6
+
+
+def house_layout():
+    """The positions the demo seeds the Map with (metres from the hub)."""
+    nodes = [dict(key=k, x=p[0], y=p[1], placed=True, name=f'Router {int(k[3:]) + 1}') for k, (_m, p) in HOUSE_ROUTERS.items()]
+    nodes += [dict(key='sat:' + m, x=p[0], y=p[1], placed=True, name=n) for m, n, p, _l, _j in HOUSE_SATS]
+    nodes += [dict(key=m, x=p[0], y=p[1], placed=True, name=m) for m, p in HOUSE_DEVS.values()]
+    nodes.append(dict(key='light', x=HOUSE_LIGHT[0], y=HOUSE_LIGHT[1], placed=True, name='Light'))
+    return dict(unit='m', env='home', nodes=nodes)
+
+
+def house_person(t):
+    """Where the person is at t s: walking the route, pausing at each stop."""
+    legs = []
+    for a, b in zip(HOUSE_ROUTE, HOUSE_ROUTE[1:]):
+        legs.append((a, b, math.dist(a, b) / HOUSE_SPEED))
+    loop = sum(d + HOUSE_PAUSE for _a, _b, d in legs)
+    t %= loop
+    for a, b, d in legs:
+        if t < HOUSE_PAUSE:
+            return a, False
+        t -= HOUSE_PAUSE
+        if t < d:
+            f = t / d
+            return (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f), True
+        t -= d
+    return HOUSE_ROUTE[0], False
+
+
+def house_sens(p, a, b):
+    """How strongly a person at p changes link a-b (the Map's estimate)."""
+    d = math.dist(a, b)
+    d1, d2 = math.dist(p, a), math.dist(p, b)
+    zones = (d1 + d2 - d) / (LAMBDA / 2)
+    along = 1 / (1 + 0.22 * zones)
+    return min(1.0, along * along + 0.55 * math.exp(-min(d1, d2) / 0.7))
+
+
+def house_end(key):
+    if key == 'hub':
+        return (0.0, 0.0)
+    if key in HOUSE_ROUTERS:
+        return HOUSE_ROUTERS[key][1]
+    return HOUSE_DEVS[key][1]
+
+
+def house_lines(duration=240.0, seed=0):
+    """(line, t) in time order: the hub's own data plus the satellites' reports."""
+    import heapq
+    step = 0.5
+    # the hub sees motion while the walking person is near one of its router links
+    hub_links = [house_end(k) for k in HOUSE_ROUTERS]
+    states, t = [], 0.0
+    while t < duration:
+        p, walking = house_person(t)
+        on = walking and max(house_sens(p, (0.0, 0.0), e) for e in hub_links) > 0.3
+        states.append('motion' if on else 'still')
+        t += step
+    scenario, run = [], 1
+    for prev, cur in zip(states, states[1:] + [None]):
+        if cur == prev:
+            run += 1
+        else:
+            scenario.append((prev, run * step))
+            run = 1
+    hub = ((tt if tt is not None else -1.0, line) for line, _k, _l, tt in generate(seed, scenario)
+           if DEMO_PEER not in line)            # the plain demo's extra board: not in this house
+
+    def sats():
+        t, seq = 0.0, 0
+        while t < duration:
+            p, walking = house_person(t)
+            seq += 1
+            for mac, _name, pos, ends, joins in HOUSE_SATS:
+                if t < joins:
+                    continue
+                links, any_mv = [], False
+                for e in ends:
+                    v = house_sens(p, pos, house_end(e)) if walking else 0.0
+                    mv = v > 0.3
+                    any_mv |= mv
+                    k = 1.0 + (4.5 * v if mv else 0.2 * v)
+                    far = (HOUSE_ROUTERS[e][0] if e in HOUSE_ROUTERS else DEMO_ME if e == 'hub' else HOUSE_DEVS[e][0])
+                    flags = 3 if e in HOUSE_ROUTERS else 4
+                    links.append(f"{far}:{flags}:{int(20 * k)}:{int(19 * k)}")
+                rssi = -45 - int(3 * math.dist(pos, (0, 0)))
+                ks = int(50 * (1.6 if any_mv else 0.35))
+                yield t, (f"SAT,{mac},{rssi},{seq},{3 if any_mv else 2},{ks},{int(ks * 0.8)},95,-58,{len(ends)},"
+                          f"{int(t)},{HOUSE_ROUTERS[ends[0]][0]},6")
+                yield t, f"SATL,{mac}," + ','.join(links)
+                if seq % 20 == 1:
+                    yield t, (f"SURV,{mac}," + ','.join(f"{HOUSE_ROUTERS[k][0]}:0:{-40 - int(4 * math.dist(pos, HOUSE_ROUTERS[k][1]))}"
+                                                        for k in HOUSE_ROUTERS))
+            if HOUSE_NEW_DEV[1] <= t < HOUSE_NEW_DEV[1] + step:
+                yield t, f"DEV,{HOUSE_NEW_DEV[0]},-61,5,1,200,0"
+            t += step
+
+    for t, line in heapq.merge(hub, sats(), key=lambda x: x[0]):
+        yield line, (t if t >= 0 else None)
 
 
 if __name__ == '__main__':

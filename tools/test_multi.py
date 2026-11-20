@@ -231,11 +231,44 @@ def sat_links():
     assert d.surveys[S][FIRST]['rssi'] == -58
 
 
+def live_stream_and_demo():
+    """The demo house: three boards (one joining late), a person walking, a
+    device joining, the simulated light; and the live stream it produces."""
+    import tempfile
+    from fake_csi import HOUSE_SATS, HOUSE_NEW_DEV, house_layout, house_lines, house_person
+    from web import Dashboard
+    lines = list(house_lines(duration=60.0, seed=5))
+    sat_lines = [l for l, _t in lines if l.startswith('SAT,')]
+    macs = {l.split(',')[1] for l in sat_lines}
+    assert macs == {m for m, *_ in HOUSE_SATS}, macs
+    office = HOUSE_SATS[2][0]
+    first = next(t for l, t in lines if l.startswith(f'SAT,{office},'))
+    assert first >= HOUSE_SATS[2][4], "the Office board joins late"
+    assert any(l.startswith(f'DEV,{HOUSE_NEW_DEV[0]}') for l, _t in lines)
+    assert any(house_person(t)[1] for t in range(60)) and not house_person(0)[1], "walks, after a pause"
+    assert len(house_layout()['nodes']) == 2 + 3 + 3 + 1
+    tmp = tempfile.mkdtemp()
+    d = Dashboard(State(600), settings=os.path.join(tmp, 'dashboard.json'), sessions_dir=tmp, demo=True)
+    for l, _t in lines:
+        d.feed(l + '\n')
+        d.tick() if l.startswith('STATS,') else None
+    evs = d.slow(30)['events']
+    kinds = {e['type'] for e in evs}
+    assert {'motion', 'health', 'device'} <= kinds, kinds
+    assert any(e['type'] == 'health' and 'joined' in e['text'] for e in evs)
+    mo = [e for e in evs if e['type'] == 'motion' and not e.get('open')]
+    assert mo and all(e['dur'] >= 0 for e in mo), "a finished motion has its length"
+    assert d.light.cfg['enabled'] and 'demo.invalid' in d.light.cfg['on_url'], "demo: a light that only pretends"
+    ids = [e['id'] for e in evs]
+    assert ids == sorted(ids) and len(set(ids)) == len(ids)
+
+
 if __name__ == '__main__':
     clock()
     comparing()
     house()
     sat_links()
+    live_stream_and_demo()
     tagged_stream()
     ports()
     print("MULTI TESTS PASSED")

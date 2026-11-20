@@ -40,6 +40,15 @@ window.AckMap = (() => {
   let routersInfo = [];                     // the hub's routers (slow.routers): idx -> bssid, for naming
   let showOnly = null;                      // null = every board's links; 'hub' or 'sat:<mac>' = one board's
   const WEAK_DBM = -80;                     // links weaker than this are drawn faint
+  // ---------- life: every effect shows something real ----------
+  //  particles along a link   its pokes and answers (their rate: the answers a second)
+  //  a bright band running    that link sees motion
+  //  a node's glow            how active it is; dim when its board isn't heard
+  //  rings once               something heard for the first time
+  //  a wave to the light      the light was switched on, from the board(s) that saw it
+  const reduced = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
+  const fx = { seen: new Map(), quality: 2, dtAvg: 16, lastT: 0, skip: false, waves: [], lightWas: null, by: [] };
+  let lightInfo = null;                     // the light hook (header.light): a node on the map when switched on
   let autoFit = true;                       // refit as things appear, until you pan, zoom or drag
   let viewByUser = false;                   // only a view you set is saved
   let nodeCount = 0;
@@ -160,16 +169,24 @@ window.AckMap = (() => {
     return Math.min(1, along * along + ends);
   }
   const heatCv = document.createElement('canvas'), heatMv = document.createElement('canvas');
-  let heatKey = '';
+  let heatKey = '', heatView = null, viewSeen = '', viewMovedAt = 0;
   function rgbOf(hex) { const v = parseInt(hex.slice(1), 16); return [v >> 16 & 255, v >> 8 & 255, v & 255]; }
   // Two layers at a third of the screen's resolution: still links in their
   // colour, moving ones in the motion colour (pulsed when drawn). Rebuilt only
   // when the view, a position or a link's state changes.
-  function heat(L) {
-    const S = 3, w = Math.max(1, Math.ceil(W / S)), h = Math.max(1, Math.ceil(H / S));
-    const key = JSON.stringify([M.view, w, h, channel, L.map(({ a, n, color, r }) => [a.x, a.y, n.x, n.y, color, moving(r)])]);
-    if (key === heatKey) return;
+  // While the view moves (a pan, a pinch, a fly-to) the last image is moved
+  // with it; it is recomputed once the view has been still ~0.2 s (a Pi can't
+  // redo it every frame). Returns the view it was computed at.
+  function heat(L, t) {
+    const S = fx.quality === 2 ? 3 : 4, w = Math.max(1, Math.ceil(W / S)), h = Math.max(1, Math.ceil(H / S));
+    const vk = JSON.stringify(M.view);
+    if (vk !== viewSeen) { viewSeen = vk; viewMovedAt = t; }
+    const geo = JSON.stringify([w, h, channel, L.map(({ a, n, color, r }) => [a.x, a.y, n.x, n.y, color, moving(r)])]);
+    const key = geo + '|' + vk;
+    if (key === heatKey) return heatView;
+    if (heatView && geo === heatKey.split('|')[0] && t - viewMovedAt < 200) return heatView;   // still moving
     heatKey = key;
+    heatView = { ...M.view };
     const lam = lambda(), motionRgb = rgbOf(css('--motion'));
     const still = new ImageData(w, h), mov = new ImageData(w, h);
     const spec = L.filter(({ d }) => d >= 0.05).map(({ a, n, color, d, r }) =>
@@ -196,6 +213,7 @@ window.AckMap = (() => {
       c.width = w; c.height = h;
       c.getContext('2d').putImageData(img, 0, 0);
     }
+    return heatView;
   }
 
   // ---------- view ----------
@@ -293,6 +311,114 @@ window.AckMap = (() => {
     const n = parseInt(hex.slice(1), 16);
     return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
   }
+  function lightNode() {
+    if (!lightInfo || !lightInfo.enabled) return null;
+    let n = M.nodes.get('light');
+    if (!n) {
+      n = { key: 'light', name: 'Light', x: 2, y: -2, placed: false };
+      M.nodes.set('light', n);
+      scheduleSave();
+    }
+    n.name = 'Light';
+    return n;
+  }
+  // Frame budget: slow frames step quality down (2 full, 1 no glow blur, 0 no
+  // particles at 30 fps); fast frames step it back up
+  function budget(t) {
+    const dt = fx.lastT ? Math.min(t - fx.lastT, 100) : 16;
+    fx.lastT = t;
+    fx.dtAvg += 0.08 * (dt - fx.dtAvg);
+    if (fx.dtAvg > 26 && fx.quality > 0) { fx.quality--; fx.dtAvg = 16; }
+    else if (fx.dtAvg < 15 && fx.quality < 2 && Math.random() < 0.005) fx.quality++;
+  }
+  function particles(L, t, motionC) {
+    if (reduced.matches || fx.quality === 0) return;
+    for (const { r, a, n, color, d } of L) {
+      if (d < 0.3 || (r.board && r.board.state === 'gone')) continue;
+      const rate = r.rate !== undefined ? r.rate : 40;      // satellites: about their usual flow
+      const count = Math.max(1, Math.min(6, Math.round(rate / 18))), mv = moving(r);
+      const speed = mv ? 0.9 : 0.45;                        // links per second
+      ctx.fillStyle = mv ? motionC : color;
+      if (fx.quality === 2) { ctx.shadowColor = mv ? motionC : color; ctx.shadowBlur = 8; }
+      for (let i = 0; i < count; i++) {
+        const f = ((t / 1000) * speed + i / count) % 1;
+        const x = X(a.x + (n.x - a.x) * f), y = Y(a.y + (n.y - a.y) * f);
+        ctx.globalAlpha = Math.sin(f * Math.PI) * (weak(r) ? 0.35 : 0.9);   // fade in and out at the ends
+        ctx.beginPath(); ctx.arc(x, y, mv ? 2.4 : 1.7, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+      if (mv) {                                             // the band that runs while it sees motion
+        const f = (t / 650) % 1, x = X(a.x + (n.x - a.x) * f), y = Y(a.y + (n.y - a.y) * f);
+        const g = ctx.createRadialGradient(x, y, 0, x, y, 22);
+        g.addColorStop(0, alpha(motionC, 0.55)); g.addColorStop(1, alpha(motionC, 0));
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 22, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+  function ripples(t, keys) {                // a node heard for the first time: rings, once
+    for (const [key, x, y] of keys) {
+      if (!fx.seen.has(key)) fx.seen.set(key, fx.seen.size === 0 && !loaded ? -1e9 : t);
+      const age = t - fx.seen.get(key);
+      if (reduced.matches || age < 0 || age > 1800) continue;
+      for (const k of [0, 0.35]) {
+        const p = age / 1800 - k;
+        if (p <= 0 || p >= 1) continue;
+        ctx.strokeStyle = alpha(css('--accent'), 0.6 * (1 - p)); ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(x, y, 10 + 46 * p, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+  }
+  function lightWaves(t) {                   // light switched on: a wave from each source to it
+    const ln = M.nodes.get('light');
+    fx.waves = fx.waves.filter((w) => t - w.t0 < 2200);
+    if (!ln) return;
+    const warn = css('--warn') || '#ffb547';
+    for (const w of fx.waves) {
+      const p = Math.min(1, (t - w.t0) / 1100);
+      const x = X(w.from.x + (ln.x - w.from.x) * p), y = Y(w.from.y + (ln.y - w.from.y) * p);
+      if (p < 1 && !reduced.matches) {
+        ctx.strokeStyle = alpha(warn, 0.35); ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(X(w.from.x), Y(w.from.y)); ctx.lineTo(x, y); ctx.stroke();
+        const g = ctx.createRadialGradient(x, y, 0, x, y, 26);
+        g.addColorStop(0, alpha(warn, 0.85)); g.addColorStop(1, alpha(warn, 0));
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 26, 0, Math.PI * 2); ctx.fill();
+      } else {
+        const q = (t - w.t0 - 1100) / 1100;
+        if (q > 0 && q < 1) {
+          ctx.strokeStyle = alpha(warn, 0.7 * (1 - q)); ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.arc(X(ln.x), Y(ln.y), 12 + 40 * q, 0, Math.PI * 2); ctx.stroke();
+        }
+      }
+    }
+  }
+  function drawLight(t) {
+    const ln = lightNode();
+    if (!ln) return;
+    const on = lightInfo.state === 'on', x = X(ln.x), y = Y(ln.y), warn = css('--warn') || '#ffb547';
+    if (on) {
+      const g = ctx.createRadialGradient(x, y, 0, x, y, 34);
+      g.addColorStop(0, alpha(warn, 0.5)); g.addColorStop(1, alpha(warn, 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 34, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = on ? warn : css('--card'); ctx.strokeStyle = warn; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y - 2, 7, Math.PI * 0.85, Math.PI * 2.15); ctx.lineTo(x + 3, y + 7); ctx.lineTo(x - 3, y + 7); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    label(x, y + 13, 'Light', on ? 'on' : lightInfo.state, on ? warn : css('--fg'));
+  }
+  // A small glyph in a dot: Wi-Fi arcs for a router, the maker's initial for a device
+  function glyph(x, y, r, n) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(4,16,20,.85)'; ctx.fillStyle = 'rgba(4,16,20,.85)'; ctx.lineWidth = 1.4;
+    if (r.ap) {
+      for (const k of [3, 6]) { ctx.beginPath(); ctx.arc(x, y + 3, k, Math.PI * 1.2, Math.PI * 1.8); ctx.stroke(); }
+      ctx.beginPath(); ctx.arc(x, y + 3, 1.2, 0, Math.PI * 2); ctx.fill();
+    } else {
+      const ch = String(n.name || '?').replace(/[^A-Za-z0-9]/g, '').charAt(0).toUpperCase() || '?';
+      ctx.font = '700 10px ui-sans-serif, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(ch, x, y + 0.5);
+    }
+    ctx.restore();
+  }
   function draw(t) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
@@ -303,12 +429,18 @@ window.AckMap = (() => {
     grid();
     const L = links(), lam = lambda(), motionC = css('--motion');
     const pulse = 0.5 + 0.5 * Math.sin(t / 260);
-    heat(L);                                       // where each link is sensitive (estimate)
+    const hv = heat(L, t);                         // where each link is sensitive (estimate)
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(heatCv, 0, 0, W, H);
-    ctx.globalAlpha = 0.45 + 0.55 * pulse;
-    ctx.drawImage(heatMv, 0, 0, W, H);
-    ctx.globalAlpha = 1;
+    if (hv) {                                      // drawn where it was computed, moved with the view
+      const k = M.view.s / hv.s;
+      ctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * (W / 2 - (W / 2) * k + (hv.x - M.view.x) * M.view.s),
+                       dpr * (H / 2 - (H / 2) * k + (hv.y - M.view.y) * M.view.s));
+      ctx.drawImage(heatCv, 0, 0, W, H);
+      ctx.globalAlpha = 0.45 + 0.55 * pulse;
+      ctx.drawImage(heatMv, 0, 0, W, H);
+      ctx.globalAlpha = 1;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
     for (const { r, a: e, n, color, d } of L) {    // zones first, dots on top
       if (d < 0.05) continue;
       const rot = Math.atan2(n.y - e.y, n.x - e.x), cx = (e.x + n.x) / 2, cy = (e.y + n.y) / 2;
@@ -329,6 +461,7 @@ window.AckMap = (() => {
       ctx.fillStyle = css('--fg'); ctx.fillText(fmtLen(d), 0, -4);
       ctx.restore();
     }
+    particles(L, t, motionC);
     // the board
     const bx = X(0), by = Y(0);
     ctx.fillStyle = css('--card'); ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2.5;
@@ -352,9 +485,13 @@ window.AckMap = (() => {
       if (n === HUB || n.board || drawn.has(n.key)) continue;   // boards are squares, drawn above
       drawn.add(n.key);
       const x = X(n.x), y = Y(n.y);
+      const act = r.rate !== undefined ? Math.min(1, r.rate / 90) : 0.6;    // how active: its glow
+      if (fx.quality > 0 && !weak(r)) { ctx.shadowColor = color; ctx.shadowBlur = 6 + 14 * act; }
       ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2);
-      ctx.fillStyle = color; ctx.fill();
+      ctx.fillStyle = weak(r) ? alpha(color, 0.45) : color; ctx.fill();
+      ctx.shadowBlur = 0;
       ctx.strokeStyle = css('--bg'); ctx.lineWidth = 2.5; ctx.stroke();
+      glyph(x, y, r, n);
       if (!n.placed) {                        // a guess from its signal: dashed ring
         ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2);
         ctx.strokeStyle = alpha(color, 0.8); ctx.lineWidth = 1.2; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
@@ -363,6 +500,11 @@ window.AckMap = (() => {
         r.breathing ? `breathing ${Math.round(r.breathing.rate)}/min` : ''].filter(Boolean).join(' · ');
       label(x, y + 15, r.board ? n.name : r.label, r.board ? null : sub || null, css('--fg'));
     }
+    drawLight(t);
+    lightWaves(t);
+    const keys = [['hub', X(0), Y(0)]];
+    for (const { n } of L) if (n !== HUB) keys.push([n.key, X(n.x), Y(n.y)]);
+    ripples(t, keys);
     $('#map-msg').textContent = L.length ? '' : 'Waiting for live links: the router appears once the board hears it.';
   }
   function label(x, y, text, sub, color) {
@@ -376,8 +518,12 @@ window.AckMap = (() => {
   }
   function loop(t) {
     if (!visible) { raf = 0; return; }
-    const anyMotion = links().some(({ r }) => moving(r)) || others.some((b) => b.state === 'motion');
-    if (dirty || anyMotion) { draw(t); dirty = false; }
+    budget(t);
+    // Always animating (the particles are the links' real flow), except with
+    // reduced motion: then only on a change. Lowest quality: every other frame
+    const live = !reduced.matches || fx.waves.length;
+    fx.skip = fx.quality === 0 && !fx.skip;
+    if ((dirty || live) && !fx.skip) { draw(t); dirty = false; }
     raf = requestAnimationFrame(loop);
   }
 
@@ -446,6 +592,8 @@ window.AckMap = (() => {
 
   // ---------- touch / mouse ----------
   function hit(px, py) {
+    const ln = M.nodes.get('light');
+    if (ln && lightInfo && lightInfo.enabled && Math.hypot(X(ln.x) - px, Y(ln.y) - py) <= 18) return ln;
     for (const b of others) {
       const n = M.nodes.get(b.key);
       if (n && Math.hypot(X(n.x) - px, Y(n.y) - py) <= 18) return n;
@@ -713,6 +861,22 @@ window.AckMap = (() => {
     if (window.ResizeObserver) new ResizeObserver(() => { if (visible) resize(); }).observe(cv.parentElement);
   }
 
+  // Fly to a node (the live stream's entries): centre it, ripple it
+  function focusKey(key) {
+    const n = key === 'hub' ? HUB : M.nodes.get(key);
+    if (!n || !M.view) return false;
+    const from = { x: M.view.x, y: M.view.y }, t0 = performance.now(), dur = reduced.matches ? 1 : 450;
+    const step = (t) => {
+      const p = Math.min(1, (t - t0) / dur), e = 1 - (1 - p) ** 3;
+      M.view.x = from.x + (n.x - from.x) * e; M.view.y = from.y + (n.y - from.y) * e;
+      dirty = true;
+      if (p < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+    fx.seen.set(key === 'hub' ? 'hub' : key, performance.now());       // its rings again
+    return true;
+  }
+
   // The hub's own verdict (the badge may show another board's motion)
   const hubMoving = (h) => !!(h && h.badge && (h.badge.hub !== undefined ? h.badge.hub : h.badge.word === 'MOTION'));
 
@@ -754,10 +918,25 @@ window.AckMap = (() => {
     update(slow, header) {
       if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; if (slow.channel) channel = slow.channel; }
       if (header) boardMotion = hubMoving(header);
+      if (header && header.light) {
+        lightInfo = header.light;
+        const on = lightInfo.state === 'on';
+        if (on && fx.lightWas === false) {      // just switched on: from the boards that saw it
+          const froms = (slow && slow.house && slow.house.by || fx.by || []).map((name) => {
+            if (name === 'Hub') return HUB;
+            const b = others.find((o) => o.label === name);
+            return b ? M.nodes.get(b.key) : null;
+          }).filter(Boolean);
+          for (const f of froms.length ? froms : [HUB]) fx.waves.push({ from: { x: f.x, y: f.y }, t0: performance.now() });
+        }
+        fx.lightWas = on;
+      }
+      if (slow && slow.house) fx.by = slow.house.by;
       if (!visible || !loaded) return;
       dirty = true;
       renderList();
     },
+    focus: focusKey,
     fmtLen,                                    // for tests in the browser
     _layers: () => M.plans.map(({ img, ...p }) => p),
     _screenOf(id, u, v) {                      // where picture pixel (u, v) is on the canvas

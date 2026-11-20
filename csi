@@ -6,6 +6,7 @@
 #   ./csi record     log motion with clock times until Ctrl+C (e.g. overnight)
 #   ./csi history    look back at a logged session (newest; or: ./csi history --list)
 #   ./csi demo       GUI on fake data (no board needed)
+#   ./csi demo-web   the web dashboard on a simulated house (boards, a person walking, the light)
 #   ./csi flash      build and flash the firmware (ESP-IDF v5.3.2; or: ./csi flash /dev/ttyACM1)
 #   ./csi test       run all tests
 #   ./csi shortcut   add "CSI Motion" to the desktop app menu
@@ -94,6 +95,15 @@ cmd_demo() {
     "$PY" tools/fake_csi.py --realtime --loop | "$PY" tools/gui.py -
 }
 
+cmd_demo_web() {                   # the dashboard on a simulated house (record a clip, try the UI)
+    need_python
+    local out=$ROOT/sessions/demo
+    rm -rf "$out" && mkdir -p "$out"
+    "$PY" tools/fake_csi.py --house --layout "$out/map.json"
+    echo "A simulated house: three boards, a person walking from room to room, a light that switches."
+    "$PY" tools/fake_csi.py --house --realtime --loop | "$PY" tools/web.py - --demo --no-log --out "$out" --open "$@"
+}
+
 cmd_flash() {
     if [ ! -f main/my_network.h ]; then
         echo "No default network set (main/my_network.h): after flashing, open the GUI and"
@@ -157,6 +167,7 @@ case "${1:-}" in
     record) cmd_record ;;
     history) shift; cmd_history "$@" ;;
     demo) cmd_demo ;;
+    demo-web) shift; cmd_demo_web "$@" ;;
     flash) shift; cmd_flash "${1:-}" ;;
     test) cmd_test ;;
     shortcut) cmd_shortcut ;;

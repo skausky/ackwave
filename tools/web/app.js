@@ -317,8 +317,93 @@ function renderBoards() {
   }));
 }
 
+// ---------------------------------------------------------------- the live stream
+// What happened, newest first: motion on each board and link, the light
+// switching, boards coming and going, calibration, new devices, the router's
+// channel. Click one: the map flies to it.
+const STREAM_ICON = {
+  motion: 'M2 12h3l3-7 4 14 3-7h7',
+  automation: 'M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.8.8 1 1.5 1 2.5h6c0-1 .2-1.7 1-2.5A6 6 0 0 0 12 3z',
+  health: 'M3 12h4l2-5 4 10 2-5h6',
+  calib: 'M12 3v3M12 18v3M3 12h3M18 12h3M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z',
+  device: 'M12 5v14M5 12h14',
+  network: 'M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01',
+};
+const stream = { nodes: new Map(), seen: new Set(), first: true };
+const stillMotion = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
+function streamGroups(evs) {        // repeats within 2 min: one row, x N
+  const out = [];
+  for (const e of [...evs].reverse()) {
+    const g = out[out.length - 1];
+    if (g && !e.open && !g.open && g.type === e.type && g.text === e.text && g.key === e.key && g.t - e.t < 120) {
+      g.n++;
+      continue;
+    }
+    out.push(Object.assign({ n: 1 }, e));
+  }
+  return out.slice(0, 40);
+}
+function ago(s) {
+  s = Math.max(0, Math.round(s));
+  return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.floor(s / 60)} min ago` : clock(Date.now() / 1000 - s);
+}
+function typeIn(node, text) {        // a new entry types itself in (not with reduced motion)
+  if (stillMotion.matches || text.length > 80) { node.textContent = text; return; }
+  let i = 0;
+  node.textContent = '';
+  const step = Math.max(1, Math.round(text.length / 18));
+  const iv = setInterval(() => {
+    i = Math.min(text.length, i + step);
+    node.textContent = text.slice(0, i);
+    if (i >= text.length) clearInterval(iv);
+  }, 16);
+}
+function renderStream() {
+  const list = $('#stream');
+  if (!list || !slow || !slow.events) return;
+  const groups = streamGroups(slow.events), nowS = Date.now() / 1000, keep = new Set();
+  if (groups.length) { const em = list.querySelector('.stream-empty'); if (em) em.remove(); }
+  let prev = null;
+  for (const g of groups) {
+    keep.add(g.id);
+    let li = stream.nodes.get(g.id);
+    const fresh = !li;
+    if (fresh) {
+      li = el('li', { className: `ev ${g.type}` });
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', STREAM_ICON[g.type] || STREAM_ICON.device);
+      svg.append(path);
+      li.append(svg, el('span', { className: 'ev-text' }), el('span', { className: 'ev-meta' }), el('time', {}));
+      li.onclick = () => { if (li.dataset.key && window.AckMap.focus) window.AckMap.focus(li.dataset.key); };
+      stream.nodes.set(g.id, li);
+      if (!stream.first && !stillMotion.matches) li.classList.add('new');
+      typeIn(li.children[1], (g.type === 'motion' ? (g.house ? 'House: motion' : `Motion · ${g.text}`) : g.text));
+    }
+    li.dataset.key = g.key || '';
+    li.classList.toggle('important', !!g.important);
+    li.classList.toggle('open', !!g.open);
+    li.classList.toggle('clickable', !!g.key);
+    li.children[2].textContent = [g.n > 1 ? `×${g.n}` : '', g.type === 'motion' ? (g.open ? 'now' : fmtSpan(g.dur || 0)) : '']
+      .filter(Boolean).join(' · ');
+    const age = nowS - g.t;
+    li.children[3].textContent = ago(age);
+    li.style.setProperty('--age', Math.min(1, age / 1800).toFixed(3));   // older entries fade
+    if (prev ? prev.nextSibling !== li : list.firstChild !== li) {
+      if (prev) prev.after(li); else list.prepend(li);
+    }
+    prev = li;
+  }
+  for (const [id, li] of stream.nodes) if (!keep.has(id)) { li.remove(); stream.nodes.delete(id); }
+  stream.first = false;
+  const open = groups.filter((g) => g.open && g.type === 'motion').length;
+  $('#stream-state').textContent = open ? `${open} moving now` : '';
+}
+
 function renderHome() {
   renderBoards();
+  renderStream();
   const h = slow && slow.house, hh = $('#home-house');
   hh.hidden = !h || h.boards < 2;
   if (h && h.boards >= 2) hh.textContent = h.motion ? `House: motion · seen by ${h.by.join(', ')}` : `House: still · ${h.boards} boards watching`;
@@ -1793,3 +1878,19 @@ if (params.has('shot')) {
   window.addEventListener('load', connect);
   requestAnimationFrame(frameLoop);
 }
+
+// A press leaves a ripple where you pressed (style.css .ripple); not with reduced motion
+(() => {
+  const still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
+  document.addEventListener('pointerdown', (e) => {
+    if (still && still.matches) return;
+    const t = e.target.closest && e.target.closest('button, .board-tile, .map-link');
+    if (!t) return;
+    const r = t.getBoundingClientRect(), size = Math.max(r.width, r.height) * 2.2;
+    const s = document.createElement('span');
+    s.className = 'ripple';
+    s.style.cssText = `width:${size}px;height:${size}px;left:${e.clientX - r.left - size / 2}px;top:${e.clientY - r.top - size / 2}px`;
+    t.append(s);
+    setTimeout(() => s.remove(), 600);
+  }, { passive: true });
+})();
