@@ -424,9 +424,38 @@ def main():
     finally:
         srv.shutdown()
     pages_and_debug(tmp)
+    ingress_mode()
     device_alerts(tmp)
     failed_send(tmp)
     print("WEB TESTS PASSED")
+
+
+def ingress_mode():
+    """As a Home Assistant add-on: only HA's ingress proxy is answered, with
+    whatever Host it sends; the page uses relative addresses (it is served
+    under /api/hassio_ingress/<token>/)."""
+    import re
+    from web import serve
+    d = Dashboard(State(60))
+    srv = serve(d, port=0, only_from='127.0.0.1')          # this test plays the proxy
+    port = srv.server_address[1]
+    st, _ = request(port, 'GET', '/', headers={'Host': 'homeassistant.local:8123'})
+    assert st == 200, st
+    st, body = request(port, 'POST', '/cmd', body=b'{"cmd":"cal"}',
+                       headers={'Host': 'homeassistant.local:8123', 'X-Ackwave': '1',
+                                'Content-Type': 'application/json'})
+    assert st in (200, 400) and b'host not allowed' not in body, body
+    srv.shutdown()
+    srv2 = serve(d, port=0, only_from='172.30.32.2')       # anyone else: refused
+    st, _ = request(srv2.server_address[1], 'GET', '/', headers={'Host': 'localhost'})
+    assert st == 403, st
+    srv2.shutdown()
+    web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
+    for name in ('app.js', 'map.js', 'index.html'):
+        with open(os.path.join(web_dir, name)) as f:
+            text = f.read()
+        bad = re.findall(r"""(?:fetch|EventSource|get)\(\s*['"`]/|(?:href|src)="/""", text)
+        assert not bad, (name, bad)
 
 
 def failed_send(tmp):
@@ -626,10 +655,10 @@ def pages_and_debug(tmp):
     for r in routes:
         assert f'data-page="{r}"' in html and f'href="#/{r}"' in html, r
     assert "const ROUTES = ['home', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];" in js
-    assert '<script src="/map.js"></script>' in html and 'localStorage' not in mapjs, "the layout lives on the PC"
+    assert '<script src="map.js"></script>' in html and 'localStorage' not in mapjs, "the layout lives on the PC"
     assert 'data-page="train"' not in html and 'data-page="ai"' not in html, "no placeholder pages"
     assert js.count('new EventSource(') == 1, "one live connection for every page"
-    assert "'X-Ackwave': '1'" in js and "fetch('/api/stats'" in js
+    assert "'X-Ackwave': '1'" in js and "fetch('api/stats'" in js
 
     # Debug, gating, thresholds, today: from a feed with a refused command
     sent = []

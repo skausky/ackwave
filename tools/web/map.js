@@ -369,7 +369,7 @@ window.AckMap = (() => {
     body.plans = M.plans.map((p) => ({ id: p.id, name: String(p.name).slice(0, 64), x: p.x, y: p.y, w: p.w,
       rot: p.rot, opacity: p.opacity, hidden: !!p.hidden }));
     try {
-      await fetch('/api/map', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ackwave': '1' }, body: JSON.stringify(body) });
+      await fetch('api/map', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ackwave': '1' }, body: JSON.stringify(body) });
     } catch (e) { /* the next change tries again */ }
   }
   function apply(m) {
@@ -384,7 +384,7 @@ window.AckMap = (() => {
   }
   async function loadPicture(p) {
     try {
-      const r = await fetch(`/api/plan?id=${p.id}`, { headers: { 'X-Ackwave': '1' } });
+      const r = await fetch(`api/plan?id=${p.id}`, { headers: { 'X-Ackwave': '1' } });
       if (!r.ok) throw new Error(r.status);
       p.img = await createImageBitmap(await r.blob());
       p.iw = p.img.width; p.ih = p.img.height;
@@ -453,7 +453,7 @@ window.AckMap = (() => {
     if (file.size > 12 * 1024 * 1024) { alert('That picture is over 12 MB: save it smaller (a screenshot is plenty).'); return; }
     let r;
     try {
-      r = await fetch(`/api/plan?id=${id}`, { method: 'POST', headers: { 'X-Ackwave': '1' }, body: file });
+      r = await fetch(`api/plan?id=${id}`, { method: 'POST', headers: { 'X-Ackwave': '1' }, body: file });
     } catch (e) { alert('Could not send the picture.'); return; }
     const got = await r.json().catch(() => ({}));
     if (!r.ok) { alert(got.msg || 'The picture was refused.'); return; }
@@ -469,7 +469,7 @@ window.AckMap = (() => {
   }
   async function removePicture(p) {
     if (!confirm(`Remove the picture “${p.name}”?`)) return;
-    try { await fetch(`/api/plan?id=${p.id}`, { method: 'POST', headers: { 'X-Ackwave': '1' }, body: '' }); } catch (e) { /* stays on disk */ }
+    try { await fetch(`api/plan?id=${p.id}`, { method: 'POST', headers: { 'X-Ackwave': '1' }, body: '' }); } catch (e) { /* stays on disk */ }
     M.plans = M.plans.filter((x) => x !== p);
     if (tool && tool.id === p.id) setTool(null);
     dirty = true; scheduleSave(); renderLayers();
@@ -511,7 +511,7 @@ window.AckMap = (() => {
   }
   async function load() {
     try {
-      const r = await fetch('/api/map', { headers: { 'X-Ackwave': '1' } });
+      const r = await fetch('api/map', { headers: { 'X-Ackwave': '1' } });
       apply(r.ok ? await r.json() : {});
     } catch (e) { /* start fresh */ }
     loaded = true;

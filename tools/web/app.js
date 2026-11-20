@@ -71,7 +71,7 @@ function fillRows(tbody, rows, empty) {
 // ---------------------------------------------------------------- data link
 function connect() {
   if (es) es.close();
-  es = new EventSource(`/events?win=${win}${link !== null ? `&link=${link}` : ''}`);
+  es = new EventSource(`events?win=${win}${link !== null ? `&link=${link}` : ''}`);
   setLive('connecting');
   es.addEventListener('fast', (e) => { fast = JSON.parse(e.data); syncClock(); setLive(paused ? 'paused' : 'live'); renderFast(); });
   es.addEventListener('slow', (e) => { slow = JSON.parse(e.data); renderSlow(); });
@@ -84,7 +84,7 @@ function connect() {
 
 async function cmd(body) {
   try {
-    const r = await fetch('/cmd', {
+    const r = await fetch('cmd', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ackwave': '1' },
       body: JSON.stringify(body),
     });
@@ -99,7 +99,7 @@ async function cmd(body) {
 
 async function loadStats() {
   try {
-    const r = await fetch('/api/stats', { headers: { 'X-Ackwave': '1' } });
+    const r = await fetch('api/stats', { headers: { 'X-Ackwave': '1' } });
     if (!r.ok) throw new Error(r.status);
     stats = await r.json();
     $('#stats-state').textContent = `${stats.n_sessions} sessions · updated ${clock(Date.now() / 1000, true)}`;
@@ -339,7 +339,7 @@ const WHERE_HOURS = [0.008333, 0.083333, 0.5, 1, 6, 24, 168];   // 30 s, 5 min, 
 where.hours = WHERE_HOURS.includes(whereHours) ? whereHours : 6;
 async function loadWhere() {
   try {
-    const r = await fetch(`/api/timeline?hours=${where.hours}`, { headers: { 'X-Ackwave': '1' } });
+    const r = await fetch(`api/timeline?hours=${where.hours}`, { headers: { 'X-Ackwave': '1' } });
     if (!r.ok) throw new Error(r.status);
     where.data = await r.json();
     $('#where-state').textContent = `updated ${clock(Date.now() / 1000)}`;
@@ -1742,8 +1742,8 @@ if (params.has('shot')) {
     x.send();
     return JSON.parse(x.responseText);
   };
-  ({ fast, slow, debug: dbg } = get(`/snapshot?win=${+params.get('win') || 30}${params.get('link') ? `&link=${+params.get('link')}` : ''}`));
-  if (location.hash.startsWith('#/stats')) stats = get('/api/stats');
+  ({ fast, slow, debug: dbg } = get(`snapshot?win=${+params.get('win') || 30}${params.get('link') ? `&link=${+params.get('link')}` : ''}`));
+  if (location.hash.startsWith('#/stats')) stats = get('api/stats');
   if (params.get('win')) setWinButtons(+params.get('win'));
   if (params.get('link')) link = +params.get('link');
   const name = (location.hash.match(/^#\/(\w+)/) || [])[1];
@@ -1752,7 +1752,7 @@ if (params.has('shot')) {
   for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('on', a.dataset.route === page);
   document.body.dataset.page = page;
   renderPage();
-  if (page === 'map') window.AckMap.snapshot(get('/api/map'), slow, fast.header);
+  if (page === 'map') window.AckMap.snapshot(get('api/map'), slow, fast.header);
   if (params.get('hover')) {
     for (const [id, h] of Object.entries(hov)) {
       h.x = h.f.r.l + (h.f.r.r - h.f.r.l) * +params.get('hover'); h.y = (h.f.r.t + h.f.r.b) / 2;

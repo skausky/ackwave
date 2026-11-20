@@ -1876,8 +1876,18 @@ def make_handler(dash, allowed_hosts):
     return Handler
 
 
-def serve(dash, host='127.0.0.1', port=8765):
-    """Start the HTTP server in a thread; returns it (server.server_address has the port)."""
+INGRESS_PROXY = '172.30.32.2'   # Home Assistant's ingress proxy, the only client in --ingress mode
+
+
+def serve(dash, host='127.0.0.1', port=8765, only_from=None):
+    """Start the HTTP server in a thread; returns it (server.server_address has the port).
+    only_from: a client address; every other client is refused (Home Assistant ingress)."""
+    if only_from:                                # behind HA's proxy: it sends HA's own Host
+        srv = ThreadingHTTPServer(('0.0.0.0', port), make_handler(dash, set()))
+        srv.daemon_threads = True
+        srv.RequestHandlerClass._host_ok = lambda self: self.client_address[0] == only_from
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
     allowed = {'localhost', '127.0.0.1', '::1'}
     if host not in ('127.0.0.1', 'localhost', '::1'):
         import socket
@@ -1961,7 +1971,10 @@ def main():
     ap.add_argument('--host', default='127.0.0.1',
                     help='127.0.0.1 = this PC only (default); 0.0.0.0 = whole LAN')
     ap.add_argument('--open', action='store_true', help='open it in the browser')
+    ap.add_argument('--ingress', action='store_true',
+                    help=f"Home Assistant add-on: answer only HA's ingress proxy ({INGRESS_PROXY})")
     ap.add_argument('--no-log', action='store_true', help="don't log to sessions/")
+    ap.add_argument('--no-raw', action='store_true', help="log events only, not every board line (small disks)")
     ap.add_argument('--out', default=os.path.join(os.path.dirname(HERE), 'sessions'), help='log folder')
     a = ap.parse_args()
 
@@ -1972,7 +1985,7 @@ def main():
     log = awake = None
     if a.source[0] != '-' and not a.no_log:
         from record import SessionLog, keep_awake
-        log = SessionLog(a.out)
+        log = SessionLog(a.out, raw=not a.no_raw)
         awake = keep_awake('sleep')
         print(f"Logging to {log.ev_path}")
     prefs = os.path.join(a.out, 'devices.json')
@@ -1991,7 +2004,7 @@ def main():
         print(f"{len(opened)} boards: the hub (saved) is the primary; the others are watched")
     else:
         threading.Thread(target=reader, args=(lines, q, log), daemon=True).start()
-    srv = serve(dash, a.host, a.port)
+    srv = serve(dash, a.host, a.port, only_from=INGRESS_PROXY if a.ingress else None)
 
     def ticker():
         while True:
