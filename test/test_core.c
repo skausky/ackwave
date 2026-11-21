@@ -200,22 +200,39 @@ int main(void) {
     // Made-up poke TA: never our MAC, unicast, one per node, reversible
     uint8_t ta0[6], ta1[6], ta7[6];
     poke_ta(ME, 0, ta0); poke_ta(ME, 1, ta1); poke_ta(ME, MAX_NODES - 1, ta7);
-    CHECK(memcmp(ta0, ME, 6) != 0 && memcmp(ta0 + 1, ME + 1, 5) == 0);
+    CHECK(memcmp(ta0, ME, 6) != 0 && ta0[1] == ME[1]);
     CHECK((ta0[0] & 0x01) == 0);                           // unicast
     CHECK((ta0[0] & 0x02) != (ME[0] & 0x02));              // local bit flipped
     CHECK(memcmp(ta0, ta1, 6) != 0);
-    static const uint8_t TA1_VEC[6] = {0x26,0x0a,0xc4,0x11,0x22,0x34};  // also in test_probe_report.py
+    static const uint8_t TA1_VEC[6] = {0x26,0x0a,0x26,0xb4,0x32,0x66};  // also in test_probe_report.py
     CHECK(memcmp(ta1, TA1_VEC, 6) == 0);
     CHECK(poke_ta_node(ME, ta0) == 0 && poke_ta_node(ME, ta1) == 1);
     CHECK(poke_ta_node(ME, ta7) == MAX_NODES - 1);
     CHECK(poke_ta_node(ME, ME) == -1);                     // our own MAC is not a TA
     CHECK(poke_ta_node(ME, AP1) == -1);
     CHECK(poke_ta_node(ME, NULL) == -1);
-    uint8_t tax[6]; memcpy(tax, ta0, 6); tax[5] = (uint8_t)(ta0[5] + MAX_NODES);
-    CHECK(poke_ta_node(ME, tax) == -1);                    // beyond the node table
-    static const uint8_t MEW[6] = {0x24,0x0a,0xc4,0x11,0x22,0xfe};
-    uint8_t taw[6]; poke_ta(MEW, 3, taw);
-    CHECK(taw[5] == 0x01 && poke_ta_node(MEW, taw) == 3);  // last-byte wrap
+    uint8_t tax[6]; poke_ta(ME, REPORT_NODE, tax);
+    CHECK(poke_ta_node(ME, tax) == -1);                    // the report's address is no node
+    {   // Boards from one batch, a few MACs apart: no address of one is the
+        // other's (it used to be MAC + n: 4 apart shared 5 addresses), and no
+        // board's own addresses repeat
+        int clash = 0, self = 0;
+        for (int b = 0; b < 64; b++) {
+            uint8_t ma[6] = {0x24,0x0a,0xc4,0x11,0x22,(uint8_t)(0x30 + b)}, mb[6];
+            memcpy(mb, ma, 6); mb[5] = (uint8_t)(ma[5] + 4);
+            for (int i = 0; i <= MAX_NODES; i++) {
+                uint8_t x[6], y[6];
+                poke_ta(ma, i, x);
+                for (int j = 0; j <= MAX_NODES; j++) {
+                    poke_ta(mb, j, y);
+                    clash += memcmp(x, y, 6) == 0;
+                    if (j != i) { poke_ta(ma, j, y); self += memcmp(x, y, 6) == 0; }
+                }
+                if (i < MAX_NODES) CHECK(poke_ta_node(ma, x) == i && poke_ta_node(mb, x) == -1);
+            }
+        }
+        CHECK(clash == 0 && self == 0);
+    }
     static const uint8_t MEL[6] = {0x0a,0x0a,0xc4,0x11,0x22,0x33};  // already local
     uint8_t tal[6]; poke_ta(MEL, 0, tal);
     CHECK(memcmp(tal, MEL, 6) != 0 && (tal[0] & 0x01) == 0);
@@ -1049,6 +1066,23 @@ int main(void) {
     md_max_scores(&md, tt, &ms, &ml);                        // the router's own frames
     CHECK(ms < 0 && ml < 0);                                 // don't take over
     md.s[0].n = 0;
+    {   // Glitch lockout (no scan): the ACKs keep arriving but are ignored for up
+        // to glitch_hold, so the stream isn't live after stale_s; the router's
+        // own frames must still stay out (they caused most false starts)
+        static motion_det_t gd;
+        md_init(&gd, &mc, 0);
+        int64_t gt = 0;
+        for (int i = 0; i < 300; i++, gt += 10000) md_update(&gd, 0, 1, gt, -50, flat, 128);
+        int8_t odd[128];
+        for (int i = 0; i < 128; i += 2) { odd[i] = 0; odd[i + 1] = (int8_t)((i / 2) % 2 ? 70 : 10); }
+        for (int i = 0; i < 400; i++, gt += 10000)            // 4 s of a very different shape
+            CHECK(md_update(&gd, 0, 1, gt, -50, odd, 128) < 0);
+        CHECK(gd.s[1].scan_until == 0 && !md_live(&gd.s[1], gt, stl) && md_heard(&gd.s[1], gt, stl));
+        gd.s[0].n = 50; gd.s[0].t_last = gt; gd.s[0].score_s = gd.s[0].score_l = 9;
+        float gs, gl;
+        md_max_scores(&gd, gt, &gs, &gl);
+        CHECK(gs < 0 && gl < 0);
+    }
     // Back to the old shape: accepted, and normal limits again after scan_hold
     tt += 10000;
     CHECK(md_update(&md, 0, 1, tt, -50, flat, 128) >= 0);
@@ -1252,6 +1286,12 @@ int main(void) {
 
         // Replays: only newer (boot, seq) passes; a new boot is always newer
         CHECK(replay_newer(5, 1, 4, 999) && replay_newer(5, 11, 5, 10));
+        // Saved counters: rounded down to a mark; saved on a restart or a new mark
+        CHECK(replay_mark(5000) == 4096 && replay_mark(1023) == 0 && replay_mark(1024) == 1024);
+        CHECK(replay_save_due(3, 1023, 4, 1));                   // the board restarted
+        CHECK(replay_save_due(3, 1023, 3, 1024));                // passed a mark
+        CHECK(!replay_save_due(3, 1024, 3, 2000));               // same mark: no write
+        CHECK(!replay_newer(3, 4000, 3, replay_mark(4100)) && replay_newer(3, 4200, 3, replay_mark(4100)));
         CHECK(!replay_newer(5, 10, 5, 10) && !replay_newer(5, 9, 5, 10) && !replay_newer(4, 999, 5, 1));
         CHECK(replay_newer(1, 1, 0, 0));                     // the first report from a new key
 

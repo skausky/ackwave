@@ -38,6 +38,7 @@ CFG = dict(
     floor_lo=0.005, floor_hi=0.2,
     rssi_tau_fast=5.0, rssi_tau_slow=60.0, rssi_step_db=4.0,
     rssi_min_age_us=10_000_000,
+    rssi_still_us=10_000_000,            # ...and the verdict still this long (a person steps it too)
     glitch_shape=0.4,                    # ignore packets whose shape jumps this far...
     glitch_hold_us=5_000_000,            # ...unless the new shape lasts this long
     tau_ref=1.0,                         # shape reference average (s)
@@ -209,8 +210,10 @@ class MotionDetector:
         self.phase, self.why, self.cal_event = 'wait', why, True
         self.collect_from = self.next_sample = self.next_floor = now_us + delay_us
         self.ring = []                   # oldest first, at most RING
+        self.floor_prev = self.floor if why == 'rssi' else 0.0   # caps the next first floor
         self.floor = 0.0
         self.floor0 = 0.0
+        self.still_since = now_us        # the step check waits rssi_still again
         for s in self.streams.values():  # current RSSI is the new normal
             s.rssi_s, s.rssi_t0 = s.rssi_f, now_us
 
@@ -285,12 +288,15 @@ class MotionDetector:
             a_sl = max(_alpha(dt, c['rssi_tau_slow']), inv_n)
             if ts - s.rssi_t0 < c['rssi_min_age_us']:
                 a_sl = a_f                   # settle at the current level first
+            elif self.motion:
+                a_sl = 0.0                   # a person moving isn't the new normal
             s.rssi_f += a_f * (d['rssi'] - s.rssi_f)
             s.rssi_s += a_sl * (d['rssi'] - s.rssi_s)
         s.n += 1
         s.t_last = ts
         s.score_s = s.score_l = None
         if (not self.external and d['src'] < MAX_APS and ts - s.rssi_t0 >= c['rssi_min_age_us']
+                and not self.motion and ts - self.still_since >= c['rssi_still_us']
                 and abs(s.rssi_f - s.rssi_s) > c['rssi_step_db']):
             self.recalibrate(ts, 0, 'rssi')
         if s.n < c['min_pkts'] or (ts - s.t_start) * 1e-6 < c['warm_s']:
@@ -306,8 +312,8 @@ class MotionDetector:
             s = self.streams.get(key)
             if s is None or s.n == 0:
                 return False
-            return (now_us - s.t_last <= stale
-                    or (now_us - s.t_heard <= stale and now_us < s.scan_until))
+            return (now_us - s.t_last <= stale     # still heard: ignored ones count (scan, glitch lockout)
+                    or now_us - s.t_heard <= stale)
         # As on the board: APs decide, and an AP's own frames only while it
         # has no live ACK stream (they're sparse mixed traffic)
         live = [s for (src, k), s in self.streams.items()
@@ -342,6 +348,8 @@ class MotionDetector:
             nxt = 'track' if n == RING else 'fast'
             if self.phase == 'collect':
                 self.floor0 = min(max(q, c['floor_lo']), c['floor_hi'])
+                if self.floor_prev > 0 and self.floor0 > self.floor_prev * c['fast_rise_max']:
+                    self.floor0 = q = self.floor_prev * c['fast_rise_max']   # someone was still there
             else:                            # someone moving right after calibrating
                 q = min(q, self.floor0 * c['fast_rise_max'])
             if self.phase == 'collect':      # first floor: restart the long window
@@ -377,6 +385,8 @@ class MotionDetector:
         m = self.m_short or self.m_long
         change = 0 if m == self.motion else (1 if m else -1)
         self.motion = m
+        if change < 0:
+            self.still_since = now_us
         return change
 
     def take_cal_event(self):

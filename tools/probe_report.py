@@ -23,11 +23,14 @@ MAX_NODES = 8                         # keep in sync with main/csi_core.h
 
 
 def poke_ta(me, node):
-    """Made-up poke sender for `node`; mirrors poke_ta() in csi_core.h."""
+    """Made-up poke sender for `node`; mirrors poke_ta() in csi_core.h:
+    local bit flipped, unicast, 2nd byte kept, last 4 bytes FNV-1a(MAC, node)."""
     b = [int(x, 16) for x in me.split(':')]
-    b[0] = (b[0] ^ 0x02) & 0xFE
-    b[5] = (b[5] + node) & 0xFF
-    return ':'.join(f'{x:02x}' for x in b)
+    h = 2166136261
+    for x in b + [node & 0xFF]:
+        h = ((h ^ x) * 16777619) & 0xFFFFFFFF
+    out = [(b[0] ^ 0x02) & 0xFE, b[1], h >> 24, (h >> 16) & 0xFF, (h >> 8) & 0xFF, h & 0xFF]
+    return ':'.join(f'{x:02x}' for x in out)
 
 
 def our_addrs(me):

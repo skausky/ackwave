@@ -90,6 +90,7 @@ def schedule(t_end):
 
 # Scenario steps: ('still', s) | ('motion', s) | ('hop',) |
 # ('relocate', rssi_change_db, noise_factor): the board is moved (new multipath) |
+# ('rssi', db): the level steps but the room doesn't change (someone in the path) |
 # ('glitch', s): the router briefly switches to a very different channel shape
 # and snaps back (seen on a real ISP gateway every ~20 min); not motion |
 # ('scan', s): router 0 scans other channels (router 1 carries on): no packets
@@ -184,6 +185,8 @@ def generate(seed=0, scenario=DEFAULT):
                 links, scales = new_links()      # new frequency = new response
                 board.on_channel(int(t * 1e6))
                 yield f"CHANNEL,{int(t * 1e6)},{ch},csa", 'channel', None, t
+            elif st[0] == 'rssi':                # a body in the path: level only, same room
+                rssi_off += st[1]
             elif st[0] == 'relocate':
                 links, scales = new_links()      # new spot = new multipath
                 rssi_off += st[1]

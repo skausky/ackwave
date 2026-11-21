@@ -687,21 +687,33 @@ static inline void build_null_frame(uint8_t out[NULL_FRAME_LEN],
     memcpy(out + 16, bssid, 6);
 }
 
-// Made-up poke TA for node n, derived from our MAC so nearby boards differ:
-// locally-administered bit flipped (so it never equals `me`), unicast,
-// node index added to the last byte.
-static inline void poke_ta(const uint8_t me[6], int node, uint8_t out[6]) {
-    memcpy(out, me, 6);
-    out[0] = (uint8_t)((me[0] ^ 0x02) & 0xFE);
-    out[5] = (uint8_t)(me[5] + node);
+// Made-up poke TA for node n, derived from our MAC: locally-administered bit
+// flipped (so it never equals `me` or a real device), unicast, the 2nd byte
+// kept, and the last 4 bytes a hash (FNV-1a) of our whole MAC and n. A hash,
+// not "MAC + n": boards from one batch are often a few MACs apart and would
+// share each other's addresses (one board's ACKs counted as another's).
+static inline uint32_t poke_hash(const uint8_t me[6], int node) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 6; i++) { h ^= me[i]; h *= 16777619u; }
+    h ^= (uint8_t)node; h *= 16777619u;
+    return h;
 }
-// Node index whose poke TA is `dmac`, or -1
+static inline void poke_ta(const uint8_t me[6], int node, uint8_t out[6]) {
+    uint32_t h = poke_hash(me, node);
+    out[0] = (uint8_t)((me[0] ^ 0x02) & 0xFE);
+    out[1] = me[1];
+    out[2] = (uint8_t)(h >> 24); out[3] = (uint8_t)(h >> 16);
+    out[4] = (uint8_t)(h >> 8);  out[5] = (uint8_t)h;
+}
+// Node index whose poke TA is `dmac`, or -1 (the report's REPORT_NODE isn't a node)
 static inline int poke_ta_node(const uint8_t me[6], const uint8_t *dmac) {
-    uint8_t base[6];
-    poke_ta(me, 0, base);
-    if (!dmac || memcmp(dmac, base, 5) != 0) return -1;
-    int n = (uint8_t)(dmac[5] - base[5]);
-    return n < MAX_NODES ? n : -1;
+    if (!dmac || dmac[0] != (uint8_t)((me[0] ^ 0x02) & 0xFE) || dmac[1] != me[1]) return -1;
+    for (int n = 0; n < MAX_NODES; n++) {
+        uint8_t ta[6];
+        poke_ta(me, n, ta);
+        if (memcmp(ta + 2, dmac + 2, 4) == 0) return n;
+    }
+    return -1;
 }
 
 // ---------- Other ackwave boards ("peers") ----------
@@ -946,6 +958,18 @@ static inline bool hub_result(hub_link_t *h, bool acked, int max_ch) {
 // whose seal opened (the counters are checked by the tag).
 static inline bool replay_newer(uint32_t boot, uint32_t seq, uint32_t last_boot, uint32_t last_seq) {
     return boot > last_boot || (boot == last_boot && seq > last_seq);
+}
+
+// What the hub saves of a board's counter: its boot and its seq rounded down
+// to REPLAY_SAVE_EVERY. After a hub restart, a recording of the board's
+// current boot is refused unless it is newer than that mark (at most
+// REPLAY_SAVE_EVERY reports, ~8 min at 2/s); its live reports are always
+// newer. Saved when a board restarts or its seq passes the next mark, so
+// about one write per board every 8 minutes (wear is no concern).
+#define REPLAY_SAVE_EVERY 1024u
+static inline uint32_t replay_mark(uint32_t seq) { return seq & ~(REPLAY_SAVE_EVERY - 1u); }
+static inline bool replay_save_due(uint32_t last_boot, uint32_t last_seq, uint32_t boot, uint32_t seq) {
+    return boot != last_boot || replay_mark(seq) != replay_mark(last_seq);
 }
 
 // ---------- Keys (from the PC, over USB) ----------
@@ -1271,12 +1295,15 @@ static inline int next_poke_target(const node_table_t *t, const int *node_ch,
 }
 
 // ---------- CSI packet + serial line format ----------
+#ifndef CSI_PKT_BUF
+#define CSI_PKT_BUF CSI_MAX_LEN   // the board keeps only what it sends (main.c: 128)
+#endif
 typedef struct {
     int64_t  ts;
     uint8_t  src, kind, ch, sig_mode, cwb;
     int8_t   rssi;
     uint16_t len;
-    int8_t   buf[CSI_MAX_LEN];
+    int8_t   buf[CSI_PKT_BUF];
 } csi_pkt_t;
 
 // Base64 (standard alphabet, '=' padding). Returns chars written (excluding
@@ -1453,6 +1480,8 @@ typedef struct {
     float   rssi_tau_fast, rssi_tau_slow;   // s
     float   rssi_step_db;           // lasting RSSI change that means "board moved"
     int64_t rssi_min_age_us;        // stream must be tracked this long first
+    int64_t rssi_still_us;          // ...and the verdict still this long: a person in the
+                                    // path steps the level too, and leaves again
     float   glitch_shape;           // a packet whose shape differs from the recent
                                     // ones by more than this is ignored...
     int64_t glitch_hold_us;         // ...unless the new shape lasts this long
@@ -1481,7 +1510,7 @@ static inline void md_cfg_default(md_cfg_t *c) {
     c->fast_rise_max = 1.5f;
     c->floor_lo = 0.005f;   c->floor_hi = 0.2f;
     c->rssi_tau_fast = 5.0f; c->rssi_tau_slow = 60.0f;
-    c->rssi_step_db = 4.0f;  c->rssi_min_age_us = 10000000;
+    c->rssi_step_db = 4.0f;  c->rssi_min_age_us = 10000000;  c->rssi_still_us = 10000000;
     c->glitch_shape = 0.4f;  c->glitch_hold_us = 5000000;  c->tau_ref = 1.0f;
     c->scan_shape = 0.2f;    c->scan_gap_us = 100000;  c->scan_gap_ratio = 4.0f;
     c->scan_hold_us = 2000000;
@@ -1524,6 +1553,8 @@ typedef struct {
     int      ring_n, ring_i;
     float    floor;                         // 0 = not known yet
     float    floor0;                        // first floor after (re)calibrating
+    float    floor_prev;                    // the floor before an RSSI recalibration (0: none)
+    int64_t  still_since;                   // when the verdict last turned still
     float    ring[MD_RING], scratch[MD_RING];
 } motion_det_t;
 
@@ -1536,7 +1567,11 @@ static inline void md_recalibrate(motion_det_t *d, int64_t now_us, int64_t delay
     d->next_sample = d->collect_from;
     d->next_floor = d->collect_from;
     d->ring_n = d->ring_i = 0;
+    // An RSSI recalibration may still have someone nearby: its first floor
+    // may not rise above fast_rise_max x the one before (see md_floor_step)
+    d->floor_prev = why == MD_WHY_RSSI ? d->floor : 0;
     d->floor = 0;
+    d->still_since = now_us;                        // the step check waits rssi_still again
     for (int i = 0; i < MAX_STREAMS; i++) {         // RSSI: current level is the new normal
         d->s[i].rssi_s = d->s[i].rssi_f;
         d->s[i].rssi_t0 = now_us;
@@ -1667,6 +1702,7 @@ static inline float md_update(motion_det_t *d, int node, int kind, int64_t ts, i
         float a_sl = md_alpha(dt, c->rssi_tau_slow);
         if (a_sl < inv_n) a_sl = inv_n;
         if (ts - s->rssi_t0 < c->rssi_min_age_us) a_sl = a_f;
+        else if (d->motion) a_sl = 0;        // a person moving isn't the new normal
         s->rssi_f += a_f * ((float)rssi - s->rssi_f);
         s->rssi_s += a_sl * ((float)rssi - s->rssi_s);
     }
@@ -1676,8 +1712,12 @@ static inline float md_update(motion_det_t *d, int node, int kind, int64_t ts, i
 
     // A lasting RSSI step means the board (or the AP) was moved: recalibrate.
     // AP links only: a device slot's level also steps when the slot is given
-    // to another device, or the device itself is carried around
-    if (node < MAX_APS && ts - s->rssi_t0 >= c->rssi_min_age_us &&
+    // to another device, or the device itself is carried around. Only once
+    // the verdict has been still rssi_still: a person moving near the board
+    // steps the level too (6 of 7 such recalibrations in one session came
+    // mid-motion), and the board being moved is itself motion first.
+    if (node < MAX_APS && ts - s->rssi_t0 >= c->rssi_min_age_us && !d->motion &&
+        ts - d->still_since >= c->rssi_still_us &&
         fabsf(s->rssi_f - s->rssi_s) > c->rssi_step_db)
         md_recalibrate(d, ts, 0, MD_WHY_RSSI);
 
@@ -1702,6 +1742,11 @@ static inline bool md_live(const md_stream_t *s, int64_t now_us, int64_t stale) 
 static inline bool md_scanning(const md_stream_t *s, int64_t now_us, int64_t stale) {
     return s->n && now_us - s->t_heard <= stale && now_us < s->scan_until;
 }
+// Still heard: ACKs keep arriving, even if ignored (a scan, or a glitch
+// lockout of up to glitch_hold). The router's own frames stay out meanwhile.
+static inline bool md_heard(const md_stream_t *s, int64_t now_us, int64_t stale) {
+    return s->n && now_us - s->t_heard <= stale;
+}
 static inline void md_max_scores(const motion_det_t *d, int64_t now_us,
                                  float *short_out, float *long_out) {
     float bs = -1, bl = -1;
@@ -1710,7 +1755,7 @@ static inline void md_max_scores(const motion_det_t *d, int64_t now_us,
         const md_stream_t *s = &d->s[i];
         if (!md_live(s, now_us, stale) || s->score_s < 0) continue;
         if (i % 2 == CSI_KIND_AP && (md_live(&d->s[i + 1], now_us, stale) ||
-                                     md_scanning(&d->s[i + 1], now_us, stale))) continue;
+                                     md_heard(&d->s[i + 1], now_us, stale))) continue;
         if (s->score_s > bs) bs = s->score_s;
         if (s->score_l > bl) bl = s->score_l;
     }
@@ -1756,7 +1801,11 @@ static inline void md_floor_step(motion_det_t *d, int64_t ts, float score_short)
         if (q > cap) q = cap;
     } else {
         int next = d->ring_n == MD_RING ? MD_CAL_TRACK : MD_CAL_FAST;
-        if (d->phase == MD_CAL_COLLECT) d->floor0 = md_clampf(q, c->floor_lo, c->floor_hi);
+        if (d->phase == MD_CAL_COLLECT) {
+            d->floor0 = md_clampf(q, c->floor_lo, c->floor_hi);
+            if (d->floor_prev > 0 && d->floor0 > d->floor_prev * c->fast_rise_max)
+                d->floor0 = q = d->floor_prev * c->fast_rise_max;   // someone was still there
+        }
         else if (q > d->floor0 * c->fast_rise_max) q = d->floor0 * c->fast_rise_max;
         if (d->phase == MD_CAL_COLLECT)          // first floor: the long window's
             for (int i = 0; i < MAX_STREAMS; i++) { // memory predates the scale, restart it
@@ -1789,6 +1838,7 @@ static inline int md_eval(motion_det_t *d, int64_t now_us) {
     bool m = d->m_short || d->m_long;
     int change = m == d->motion ? 0 : (m ? +1 : -1);
     d->motion = m;
+    if (change < 0) d->still_since = now_us;
     return change;
 }
 

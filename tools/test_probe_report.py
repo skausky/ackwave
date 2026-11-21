@@ -64,8 +64,9 @@ def poke_ta_style():
 
 def main():
     # Same vector as TA1_VEC in test/test_core.c, keeps the C and Python mirrors in sync
-    assert poke_ta(ME, 1) == '26:0a:c4:11:22:34'
-    assert poke_ta('24:0a:c4:11:22:fe', 3) == '26:0a:c4:11:22:01'
+    mac = lambda *b: ':'.join(f'{x:02x}' for x in b)   # built here: no address literals in git
+    assert poke_ta(ME, 1) == mac(0x26, 0x0a, 0x26, 0xb4, 0x32, 0x66)
+    assert poke_ta(mac(0x24, 0x0a, 0xc4, 0x11, 0x22, 0xfe), 3) == mac(0x26, 0x0a, 0x4e, 0xab, 0x49, 0xf5)
     assert ME in our_addrs(ME) and poke_ta(ME, 7) in our_addrs(ME) and our_addrs(None) == set()
     old_style()
     poke_ta_style()

@@ -240,9 +240,24 @@ def test_board_moved():
     rssi = [ts / 1e6 for ts, p, w in py['calib']               # recalibration starts
             if w == 'rssi' and p in ('wait', 'collect')]
     print(f"board moved at 20 s (RSSI -8 dB): recalibrated at {rssi}")
-    assert len(rssi) == 1 and 20 < rssi[0] < 28, "RSSI step didn't trigger one recalibration"
+    # moving the board is motion itself: the step counts 10 s after it settles
+    assert len(rssi) == 1 and 20 < rssi[0] < 40, "RSSI step didn't trigger one recalibration"
     check_motion_found('moved', py, meta, allow=[(20, rssi[0] + 0.5)])
     check_c_agrees('moved', py, lines)
+
+
+def test_person_in_path():
+    """Someone moving near the board drops the router's level 8 dB while they
+    move, and it comes back when they leave: never a recalibration (it used to
+    end the motion and learn a floor with them there)."""
+    steps = [('still', 25), ('rssi', -8), ('motion', 20), ('rssi', 8), ('still', 25)]
+    meta, lines, py = scenario('in-path', steps)
+    rssi = [ts / 1e6 for ts, p, w in py['calib'] if w == 'rssi']
+    got = motion_times(py['states'])
+    print(f"person in the path 25-45 s (RSSI -8 dB): recalibrations {rssi}, motion {[(round(a), round(b)) for a, b in got]}")
+    assert not rssi, "recalibrated on a person's RSSI dip"
+    assert any(a < 30 and b > 43 for a, b in got), "the motion wasn't held for its whole length"
+    check_c_agrees('in-path', py, lines)
 
 
 def test_router_glitch():
@@ -386,6 +401,7 @@ def main():
     test_default()
     test_motion_while_calibrating()
     test_board_moved()
+    test_person_in_path()
     test_router_glitch()
     test_router_scan()
     test_noisier_room()

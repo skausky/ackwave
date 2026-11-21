@@ -18,6 +18,7 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/sha256.h"
 #include "freertos/semphr.h"
+#define CSI_PKT_BUF 128          // = CSI_OUT_LEN: the queue holds only what is sent
 #include "csi_core.h"
 
 // The network to watch is chosen at run time (`./csi network`: SCAN, then
@@ -77,6 +78,7 @@
 #define POLL_MS        50
 #define ACK_WIN_US     10000     // sanity bound only: ACKs are matched by dmac
 #define CSI_OUT_LEN    128       // bytes sent per packet: LLTF only (all we use)
+_Static_assert(CSI_OUT_LEN <= CSI_PKT_BUF, "the CSI queue must hold what is sent");
 #define STATS_MS       5000
 #define CALIB_EVERY_US 5000000   // CALIB line period (also sent on every change)
 #ifndef BUZZER_HZ
@@ -161,13 +163,14 @@ static void key_apply(const uint8_t *k) {
     xSemaphoreGive(key_lock);
 }
 
-// The boards' keys and their newest boots are saved together ("pkeys"), so
-// after a restart the hub still refuses recordings of an earlier boot.
-// Written when a key changes or a board restarts, never per report.
+// The boards' keys and their newest counters are saved together ("pkeys"),
+// so after a restart the hub still refuses recordings: of an earlier boot,
+// and of the current one older than the saved mark (replay_mark). Written
+// when a key changes, a board restarts or its seq passes a mark (~8 min).
 static void pkeys_save(void) {             // with key_lock held
     static peer_keys_t t;
     t = pkeys;
-    for (int i = 0; i < MAX_PEERS; i++) t.k[i].seq = 0;
+    for (int i = 0; i < MAX_PEERS; i++) t.k[i].seq = replay_mark(t.k[i].seq);
     nvs_put("pkeys", &t, sizeof t);
     memset(&t, 0, sizeof t);
 }
@@ -226,8 +229,10 @@ static uint8_t my_mac[6];
 static volatile uint32_t cal_request;   // set by the button, consumed by print_task
 static bool btn_ok;                      // button pin configured
 
-// Shared with the Wi-Fi task. All 32-bit, and every task that touches them is
-// pinned to the Wi-Fi core, so reads/writes are atomic and ordered.
+// Shared with the Wi-Fi task. All 32-bit, and every task that writes them is
+// pinned to the Wi-Fi core, so reads/writes are atomic and ordered. print_task
+// (unpinned: the CSI maths would crowd the Wi-Fi core) only reads them, as
+// single aligned 32-bit loads, or goes through seen_mux.
 static volatile int      cur_ch = 1;
 static volatile uint32_t ch_epoch = 0;       // bumps on every channel change
 static volatile uint32_t last_seen_ms = 0;
@@ -1124,7 +1129,8 @@ static void run_cmd(const char *line) {
         } else {
             printf("APS,error,not-saved\n");
         }
-    } else if (parse_use(line, name) > 0 || strncmp(line, "USE_DEFAULT", 11) == 0) {
+    } else if (parse_use(line, name) > 0 || (strncmp(line, "USE_DEFAULT", 11) == 0 &&
+                                             strchr("\r\n", line[11]))) {   // exactly (strchr finds the 0 too)
         bool dflt = line[3] == '_';
         if (ssid_save(dflt ? NULL : name)) {
             printf("NETWORK,saved,%s\n", dflt ? MY_SSID : name);
@@ -1311,10 +1317,10 @@ static void control_task(void *arg) {
             bool ok = ki >= 0 && hello_open(sr.f, sr.len, aes_block, &peer_ctx[ki], &rp, &rx);
             bool fresh = ok && replay_newer(hh.boot, hh.seq, pkeys.k[ki].boot, pkeys.k[ki].seq);
             if (fresh) {
-                bool rebooted = hh.boot != pkeys.k[ki].boot;
+                bool save = replay_save_due(pkeys.k[ki].boot, pkeys.k[ki].seq, hh.boot, hh.seq);
                 pkeys.k[ki].boot = hh.boot;
                 pkeys.k[ki].seq = hh.seq;
-                if (rebooted) pkeys_save();
+                if (save) pkeys_save();
             }
             xSemaphoreGive(key_lock);
             if (ki >= 0 && !ok) n_badseal++;
@@ -1655,7 +1661,7 @@ void app_main(void) {
 #endif
 
     // Queues + printers must exist before CSI is enabled
-    q = xQueueCreate(32, sizeof(csi_pkt_t));
+    q = xQueueCreate(64, sizeof(csi_pkt_t));         // 64 x ~150 B: deeper, less RAM than 32 x 400
     configASSERT(q);
     sat_q = xQueueCreate(16, sizeof(sat_rx_t));      // NULL: no SAT lines, sensing goes on
     xTaskCreate(print_task, "csi_print", 4096, NULL, 5, NULL);
