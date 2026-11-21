@@ -345,10 +345,11 @@ def house_layout():
     return dict(unit='m', env='home', nodes=nodes)
 
 
-def house_person(t):
+def house_person(t, route=None):
     """Where the person is at t s: walking the route, pausing at each stop."""
+    route = route or HOUSE_ROUTE
     legs = []
-    for a, b in zip(HOUSE_ROUTE, HOUSE_ROUTE[1:]):
+    for a, b in zip(route, route[1:]):
         legs.append((a, b, math.dist(a, b) / HOUSE_SPEED))
     loop = sum(d + HOUSE_PAUSE for _a, _b, d in legs)
     t %= loop
@@ -360,7 +361,22 @@ def house_person(t):
             f = t / d
             return (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f), True
         t -= d
-    return HOUSE_ROUTE[0], False
+    return route[0], False
+
+
+# A second person, in the house for part of each loop (to show two at once)
+HOUSE_ROUTE2 = [(12.0, -2.0), (11.5, 4.0), (4.0, 2.0), (12.0, -2.0)]
+HOUSE_PERSON2 = (70.0, 150.0)            # seconds of each HOUSE_LOOP they are home
+HOUSE_LOOP = 240.0
+
+
+def house_person2(t):
+    """(where, walking) of the second person, or None while they are out."""
+    a, b = HOUSE_PERSON2
+    tt = t % HOUSE_LOOP
+    if not a <= tt < b:
+        return None
+    return house_person(tt - a + 3.0, HOUSE_ROUTE2)
 
 
 def house_sens(p, a, b):
@@ -389,7 +405,9 @@ def house_lines(duration=240.0, seed=0):
     states, t = [], 0.0
     while t < duration:
         p, walking = house_person(t)
-        on = walking and max(house_sens(p, (0.0, 0.0), e) for e in hub_links) > 0.3
+        p2 = house_person2(t)
+        on = (walking and max(house_sens(p, (0.0, 0.0), e) for e in hub_links) > 0.3) or \
+            (p2 is not None and p2[1] and max(house_sens(p2[0], (0.0, 0.0), e) for e in hub_links) > 0.3)
         states.append('motion' if on else 'still')
         t += step
     scenario, run = [], 1
@@ -409,12 +427,16 @@ def house_lines(duration=240.0, seed=0):
             p, walking = house_person(t)
             seq += 1
             yield t, f"DEMO,person,{p[0]:.2f},{p[1]:.2f},{1 if walking else 0}"   # the truth, for the Map (demo only)
+            p2 = house_person2(t)
+            yield t, (f"DEMO,person2,{p2[0][0]:.2f},{p2[0][1]:.2f},{1 if p2[1] else 0}" if p2 else "DEMO,person2,out")
             for mac, _name, pos, ends, joins in HOUSE_SATS:
                 if t < joins:
                     continue
                 links, any_mv = [], False
                 for e in ends:
                     v = house_sens(p, pos, house_end(e)) if walking else 0.0
+                    if p2 is not None and p2[1]:     # the second person adds their own change
+                        v = min(1.0, v + house_sens(p2[0], pos, house_end(e)))
                     mv = v > 0.3
                     any_mv |= mv
                     k = 1.0 + 4.5 * v + rng.uniform(-0.15, 0.15)   # in proportion, as a real link reacts

@@ -40,7 +40,7 @@ window.AckMap = (() => {
   let homeView = null;                      // Home's view: fitted once, then yours (this visit)
   let radio = [], channel = 6, boardMotion = false, hubAct = null;   // hubAct: the hub's activity, 1 = its threshold
   let others = [];                          // the other boards (slow.map_boards): each a point with its router
-  let demoPerson = null;                    // demo only: the simulated person's real spot
+  let demoPeople = [];                      // demo only: the simulated people's real spots
   let hearings = {};                        // slow.hearings: target key -> [[observer key, dBm]]
   const heardAvg = new Map();               // 'target|observer' -> smoothed dBm
   let locAt = 0;
@@ -411,7 +411,7 @@ window.AckMap = (() => {
   // differently put the person on the stronger one's side; quiet links rule
   // out their zones. A Bayes filter carries it over time (a person moves
   // ~1 m/s), so the estimate tracks and doesn't flicker.
-  const track = { grid: null, post: null, est: null, trail: [], base: new Map(), at: 0, img: document.createElement('canvas') };
+  const track = { grid: null, people: [], nextId: 0, est: null, base: new Map(), at: 0 };
   const CELL = 0.25;
   const SIG0 = 0.45, SIG1 = 0.25, MODEL_ERR = 1.2;          // a link's scatter: idle noise, plus more the stronger it reacts
   let heatKey = '', heatView = null, viewSeen = '', viewMovedAt = 0;
@@ -758,9 +758,9 @@ window.AckMap = (() => {
       ctx.restore();
     }
     particles(L, t, motionC);
-    drawTrack(t, motionC);
-    if (demoPerson) {                              // demo: the truth, to see how close the estimate is
-      const x = X(demoPerson.x), y = Y(demoPerson.y);
+    drawTrack(t);
+    for (const dp of demoPeople) {                 // demo: the truth, to see how close the estimates are
+      const x = X(dp.x), y = Y(dp.y);
       ctx.save(); ctx.strokeStyle = css('--fg'); ctx.globalAlpha = 0.8; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.moveTo(x - 4, y); ctx.lineTo(x + 4, y); ctx.moveTo(x, y - 4); ctx.lineTo(x, y + 4); ctx.stroke();
       ctx.restore();
@@ -839,6 +839,16 @@ window.AckMap = (() => {
     track.base.set(r.key, b);
     return Math.max(0, st - b) / Math.max(0.3, 1 - b);
   }
+  // One step (2 a second): find the people, then carry each one's track on.
+  //  1. every link's sensitivity on the grid, once
+  //  2. person 1: the spot (and how much they move) that best explains every
+  //     link's excess activity; take what they explain away from each link
+  //  3. what is left: is another person there? Only if one explains the rest
+  //     clearly better than noise would (MULTI_GAIN), up to three
+  //  4. each found person joins the nearest track (a Bayes filter each: last
+  //     estimate spread by how far a person walks meanwhile, times now), or starts one
+  const MAX_PEOPLE = 3, MULTI_GAIN = 4, MULTI_LEFT = 1.5, MULTI_SEP = 2.5, KEEP_MS = 2500;
+  const PERSON_C = ['--motion', '--warn', '#b48cff'];
   function stepTrack(t) {
     if (t - track.at < 500) return;
     const dt = Math.min(5, (t - track.at) / 1000);
@@ -846,84 +856,136 @@ window.AckMap = (() => {
     const L = links().filter(({ d, r }) => d >= 0.3 && !weak(r) && judged(r));
     const obs = L.map(({ a, n, r }) => ({ a: excess(r, t), ends: endSamples(a, n) })).filter((o) => o.a !== null);
     track.baseAt = t;
-    const active = obs.some((o) => o.a >= 0.6);
-    if (obs.length < 2 || !active) {             // nothing moving: let it fade
-      if (track.est) { track.est = null; track.post = null; dirty = true; }
-      return;
-    }
-    // the grid: everything that matters, 2 m around
+    const active = obs.length >= 2 && obs.some((o) => o.a >= 0.6);
+    // tracks not seen lately end
+    track.people = track.people.filter((p) => t - p.seen < KEEP_MS);
+    if (!active) { if (track.people.length) dirty = true; track.est = track.people[0] ? track.people[0].est : null; return; }
     let x0 = 0, x1 = 0, y0 = 0, y1 = 0;
     for (const o of obs) for (const [a, n] of o.ends) for (const m of [a, n]) {
       x0 = Math.min(x0, m.x); x1 = Math.max(x1, m.x); y0 = Math.min(y0, m.y); y1 = Math.max(y1, m.y);
     }
     x0 = Math.floor(x0 - 2); y0 = Math.floor(y0 - 2); x1 = Math.ceil(x1 + 2); y1 = Math.ceil(y1 + 2);
     let cs = CELL, gw = Math.ceil((x1 - x0) / cs), gh = Math.ceil((y1 - y0) / cs);
-    while (gw * gh > 16000) { cs *= 1.5; gw = Math.ceil((x1 - x0) / cs); gh = Math.ceil((y1 - y0) / cs); }
+    while (gw * gh > 12000) { cs *= 1.5; gw = Math.ceil((x1 - x0) / cs); gh = Math.ceil((y1 - y0) / cs); }
     const g = track.grid, same = g && g.x0 === x0 && g.y0 === y0 && g.gw === gw && g.gh === gh;
-    if (!same) { track.grid = { x0, y0, gw, gh, cs }; track.post = null; }
-    const lam = lambda(), lik = new Float32Array(gw * gh);
-    const w = obs.map((o) => 1 / (SIG0 + SIG1 * o.a) ** 2);
-    const G0 = 1.2, WG = 1 / 1.5 ** 2;              // the movement prior: about 1.2, loosely
-    let Rmin = Infinity;
+    if (!same) { track.grid = { x0, y0, gw, gh, cs }; for (const p of track.people) p.post = null; }
+    const N = gw * gh, lam = lambda(), K = obs.length;
+    const S = obs.map(() => new Float32Array(N));          // 1. sensitivities
     for (let j = 0; j < gh; j++) {
       const wy = y0 + (j + 0.5) * cs;
       for (let i = 0; i < gw; i++) {
-        const wx = x0 + (i + 0.5) * cs;
-        const sv = obs.map((o) => {
+        const wx = x0 + (i + 0.5) * cs, c = j * gw + i;
+        obs.forEach((o, k) => {
           let v = 0;
           for (const [ea, en] of o.ends) v += sensitivity(wx, wy, ea, en, dist3(ea, en), lam);
-          return v / o.ends.length;
+          S[k][c] = v / o.ends.length;
         });
-        let num = G0 * WG, den = WG;
-        sv.forEach((v, k) => { num += w[k] * obs[k].a * v; den += w[k] * v * v; });
-        const gg = Math.max(0, num / den);
-        let R = (gg - G0) ** 2 * WG;
-        sv.forEach((v, k) => { R += w[k] * (obs[k].a - gg * v) ** 2; });
-        lik[j * gw + i] = R;
-        if (R < Rmin) Rmin = R;
       }
     }
-    // Bayes: the last estimate spread by how far a person walks meanwhile, times now
-    const prior = track.post ? blur(track.post, gw, gh, Math.max(1, Math.round(1.0 * dt / cs))) : null;
-    const post = new Float32Array(gw * gh);
-    let sum = 0;
-    for (let k = 0; k < post.length; k++) {
-      const l = Math.exp(-(lik[k] - Rmin) / 2);
-      post[k] = l * (prior ? 0.85 * prior[k] + 0.15 / post.length : 1);
-      sum += post[k];
+    const w = obs.map((o) => 1 / (SIG0 + SIG1 * o.a) ** 2);
+    const G0 = 1.2, WG = 1 / 1.5 ** 2;
+    // misfit of "one person at c" for these activities: [R per cell, g per cell]
+    const fitOne = (act) => {
+      const R = new Float32Array(N), Gc = new Float32Array(N);
+      for (let c = 0; c < N; c++) {
+        let num = G0 * WG, den = WG;
+        for (let k = 0; k < K; k++) { const v = S[k][c]; num += w[k] * act[k] * v; den += w[k] * v * v; }
+        const gg = Math.max(0, num / den);
+        let r = (gg - G0) ** 2 * WG;
+        for (let k = 0; k < K; k++) r += w[k] * (act[k] - gg * S[k][c]) ** 2;
+        R[c] = r; Gc[c] = gg;
+      }
+      return [R, Gc];
+    };
+    const misfit0 = (act) => act.reduce((sum, a, k) => sum + w[k] * a * a, 0);   // nobody there
+    let act = obs.map((o) => o.a);
+    const found = [];
+    for (let p = 0; p < MAX_PEOPLE; p++) {
+      if (!act.some((a) => a >= 0.6)) break;
+      const [R, Gc] = fitOne(act);
+      let best = 0;
+      for (let c = 1; c < N; c++) if (R[c] < R[best]) best = c;
+      // another person: some link still clearly moving that person 1 doesn't
+      // explain, and a second spot that explains it (not just noise)
+      if (p > 0 && (Math.max(...act) < MULTI_LEFT || misfit0(act) - R[best] < MULTI_GAIN)) break;
+      const bx = x0 + ((best % gw) + 0.5) * cs, by = y0 + (Math.floor(best / gw) + 0.5) * cs;
+      if (found.some((f) => Math.hypot(f.x - bx, f.y - by) < MULTI_SEP)) break;   // the same person's leftovers
+      found.push({ R, Rmin: R[best], x: bx, y: by });
+      act = act.map((a, k) => Math.max(0, a - Gc[best] * S[k][best]));
     }
-    // the estimate: the most likely spot (an average of two likely places
-    // would land between them, in neither), taken on a lightly smoothed copy
-    for (let k = 0; k < post.length; k++) post[k] /= sum;
+    // 4. tracks: the nearest free track within 3 m, else a new one
+    const used = new Set();
+    for (const f of found) {
+      let bi = -1, bd = 1e9;
+      // where this detection peaks
+      let pk = 0;
+      for (let c = 1; c < N; c++) if (f.R[c] < f.R[pk]) pk = c;
+      const px = x0 + ((pk % gw) + 0.5) * cs, py = y0 + (Math.floor(pk / gw) + 0.5) * cs;
+      track.people.forEach((tp, i) => {
+        if (used.has(i) || !tp.est) return;
+        const dd = Math.hypot(tp.est.x - px, tp.est.y - py);
+        if (dd < bd) { bd = dd; bi = i; }
+      });
+      // far from every track: a new person only if there are more people than tracks,
+      // else the nearest free track jumps (an estimate can leap a few metres)
+      if (bi < 0 || (bd > 3 && found.length > track.people.length)) {
+        if (track.people.length >= MAX_PEOPLE) continue;
+        track.people.push({ id: ++track.nextId, post: null, est: null, trail: [], seen: t, speed: 0, heading: null,
+          img: document.createElement('canvas') });
+        bi = track.people.length - 1;
+      }
+      used.add(bi);
+      updatePerson(track.people[bi], f, t, dt);
+    }
+    // tracks no detection matched this step: gone once not seen for a second
+    track.people = track.people.filter((tp, i) => used.has(i) || t - tp.seen < 1000);
+    track.people.sort((p1, p2) => p1.id - p2.id);
+    track.people.forEach((p, i) => { p.color = PERSON_C[i % PERSON_C.length]; });
+    track.est = track.people[0] ? track.people[0].est : null;
+    dirty = true;
+  }
+  function updatePerson(p, f, t, dt) {
+    const { x0, y0, gw, gh, cs } = track.grid, N = gw * gh;
+    const prior = p.post ? blur(p.post, gw, gh, Math.max(1, Math.round(1.0 * dt / cs))) : null;
+    const post = new Float32Array(N);
+    let sum = 0;
+    for (let c = 0; c < N; c++) {
+      post[c] = Math.exp(-(f.R[c] - f.Rmin) / 2) * (prior ? 0.85 * prior[c] + 0.15 / N : 1);
+      sum += post[c];
+    }
+    for (let c = 0; c < N; c++) post[c] /= sum;
     const sm = blur(post, gw, gh, Math.max(1, Math.round(0.5 / cs)));
-    let mx = 0, best = 0;
-    for (let k = 0; k < post.length; k++) if (sm[k] > sm[best]) best = k;
-    for (let k = 0; k < post.length; k++) if (post[k] > mx) mx = post[k];
+    let best = 0, mx = 0;
+    for (let c = 0; c < N; c++) { if (sm[c] > sm[best]) best = c; if (post[c] > mx) mx = post[c]; }
     const sx = x0 + ((best % gw) + 0.5) * cs, sy = y0 + (Math.floor(best / gw) + 0.5) * cs;
-    // the ring: the circle around the estimate holding 68% of the probability
     const byDist = [];
-    for (let k = 0; k < post.length; k++)
-      if (post[k] > 1e-7) byDist.push([Math.hypot(x0 + ((k % gw) + 0.5) * cs - sx, y0 + (Math.floor(k / gw) + 0.5) * cs - sy), post[k]]);
-    byDist.sort((p1, p2) => p1[0] - p2[0]);
+    for (let c = 0; c < N; c++)
+      if (post[c] > 1e-7) byDist.push([Math.hypot(x0 + ((c % gw) + 0.5) * cs - sx, y0 + (Math.floor(c / gw) + 0.5) * cs - sy), post[c]]);
+    byDist.sort((q1, q2) => q1[0] - q2[0]);
     let acc = 0, r68 = cs;
     for (const [dd, pp] of byDist) { acc += pp; r68 = dd; if (acc >= 0.68) break; }
-    track.post = post;
-    // plus the model's own error (walls, the zones' shape): measured ~1 m in the demo house
-    track.est = { x: sx, y: sy, r: Math.hypot(Math.max(cs, r68), MODEL_ERR) };
-    track.trail.push({ x: sx, y: sy, t });
-    while (track.trail.length && t - track.trail[0].t > 12000) track.trail.shift();
-    // its picture: the motion colour, opacity by probability
-    const c = track.img, rgb = rgbOf(css('--motion'));
+    p.post = post;
+    p.est = { x: sx, y: sy, r: Math.hypot(Math.max(cs, r68), MODEL_ERR) };
+    p.seen = t;
+    p.trail.push({ x: sx, y: sy, t });
+    while (p.trail.length && t - p.trail[0].t > 12000) p.trail.shift();
+    // speed and heading: over the last ~2 s of the track, smoothed
+    const back = p.trail.find((q) => t - q.t <= 2200);
+    if (back && t - back.t >= 900) {
+      const dx = sx - back.x, dy = sy - back.y, sp = Math.hypot(dx, dy) / ((t - back.t) / 1000);
+      p.speed = 0.6 * p.speed + 0.4 * Math.min(sp, 4);
+      if (Math.hypot(dx, dy) > 0.4) p.heading = Math.atan2(dy, dx);
+    }
+    const c = p.img, rgb = rgbOf(p.color && p.color.startsWith('--') ? css(p.color) : p.color || css('--motion'));
     c.width = gw; c.height = gh;
     const im = c.getContext('2d').createImageData(gw, gh);
-    for (let k = 0; k < post.length; k++) {
+    for (let k = 0; k < N; k++) {
       const q = post[k] / mx;
       if (q < 0.08) continue;
       im.data[4 * k] = rgb[0]; im.data[4 * k + 1] = rgb[1]; im.data[4 * k + 2] = rgb[2];
       im.data[4 * k + 3] = 235 * Math.min(1, q ** 0.8);
     }
     c.getContext('2d').putImageData(im, 0, 0);
-    dirty = true;
   }
   // a box blur, r cells, applied twice (close to a Gaussian)
   function blur(src, gw, gh, r) {
@@ -950,33 +1012,53 @@ window.AckMap = (() => {
     }
     return a;
   }
-  // The estimate: its probability haze, a fading trail of where it was, and
-  // a ring (about 1.5 sigma) with how sure, pulsing gently
-  function drawTrack(t, motionC) {
-    const g = track.grid, e = track.est;
-    if (!g || !e) return;
-    ctx.save();
-    ctx.imageSmoothingEnabled = true;
-    ctx.globalAlpha = 0.9;
-    ctx.drawImage(track.img, X(g.x0), Y(g.y0), g.gw * g.cs * M.view.s, g.gh * g.cs * M.view.s);
-    ctx.globalAlpha = 1;
-    const tr = track.trail;
-    for (let i = 1; i < tr.length; i++) {          // the trail: thin and faint to thick and bright
-      const age = (t - tr[i].t) / 12000;
-      ctx.strokeStyle = alpha(motionC, 0.7 * (1 - age)); ctx.lineWidth = 1 + 3 * (1 - age); ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(X(tr[i - 1].x), Y(tr[i - 1].y)); ctx.lineTo(X(tr[i].x), Y(tr[i].y)); ctx.stroke();
-    }
-    const x = X(e.x), y = Y(e.y), rr = Math.max(12, e.r * M.view.s);
-    const pulse = reduced.matches ? 0 : 0.5 + 0.5 * Math.sin(t / 300);
-    ctx.shadowColor = motionC; ctx.shadowBlur = 12 + 10 * pulse;
-    ctx.fillStyle = motionC;
-    ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = alpha(motionC, 0.85); ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
-    ctx.beginPath(); ctx.arc(x, y, rr, 0, Math.PI * 2); ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.restore();
-    label(x, y + rr + 4, 'someone here', `within about ${fmtLen(e.r)}`, motionC);
+  // Each person: their probability haze, a fading trail, a dot with a ring
+  // (68% + the model's error) and, once they move, an arrow for their heading;
+  // labelled with their speed. Several people: each in their own colour.
+  function drawTrack(t) {
+    const g = track.grid;
+    if (!g || !track.people.length) return;
+    const many = track.people.length > 1;
+    track.people.forEach((p, i) => {
+      const e = p.est;
+      if (!e) return;
+      const col = p.color.startsWith('--') ? css(p.color) : p.color;
+      const fade = Math.max(0, 1 - Math.max(0, t - p.seen - 800) / (KEEP_MS - 800));
+      ctx.save();
+      ctx.imageSmoothingEnabled = true;
+      ctx.globalAlpha = 0.9 * fade;
+      ctx.drawImage(p.img, X(g.x0), Y(g.y0), g.gw * g.cs * M.view.s, g.gh * g.cs * M.view.s);
+      ctx.globalAlpha = fade;
+      const tr = p.trail;
+      for (let k = 1; k < tr.length; k++) {
+        const age = (t - tr[k].t) / 12000;
+        ctx.strokeStyle = alpha(col, 0.7 * (1 - age)); ctx.lineWidth = 1 + 3 * (1 - age); ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(X(tr[k - 1].x), Y(tr[k - 1].y)); ctx.lineTo(X(tr[k].x), Y(tr[k].y)); ctx.stroke();
+      }
+      const x = X(e.x), y = Y(e.y), rr = Math.max(12, e.r * M.view.s);
+      const pulse = reduced.matches ? 0 : 0.5 + 0.5 * Math.sin(t / 300 + i);
+      ctx.shadowColor = col; ctx.shadowBlur = 12 + 10 * pulse;
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+      if (p.heading !== null && p.speed > 0.25) {     // heading: an arrow out of the dot
+        const a = p.heading, L2 = 14 + 10 * Math.min(1, p.speed);
+        ctx.strokeStyle = col; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x + 7 * Math.cos(a), y + 7 * Math.sin(a)); ctx.lineTo(x + L2 * Math.cos(a), y + L2 * Math.sin(a)); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x + (L2 + 5) * Math.cos(a), y + (L2 + 5) * Math.sin(a));
+        ctx.lineTo(x + L2 * Math.cos(a + 0.5) , y + L2 * Math.sin(a + 0.5));
+        ctx.lineTo(x + L2 * Math.cos(a - 0.5), y + L2 * Math.sin(a - 0.5));
+        ctx.closePath(); ctx.fill();
+      }
+      ctx.strokeStyle = alpha(col, 0.85); ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+      ctx.beginPath(); ctx.arc(x, y, rr, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+      const who = many ? `person ${i + 1}` : 'someone here';
+      const sp = p.speed > 0.25 ? ` · ${M.unit === 'ft' ? (p.speed / FT).toFixed(1) + ' ft/s' : p.speed.toFixed(1) + ' m/s'}` : ' · still-ish';
+      label(x, i % 2 ? y - rr - 34 : y + rr + 4, who, `within ${fmtLen(e.r)}${sp}`, col);   // alternate: below, above
+    });
   }
 
   // A walk: a glowing line through the boards in the order their motion
@@ -1542,7 +1624,7 @@ window.AckMap = (() => {
     },
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
-      if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPerson = slow.demo_person || null; if (slow.channel) channel = slow.channel; }
+      if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPeople = slow.demo_people || []; if (slow.channel) channel = slow.channel; }
       if (header) {
         boardMotion = hubMoving(header);
         hubAct = header.activity && header.activity.pct !== undefined ? header.activity.pct / 100 : null;
@@ -1577,9 +1659,11 @@ window.AckMap = (() => {
     focus: focusKey,
     showPath,
     _likely: () => track.est,
+    _people: () => track.people.map((p) => ({ id: p.id, est: p.est, speed: p.speed })),
     _screenOfWorld: (x, y) => [X(x), Y(y)],
     _view: () => ({ view: M.view, nodes: [...M.nodes.values()].map((n) => [n.key.slice(-5), +n.x.toFixed(1), +n.y.toFixed(1), !!n.placed, n.auto ? +n.auto.a.toFixed(1) : null]) }),
-    _truth: () => demoPerson,
+    _truth: () => demoPeople[0] || null,
+    _truths: () => demoPeople,
     fmtLen,                                    // for tests in the browser
     _env: () => ({ fit: envFit, hearings, nodes: [...M.nodes.values()].map(({ key, x, y, placed, board }) => ({ key, x, y, placed, board })) }),
     _layers: () => M.plans.map(({ img, ...p }) => p),

@@ -221,7 +221,7 @@ class Dashboard:
         self.event_id = 0
         self.started_wall = time.time()
         self.sat_links = {}              # other board -> {its link's far end: SatLink}
-        self.demo_person = None          # demo: where the simulated person really is
+        self.demo_people = {}            # demo: where the simulated people really are
         self.lost_since = None           # monotonic: when the hub's port went away (None: connected)
         self.surveys = {}                # other board -> {who it hears: {kind, rssi, at}}
         self.house_now = (False, [])     # (motion, the boards that count)
@@ -851,11 +851,14 @@ class Dashboard:
     # ---------- input ----------
     def feed(self, line):
         with self.lock:
-            if line.startswith('DEMO,person,'):         # the simulated person (demo only): the Map shows the truth
+            if line.startswith('DEMO,'):                # the simulated people (demo only): the Map shows the truth
                 if self.demo:
+                    f = line.strip().split(',')
                     try:
-                        _d, _p, x, y, w = line.strip().split(',')
-                        self.demo_person = dict(x=float(x), y=float(y), walking=w == '1')
+                        if len(f) == 5:
+                            self.demo_people[f[1][:16]] = dict(x=float(f[2]), y=float(f[3]), walking=f[4] == '1')
+                        elif len(f) == 3 and f[2] == 'out':
+                            self.demo_people.pop(f[1][:16], None)
                     except ValueError:
                         pass
                 return
@@ -1409,7 +1412,7 @@ class Dashboard:
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        routers=self._routers(), boards=self._boards(), house=self._house_slow(), tz=PC_TZ,
                        map_boards=self._map_boards(), hearings=self._hearings(),
-                       demo_person=self.demo_person if self.demo else None, events=list(self.events)[-80:],
+                       demo_people=list(self.demo_people.values()) if self.demo else None, events=list(self.events)[-80:],
                        board_settings=self._board_settings(), primary=self.primary or self.s.me,
                        pairing=self.pair.status(self.pair.me == self.cfg['hub'], self._hub_boards()),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),
