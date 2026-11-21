@@ -1445,6 +1445,8 @@ static inline int parse_csi_data(const char *p, int len, int8_t *buf) {
 #define MAX_STREAMS (MAX_NODES * 2)
 #define MD_TOP_K    8
 #define MD_RING     1200            // floor samples kept: 120 s at 10 Hz
+#define MD_QRING 64                 // per-link quiet samples (1 Hz)
+#define MD_QMIN  30                 // ...before its level counts
 
 // buf = CSI bytes as [imag, real] pairs; uses the first 64 subcarriers (LLTF)
 static inline bool lltf_amplitudes(const int8_t *buf, int len, float out[N_SC]) {
@@ -1528,6 +1530,13 @@ typedef struct {
     float    rssi_f, rssi_s;                // fast / slow RSSI averages
     float    lp[N_SC], hp[N_SC], es[N_SC], el[N_SC];
     float    ref[N_SC];                     // recent normalised shape (glitch check)
+    // Its own quiet level: the 10th percentile of its short score, sampled once
+    // a second (last MD_QRING s). With 2+ deciding links, each is scaled to the
+    // quietest one's level before the max (md_max_scores): a noisy link no
+    // longer sets everyone's floor.
+    float    qring[MD_QRING];
+    uint8_t  qn, qi;
+    float    q;                             // 0 = not known yet
 } md_stream_t;
 
 enum { MD_CAL_WAIT = 0, MD_CAL_COLLECT, MD_CAL_FAST, MD_CAL_TRACK };
@@ -1549,7 +1558,7 @@ typedef struct {
     // floor (auto-calibration)
     int      phase, why;
     bool     cal_event;                     // phase/floor source changed
-    int64_t  collect_from, next_sample, next_floor;
+    int64_t  collect_from, next_sample, next_floor, next_q;
     int      ring_n, ring_i;
     float    floor;                         // 0 = not known yet
     float    floor0;                        // first floor after (re)calibrating
@@ -1566,6 +1575,7 @@ static inline void md_recalibrate(motion_det_t *d, int64_t now_us, int64_t delay
     d->collect_from = now_us + delay_us;
     d->next_sample = d->collect_from;
     d->next_floor = d->collect_from;
+    d->next_q = d->collect_from;
     d->ring_n = d->ring_i = 0;
     // An RSSI recalibration may still have someone nearby: its first floor
     // may not rise above fast_rise_max x the one before (see md_floor_step)
@@ -1575,6 +1585,8 @@ static inline void md_recalibrate(motion_det_t *d, int64_t now_us, int64_t delay
     for (int i = 0; i < MAX_STREAMS; i++) {         // RSSI: current level is the new normal
         d->s[i].rssi_s = d->s[i].rssi_f;
         d->s[i].rssi_t0 = now_us;
+        d->s[i].qn = d->s[i].qi = 0;                // and each link's quiet level is relearned
+        d->s[i].q = 0;
     }
 }
 
@@ -1747,17 +1759,28 @@ static inline bool md_scanning(const md_stream_t *s, int64_t now_us, int64_t sta
 static inline bool md_heard(const md_stream_t *s, int64_t now_us, int64_t stale) {
     return s->n && now_us - s->t_heard <= stale;
 }
+static inline bool md_deciding(const motion_det_t *d, int i, int64_t now_us, int64_t stale) {
+    const md_stream_t *s = &d->s[i];
+    if (!md_live(s, now_us, stale) || s->score_s < 0) return false;
+    return !(i % 2 == CSI_KIND_AP && (md_live(&d->s[i + 1], now_us, stale) ||
+                                      md_heard(&d->s[i + 1], now_us, stale)));
+}
 static inline void md_max_scores(const motion_det_t *d, int64_t now_us,
                                  float *short_out, float *long_out) {
-    float bs = -1, bl = -1;
+    float bs = -1, bl = -1, qmin = 0;
     int64_t stale = (int64_t)(d->c.stale_s * 1e6f);
+    int ready = 0;
+    for (int i = 0; i < MAX_APS * 2; i++)           // the quietest deciding link's level
+        if (md_deciding(d, i, now_us, stale) && d->s[i].q > 0) {
+            if (!ready || d->s[i].q < qmin) qmin = d->s[i].q;
+            ready++;
+        }
     for (int i = 0; i < MAX_APS * 2; i++) {
+        if (!md_deciding(d, i, now_us, stale)) continue;
         const md_stream_t *s = &d->s[i];
-        if (!md_live(s, now_us, stale) || s->score_s < 0) continue;
-        if (i % 2 == CSI_KIND_AP && (md_live(&d->s[i + 1], now_us, stale) ||
-                                     md_heard(&d->s[i + 1], now_us, stale))) continue;
-        if (s->score_s > bs) bs = s->score_s;
-        if (s->score_l > bl) bl = s->score_l;
+        float k = ready >= 2 && s->q > 0 ? qmin / s->q : 1.0f;   // on the quietest link's scale
+        if (s->score_s * k > bs) bs = s->score_s * k;
+        if (s->score_l * k > bl) bl = s->score_l * k;
     }
     *short_out = bs;
     *long_out = bl;
@@ -1791,7 +1814,26 @@ static inline void md_floor_step(motion_det_t *d, int64_t ts, float score_short)
         if (d->ring_n < MD_RING) d->ring_n++;
         d->next_sample = ts + c->sample_us;
     }
-    if (ts < d->next_floor || d->ring_n < c->floor_min_n) return;
+    if (ts < d->next_floor) return;
+    if (ts >= d->next_q) {                          // each deciding link's own quiet level, 1 Hz
+        d->next_q = ts + 1000000;
+        int64_t stale = (int64_t)(c->stale_s * 1e6f);
+        for (int i = 0; i < MAX_APS * 2; i++) {
+            md_stream_t *s = &d->s[i];
+            if (!md_deciding(d, i, ts, stale)) continue;
+            s->qring[s->qi] = s->score_s;
+            s->qi = (uint8_t)((s->qi + 1) % MD_QRING);
+            if (s->qn < MD_QRING) s->qn++;
+            if (s->qn >= MD_QMIN) {
+                float t[MD_QRING];
+                memcpy(t, s->qring, (size_t)s->qn * sizeof(float));
+                qsort(t, s->qn, sizeof(float), md_cmp_float);
+                s->q = t[s->qn * c->floor_pct / 100];
+                if (s->q <= 0) s->q = 0;
+            }
+        }
+    }
+    if (d->ring_n < c->floor_min_n) return;
     d->next_floor = ts + c->floor_every_us;
     memcpy(d->scratch, d->ring, (size_t)d->ring_n * sizeof(float));
     qsort(d->scratch, (size_t)d->ring_n, sizeof(float), md_cmp_float);

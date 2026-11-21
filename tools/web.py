@@ -38,7 +38,7 @@ from analyze import MAX_APS, MotionDetector, open_port, parse_line
 from breathing import Breathing
 from timeline import Timeline
 from keys import SECRET_RE, Pairing, new_secret, redact
-from boards import HOUSE_RULES, HOUSE_TEXT, House, OtherBoard, SatLink, split_tag
+from boards import HOUSE_RULES, HOUSE_TEXT, House, OtherBoard, SatLink, Travel, split_tag
 from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
@@ -215,6 +215,8 @@ class Dashboard:
         state.devices.board_name = lambda m: self.cfg['board_names'].get(m)
         self.sats = {}                   # other boards heard through ours: MAC -> latest report
         self.house = House()             # every board's verdict combined (boards.py)
+        self.travel = Travel()           # someone walking from board to board (boards.py)
+        self.travel_ev = None            # its live-stream entry while the path grows
         self.events = deque(maxlen=EVENTS_MAX)   # the live stream on Home: what happened, newest last
         self.event_id = 0
         self.started_wall = time.time()
@@ -410,6 +412,8 @@ class Dashboard:
             e['open'], e['house'] = True, key == 'house'
             self._open_ev = getattr(self, '_open_ev', {})
             self._open_ev[key] = e
+            if key == 'board' or key.startswith('sat:'):
+                self._travel(mk, wall)
         elif not on and key in self._open:
             w0, nm = self._open.pop(key)
             if self.timeline:
@@ -417,6 +421,24 @@ class Dashboard:
             e = getattr(self, '_open_ev', {}).pop(key, None)
             if e:
                 e['open'], e['dur'] = False, r2(max(0.0, wall - w0))
+
+    def _travel(self, key, wall):
+        """A board's motion started: maybe the next step of someone walking."""
+        if not self.sats:
+            return
+        path = self.travel.start(key, wall)
+        if path is None:
+            return
+        names = [self._event_name('board' if k == 'hub' else k, '') for _t, k in path]
+        text = ' → '.join(names)
+        keys = [k for _t, k in path]
+        e = self.travel_ev
+        if e is not None and e.get('path_n') == self.travel.n and e in self.events:
+            e.update(text=text, keys=keys, key=keys[-1], dur=r2(path[-1][0] - path[0][0]))
+        else:
+            e = self._event('travel', text, keys[-1], t=path[0][0])
+            e.update(keys=keys, path_n=self.travel.n, dur=r2(path[-1][0] - path[0][0]))
+            self.travel_ev = e
 
     def _board_period(self):
         """The board's own verdict as timeline periods."""

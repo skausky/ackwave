@@ -298,6 +298,31 @@ def lag_queue():
     assert q.dropped == 4 and q.qsize() == 6, (q.dropped, q.qsize())
 
 
+def travel():
+    from boards import Travel
+    tr = Travel()
+    assert tr.start('sat:a', 100.0) is None                  # one board: no path yet
+    assert tr.start('sat:b', 100.3) is None                  # at once: one spot both see
+    p = tr.start('sat:b', 103.0)
+    assert [k for _t, k in p] == ['sat:a', 'sat:b'] and tr.n == 1
+    assert tr.start('sat:b', 104.0) is None                  # still there
+    p = tr.start('hub', 109.0)
+    assert [k for _t, k in p] == ['sat:a', 'sat:b', 'hub'] and tr.n == 1, "the same path grows"
+    assert tr.start('sat:a', 130.0) is None and tr.n == 2    # long after: a new path
+    assert tr.start('sat:b', 140.0) is None                  # over STEP_MAX_S: not a step
+    # the dashboard: one live-stream entry that grows with the path
+    tmp = tempfile.mkdtemp()
+    d = Dashboard(State(60), settings=os.path.join(tmp, 'dashboard.json'))
+    d.sats = {'aa': {}, 'bb': {}}
+    d.cfg['board_names'] = {'aa': 'Kitchen', 'bb': 'Office'}
+    d._period('sat:aa', True, 200.0)
+    d._period('sat:bb', True, 203.0)
+    d._period('board', True, 206.0)
+    ev = [e for e in d.events if e['type'] == 'travel']
+    assert len(ev) == 1 and ev[0]['text'] == 'Kitchen → Office → Hub', ev
+    assert ev[0]['keys'] == ['sat:aa', 'sat:bb', 'hub'] and ev[0]['dur'] == 6.0
+
+
 if __name__ == '__main__':
     clock()
     comparing()
@@ -308,4 +333,5 @@ if __name__ == '__main__':
     ports()
     reconnects()
     lag_queue()
+    travel()
     print("MULTI TESTS PASSED")

@@ -328,9 +328,12 @@ const STREAM_ICON = {
   calib: 'M12 3v3M12 18v3M3 12h3M18 12h3M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z',
   device: 'M12 5v14M5 12h14',
   network: 'M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01',
+  travel: 'M4 17h11M11 13l4 4-4 4M20 7H9M13 3 9 7l4 4',
 };
 const stream = { nodes: new Map(), seen: new Set(), first: true };
 const stillMotion = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
+const streamText = (g) => (g.type === 'motion' ? (g.house ? 'House: motion' : `Motion · ${g.text}`)
+  : g.type === 'travel' ? `Walked ${g.text}` : g.text);
 function streamGroups(evs) {        // repeats within 2 min: one row, x N
   const out = [];
   for (const e of [...evs].reverse()) {
@@ -376,16 +379,25 @@ function renderStream() {
       path.setAttribute('d', STREAM_ICON[g.type] || STREAM_ICON.device);
       svg.append(path);
       li.append(svg, el('span', { className: 'ev-text' }), el('span', { className: 'ev-meta' }), el('time', {}));
-      li.onclick = () => { if (li.dataset.key && window.AckMap.focus) window.AckMap.focus(li.dataset.key); };
+      li.onclick = () => {
+        if (li.dataset.keys && window.AckMap.showPath) window.AckMap.showPath(li.dataset.keys.split(' '));
+        else if (li.dataset.key && window.AckMap.focus) window.AckMap.focus(li.dataset.key);
+      };
       stream.nodes.set(g.id, li);
       if (!stream.first && !stillMotion.matches) li.classList.add('new');
-      typeIn(li.children[1], (g.type === 'motion' ? (g.house ? 'House: motion' : `Motion · ${g.text}`) : g.text));
+      typeIn(li.children[1], streamText(g));
+      li.dataset.text = g.text;
+    } else if (li.dataset.text !== g.text) {   // a walk that grew: its new path
+      li.children[1].textContent = streamText(g);
+      li.dataset.text = g.text;
     }
+    li.dataset.keys = g.keys ? g.keys.join(' ') : '';
     li.dataset.key = g.key || '';
     li.classList.toggle('important', !!g.important);
     li.classList.toggle('open', !!g.open);
     li.classList.toggle('clickable', !!g.key);
-    li.children[2].textContent = [g.n > 1 ? `×${g.n}` : '', g.type === 'motion' ? (g.open ? 'now' : fmtSpan(g.dur || 0)) : '']
+    li.children[2].textContent = [g.n > 1 ? `×${g.n}` : '', g.type === 'motion' ? (g.open ? 'now' : fmtSpan(g.dur || 0))
+      : g.type === 'travel' ? `over ${fmtSpan(g.dur || 0)}` : '']
       .filter(Boolean).join(' · ');
     const age = nowS - g.t;
     li.children[3].textContent = ago(age);

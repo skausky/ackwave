@@ -50,6 +50,7 @@ CFG = dict(
 SETTLE_US = CFG['settle_us']
 TOP_K = 8
 RING = 1200                              # floor samples: 120 s at 10 Hz
+QRING, QMIN = 64, 30                     # per-link quiet: samples kept (1 Hz), needed
 PHASES = ('wait', 'collect', 'fast', 'track')
 WHYS = ('boot', 'button', 'rssi', 'channel')
 
@@ -177,7 +178,7 @@ def parse_line(line):
 class Stream:
     __slots__ = ('n', 'n_glitch', 't_start', 't_last', 'rssi_t0', 'score_s', 'score_l',
                  't_heard', 'scan_until', 'scan_gap_at', 'iv_us',
-                 'rssi_f', 'rssi_s', 'lp', 'hp', 'es', 'el', 'ref')
+                 'rssi_f', 'rssi_s', 'lp', 'hp', 'es', 'el', 'ref', 'qring', 'q')
 
     def __init__(self):
         self.n = self.n_glitch = 0
@@ -187,6 +188,7 @@ class Stream:
         self.score_s = self.score_l = None
         self.rssi_f = self.rssi_s = 0.0
         self.lp = self.hp = self.es = self.el = self.ref = None
+        self.qring, self.q = [], 0.0             # its own quiet level (md_stream_t.q)
 
 
 def _alpha(dt, tau):
@@ -214,8 +216,10 @@ class MotionDetector:
         self.floor = 0.0
         self.floor0 = 0.0
         self.still_since = now_us        # the step check waits rssi_still again
+        self.next_q = now_us + delay_us
         for s in self.streams.values():  # current RSSI is the new normal
             s.rssi_s, s.rssi_t0 = s.rssi_f, now_us
+            s.qring, s.q = [], 0.0       # and each link's quiet level is relearned
 
     def set_external(self, floor, phase, why):
         """Use the board's floor instead of measuring our own."""
@@ -307,21 +311,25 @@ class MotionDetector:
 
     def max_scores(self, now_us):
         """(short, long): highest scores among live streams, None if none."""
-        stale = self.c['stale_s'] * 1e6
-        def alive(key):                  # live, or mid router-scan (md_scanning)
-            s = self.streams.get(key)
-            if s is None or s.n == 0:
-                return False
-            return (now_us - s.t_last <= stale     # still heard: ignored ones count (scan, glitch lockout)
-                    or now_us - s.t_heard <= stale)
-        # As on the board: APs decide, and an AP's own frames only while it
-        # has no live ACK stream (they're sparse mixed traffic)
-        live = [s for (src, k), s in self.streams.items()
-                if src < MAX_APS and s.score_s is not None and now_us - s.t_last <= stale
-                and not (k == 0 and alive((src, 1)))]
+        live = self._deciding(now_us)
         if not live:
             return None, None
-        return max(s.score_s for s in live), max(s.score_l for s in live)
+        # each on the quietest link's scale once 2+ know their own level (md_max_scores)
+        ready = [s.q for s in live if s.q > 0]
+        qmin = min(ready) if len(ready) >= 2 else None
+        k = lambda s: qmin / s.q if qmin is not None and s.q > 0 else 1.0
+        return max(s.score_s * k(s) for s in live), max(s.score_l * k(s) for s in live)
+
+    def _deciding(self, now_us):
+        """As on the board: APs decide, and an AP's own frames only while it
+        has no live ACK stream (they're sparse mixed traffic)."""
+        stale = self.c['stale_s'] * 1e6
+        def alive(key):                  # still heard: ignored ones count (scan, glitch lockout)
+            s = self.streams.get(key)
+            return s is not None and s.n > 0 and (now_us - s.t_last <= stale or now_us - s.t_heard <= stale)
+        return [s for (src, k), s in sorted(self.streams.items())
+                if src < MAX_APS and s.score_s is not None and s.n > 0 and now_us - s.t_last <= stale
+                and not (k == 0 and alive((src, 1)))]
 
     def max_score(self, now_us):
         return self.max_scores(now_us)[0]
@@ -338,7 +346,17 @@ class MotionDetector:
                 del self.ring[0]
             self.next_sample = ts + c['sample_us']
         n = len(self.ring)
-        if ts < self.next_floor or n < c['floor_min_n']:
+        if ts < self.next_floor:
+            return
+        if ts >= self.next_q:                # each deciding link's own quiet level, 1 Hz
+            self.next_q = ts + 1_000_000
+            for st in self._deciding(ts):
+                st.qring.append(st.score_s)
+                if len(st.qring) > QRING:
+                    del st.qring[0]
+                if len(st.qring) >= QMIN:
+                    st.q = max(0.0, sorted(st.qring)[len(st.qring) * c['floor_pct'] // 100])
+        if n < c['floor_min_n']:
             return
         self.next_floor = ts + c['floor_every_us']
         q = sorted(self.ring)[n * c['floor_pct'] // 100]

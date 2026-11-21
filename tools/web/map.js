@@ -52,8 +52,10 @@ window.AckMap = (() => {
   //  a node's glow            how active it is; dim when its board isn't heard
   //  rings once               something heard for the first time
   //  a wave to the light      the light was switched on, from the board(s) that saw it
+  //  a path between boards    someone walked from one board's area to the next (in order)
   const reduced = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
-  const fx = { seen: new Map(), quality: 2, dtAvg: 16, lastT: 0, skip: false, waves: [], lightWas: null, by: [] };
+  const fx = { seen: new Map(), quality: 2, dtAvg: 16, lastT: 0, skip: false, waves: [], lightWas: null, by: [],
+    walk: null, walkSeen: '' };   // walk: someone walking board to board {keys, t0}
   let lightInfo = null;                     // the light hook (header.light): a node on the map when switched on
   let autoFit = true;                       // refit as things appear, until you pan, zoom or drag
   let viewByUser = false;                   // only a view you set is saved
@@ -616,6 +618,7 @@ window.AckMap = (() => {
     }
     drawLight(t);
     lightWaves(t);
+    drawWalk(t);
     const keys = [['hub', X(0), Y(0)]];
     for (const { n } of L) if (n !== HUB) keys.push([n.key, X(n.x), Y(n.y)]);
     ripples(t, keys);
@@ -633,6 +636,54 @@ window.AckMap = (() => {
       ctx.strokeStyle = alpha(css('--accent'), 0.35); ctx.lineWidth = 1; ctx.setLineDash([2, 4]); ctx.stroke(); ctx.setLineDash([]);
     }
     ctx.restore();
+  }
+  // A walk: a glowing line through the boards in the order their motion
+  // started, an arrow at each step and a dot running along it; fades in ~8 s
+  const WALK_S = 8000;
+  function walkPts(keys) {
+    return keys.map((k) => (k === 'hub' ? HUB : M.nodes.get(k))).filter(Boolean);
+  }
+  function drawWalk(t) {
+    const w = fx.walk;
+    if (!w) return;
+    const age = t - w.t0;
+    if (age > WALK_S) { fx.walk = null; return; }
+    const pts = walkPts(w.keys);
+    if (pts.length < 2) return;
+    const fade = reduced.matches ? 1 : Math.min(1, (WALK_S - age) / 1500);
+    const col = css('--accent');
+    ctx.save();
+    ctx.globalAlpha = fade;
+    ctx.lineCap = ctx.lineJoin = 'round';
+    for (const [lw, a] of [[10, 0.12], [3, 0.85]]) {
+      ctx.strokeStyle = alpha(col, a); ctx.lineWidth = lw;
+      ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(X(p.x), Y(p.y)) : ctx.moveTo(X(p.x), Y(p.y)))); ctx.stroke();
+    }
+    ctx.fillStyle = col;
+    for (let i = 1; i < pts.length; i++) {        // an arrow at each step's middle
+      const a = pts[i - 1], b = pts[i], mx = (X(a.x) + X(b.x)) / 2, my = (Y(a.y) + Y(b.y)) / 2;
+      const ang = Math.atan2(Y(b.y) - Y(a.y), X(b.x) - X(a.x));
+      ctx.save(); ctx.translate(mx, my); ctx.rotate(ang);
+      ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(-6, -6); ctx.lineTo(-6, 6); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+    if (!reduced.matches) {                       // the walker: a dot along the path, over and over
+      const seg = pts.slice(1).map((b, i) => Math.hypot(X(b.x) - X(pts[i].x), Y(b.y) - Y(pts[i].y)));
+      const total = seg.reduce((x, y) => x + y, 0) || 1;
+      let d = ((age / 2200) % 1) * total, i = 0;
+      while (i < seg.length - 1 && d > seg[i]) d -= seg[i++];
+      const a = pts[i], b = pts[i + 1], f = seg[i] ? d / seg[i] : 0;
+      const x = X(a.x) + (X(b.x) - X(a.x)) * f, y = Y(a.y) + (Y(b.y) - Y(a.y)) * f;
+      ctx.shadowColor = col; ctx.shadowBlur = 14;
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+  function showPath(keys) {
+    if (!keys || keys.length < 2) return false;
+    fx.walk = { keys, t0: performance.now() };
+    dirty = true;
+    return focusKey(keys[keys.length - 1]);
   }
   function label(x, y, text, sub, color) {
     ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
@@ -1121,11 +1172,21 @@ window.AckMap = (() => {
         fx.lightWas = on;
       }
       if (slow && slow.house) fx.by = slow.house.by;
+      if (slow && slow.events) {                 // a new (or longer) walk: draw it
+        const w = slow.events.filter((e) => e.type === 'travel').pop();
+        const sig = w ? `${w.id}:${(w.keys || []).length}` : '';
+        if (w && sig !== fx.walkSeen) {
+          if (fx.walkSeen) fx.walk = { keys: w.keys, t0: performance.now() };   // not one from before the page opened
+          fx.walkSeen = sig;
+        }
+        if (!w && !fx.walkSeen) fx.walkSeen = 'none';
+      }
       if (!visible || !loaded) return;
       dirty = true;
       renderList();
     },
     focus: focusKey,
+    showPath,
     fmtLen,                                    // for tests in the browser
     _layers: () => M.plans.map(({ img, ...p }) => p),
     _screenOf(id, u, v) {                      // where picture pixel (u, v) is on the canvas

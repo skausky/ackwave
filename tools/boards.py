@@ -180,6 +180,46 @@ class House:
         return bool(ok), ok
 
 
+# ---------- Direction of travel ----------
+class Travel:
+    """Someone walking from board to board: one board's motion starts, then
+    another's STEP_MIN_S..STEP_MAX_S later. Starts closer together than
+    STEP_MIN_S are one spot both boards cover (not a walk); a gap over
+    STEP_MAX_S, or END_S without a new step, starts a new path.
+
+    start(key, t) for every motion start; returns the path [(t, key), ...]
+    when it just grew to 2+ boards, else None. n numbers the paths, so the
+    caller can update one entry while a path grows."""
+    STEP_MIN_S = 0.7
+    STEP_MAX_S = 8.0
+    END_S = 12.0
+
+    def __init__(self):
+        self.path = []
+        self.n = 0
+
+    def _new(self, key, t):
+        self.path = [(t, key)]
+        self.n += 1
+
+    def start(self, key, t):
+        p = self.path
+        if not p or t - p[-1][0] > self.END_S:
+            self._new(key, t)
+            return None
+        last_t, last_k = p[-1]
+        if key == last_k:                # the same board again: still there
+            return None
+        dt = t - last_t
+        if dt < self.STEP_MIN_S:         # both at once: one spot
+            return None
+        if dt > self.STEP_MAX_S:
+            self._new(key, t)
+            return None
+        p.append((t, key))
+        return p
+
+
 # ---------- Other boards' links (SATL lines, step 3) ----------
 class SatLink:
     """One link of another board, judged from its scores (x the board's quiet

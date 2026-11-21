@@ -325,7 +325,10 @@ def test_noisier_room():
     ref = run_python(after)['det'].floor
     print(f"  fresh calibration at the new spot: {ref:.4f} (tracked {f1 / ref:.2f}x of it)")
     assert end < 130 + 120, f"stuck in motion until {end:.0f}s"
-    assert f1 > 1.3 * f0 and 0.8 < f1 / ref < 1.25, "floor didn't follow the new spot"
+    # the floor is on the quietest link's scale (per-link quiet levels), so how
+    # much it rises depends on that link; what matters: it rose and matches a
+    # fresh calibration at the new spot
+    assert f1 > 1.05 * f0 and 0.8 < f1 / ref < 1.25, "floor didn't follow the new spot"
     check_motion_found('noisier', py, meta, allow=[(130, 250)])
     check_c_agrees('noisier', py, lines)
 
