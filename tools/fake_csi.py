@@ -11,6 +11,7 @@ CALIB lines come from the same detector the board runs.
 import argparse
 import base64
 import math
+import random
 import sys
 import time
 
@@ -403,9 +404,11 @@ def house_lines(duration=240.0, seed=0):
 
     def sats():
         t, seq = 0.0, 0
+        rng = random.Random(seed)
         while t < duration:
             p, walking = house_person(t)
             seq += 1
+            yield t, f"DEMO,person,{p[0]:.2f},{p[1]:.2f},{1 if walking else 0}"   # the truth, for the Map (demo only)
             for mac, _name, pos, ends, joins in HOUSE_SATS:
                 if t < joins:
                     continue
@@ -414,7 +417,7 @@ def house_lines(duration=240.0, seed=0):
                     v = house_sens(p, pos, house_end(e)) if walking else 0.0
                     mv = v > 0.3
                     any_mv |= mv
-                    k = 1.0 + (4.5 * v if mv else 0.2 * v)
+                    k = 1.0 + 4.5 * v + rng.uniform(-0.15, 0.15)   # in proportion, as a real link reacts
                     far = (HOUSE_ROUTERS[e][0] if e in HOUSE_ROUTERS else DEMO_ME if e == 'hub' else HOUSE_DEVS[e][0])
                     flags = 3 if e in HOUSE_ROUTERS else 4
                     links.append(f"{far}:{flags}:{int(20 * k)}:{int(19 * k)}")

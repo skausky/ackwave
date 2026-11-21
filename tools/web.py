@@ -221,6 +221,7 @@ class Dashboard:
         self.event_id = 0
         self.started_wall = time.time()
         self.sat_links = {}              # other board -> {its link's far end: SatLink}
+        self.demo_person = None          # demo: where the simulated person really is
         self.lost_since = None           # monotonic: when the hub's port went away (None: connected)
         self.surveys = {}                # other board -> {who it hears: {kind, rssi, at}}
         self.house_now = (False, [])     # (motion, the boards that count)
@@ -850,6 +851,14 @@ class Dashboard:
     # ---------- input ----------
     def feed(self, line):
         with self.lock:
+            if line.startswith('DEMO,person,'):         # the simulated person (demo only): the Map shows the truth
+                if self.demo:
+                    try:
+                        _d, _p, x, y, w = line.strip().split(',')
+                        self.demo_person = dict(x=float(x), y=float(y), walking=w == '1')
+                    except ValueError:
+                        pass
+                return
             if line.startswith('SAT,'):
                 self._sat(line)
             elif line.startswith(('SATL,', 'SURV,')):
@@ -1399,7 +1408,8 @@ class Dashboard:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        routers=self._routers(), boards=self._boards(), house=self._house_slow(), tz=PC_TZ,
-                       map_boards=self._map_boards(), hearings=self._hearings(), events=list(self.events)[-80:],
+                       map_boards=self._map_boards(), hearings=self._hearings(),
+                       demo_person=self.demo_person if self.demo else None, events=list(self.events)[-80:],
                        board_settings=self._board_settings(), primary=self.primary or self.s.me,
                        pairing=self.pair.status(self.pair.me == self.cfg['hub'], self._hub_boards()),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),

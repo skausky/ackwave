@@ -38,8 +38,9 @@ window.AckMap = (() => {
   let stageMark = null;                     // where the map lives on the Map page (it visits Home)
   let pageView = null, homeFit = false;     // the Map page's view, kept while Home shows its own
   let homeView = null;                      // Home's view: fitted once, then yours (this visit)
-  let radio = [], channel = 6, boardMotion = false;
+  let radio = [], channel = 6, boardMotion = false, hubAct = null;   // hubAct: the hub's activity, 1 = its threshold
   let others = [];                          // the other boards (slow.map_boards): each a point with its router
+  let demoPerson = null;                    // demo only: the simulated person's real spot
   let hearings = {};                        // slow.hearings: target key -> [[observer key, dBm]]
   const heardAvg = new Map();               // 'target|observer' -> smoothed dBm
   let locAt = 0;
@@ -185,7 +186,7 @@ window.AckMap = (() => {
     for (const [key, obs] of Object.entries(hearings))
       for (const [by, dbm] of obs) {
         const k = key + '|' + by, v = heardAvg.get(k);
-        heardAvg.set(k, v === undefined ? dbm : 0.8 * v + 0.2 * dbm);
+        heardAvg.set(k, v === undefined ? dbm : 0.92 * v + 0.08 * dbm);   // ~12 updates: a slow, steady level
       }
   }
   function anchorOf(by) {
@@ -305,10 +306,18 @@ window.AckMap = (() => {
       if (n.placed || key === 'light') continue;
       const s = solveOne(key, n);
       if (!s) { n.auto = null; continue; }
-      const k = n.auto ? 0.5 : 1;                // glide, don't jump
-      n.x += (s.x - n.x) * k; n.y += (s.y - n.y) * k;
+      // calm: a new estimate within half its own uncertainty is the same
+      // place (signals wobble); past that it glides there
+      const shift = n.auto ? Math.hypot(s.x - n.x, s.y - n.y) : Infinity;
+      if (shift > 0.5 * s.a || !n.auto) {
+        const k = n.auto ? 0.3 : 1;
+        n.x += (s.x - n.x) * k; n.y += (s.y - n.y) * k;
+      }
       n.auto = s;
-      if (!n.floor) n.autoFloor = s.floor;
+      if (!n.floor) {                            // another floor only once it wins three times running
+        if (s.floor === n.autoFloor || !n.autoFloor) { n.autoFloor = s.floor; n.floorVotes = 0; }
+        else if (++n.floorVotes >= 3) { n.autoFloor = s.floor; n.floorVotes = 0; }
+      }
       moved = true;
     }
     if (moved) { dirty = true; scheduleSave(); }
@@ -318,6 +327,37 @@ window.AckMap = (() => {
     const n = M.nodes.get(key);
     if (!n) return;
     n.placed = false; n.auto = null; locAt = 0; dirty = true; renderList(); scheduleSave();
+  }
+
+  // How strongly a link sees motion: 1 = its threshold, 0 = quiet, quarter
+  // steps (finer would redo the map at every flicker). null: unknown.
+  function strength(r) {
+    const q = (x) => Math.round(Math.min(3, Math.max(0, x)) * 20) / 20;
+    if (r.link) return r.link.level !== undefined ? q(r.link.level) : r.link.moving ? 1.25 : 0;
+    if (r.board) return r.board.level !== undefined ? q(r.board.level / 2.8) : r.board.state === 'motion' ? 1.25 : 0;
+    if (r.key === 'ap:0') return hubAct !== null ? q(hubAct) : boardMotion ? 1.25 : 0;
+    if (r.activity !== undefined && r.activity !== null) return q(r.activity / 2.8);
+    return r.moving ? 1.25 : r.state === 'still' ? 0 : null;
+  }
+  // Has this link a verdict right now (moving or still)? Unknown ones don't vote.
+  function judged(r) {
+    if (r.link) return r.board.state === 'motion' || r.board.state === 'still';
+    if (r.board) return r.board.state === 'motion' || r.board.state === 'still';
+    if (r.key === 'ap:0') return true;           // the hub's own verdict
+    return r.state === 'motion' || r.state === 'still';
+  }
+  // A link's ends as [a, n] pairs: just them, or for an estimated end three
+  // spots along its uncertainty (centre and 1 sigma either way)
+  function endSamples(a, n) {
+    const spread = (m) => {
+      if (!m || m === HUB || m.placed || !m.auto || m.auto.a < 1) return [m];
+      const c = Math.cos(m.auto.rot), sn = Math.sin(m.auto.rot), k = m.auto.a;
+      const at = (f) => ({ x: m.x + f * k * c, y: m.y + f * k * sn, floor: m.floor, autoFloor: m.autoFloor });
+      return [m, at(1), at(-1)];
+    };
+    const out = [];
+    for (const ea of spread(a)) for (const en of spread(n)) out.push([ea, en]);
+    return out;
   }
 
   // ---------- sensitivity: where a person changes each link ----------
@@ -339,6 +379,19 @@ window.AckMap = (() => {
     return Math.min(1, along * along + ends);
   }
   const heatCv = document.createElement('canvas'), heatMv = document.createElement('canvas');
+  // Where the person likely is: a tracking estimate from every link's strength.
+  //
+  // The model (per spot x on a 25 cm grid): a person at x changes link i by
+  // about g * s_i(x), s_i its sensitivity there (the glow), g how much they
+  // move (unknown, fitted per spot, with a prior). The links' measured
+  // excess activity a_i (over each one's own idle level) is compared with
+  // that; the misfit gives a likelihood. Two side-by-side links that react
+  // differently put the person on the stronger one's side; quiet links rule
+  // out their zones. A Bayes filter carries it over time (a person moves
+  // ~1 m/s), so the estimate tracks and doesn't flicker.
+  const track = { grid: null, post: null, est: null, trail: [], base: new Map(), at: 0, img: document.createElement('canvas') };
+  const CELL = 0.25;
+  const SIG0 = 0.45, SIG1 = 0.25, MODEL_ERR = 1.2;          // a link's scatter: idle noise, plus more the stronger it reacts
   let heatKey = '', heatView = null, viewSeen = '', viewMovedAt = 0;
   function rgbOf(hex) { const v = parseInt(hex.slice(1), 16); return [v >> 16 & 255, v >> 8 & 255, v & 255]; }
   // Two layers at a third of the screen's resolution: still links in their
@@ -351,7 +404,7 @@ window.AckMap = (() => {
     const S = fx.quality === 2 ? 3 : 4, w = Math.max(1, Math.ceil(W / S)), h = Math.max(1, Math.ceil(H / S));
     const vk = JSON.stringify(M.view);
     if (vk !== viewSeen) { viewSeen = vk; viewMovedAt = t; }
-    const geo = JSON.stringify([w, h, channel, L.map(({ a, n, color, r }) => [a.x, a.y, n.x, n.y, color, moving(r)])]);
+    const geo = JSON.stringify([w, h, channel, !!track.est, L.map(({ a, n, color, r }) => [a.x, a.y, n.x, n.y, color, moving(r)])]);
     const key = geo + '|' + vk;
     if (key === heatKey) return heatView;
     if (heatView && geo === heatKey.split('|')[0] && t - viewMovedAt < 200) return heatView;   // still moving
@@ -361,6 +414,7 @@ window.AckMap = (() => {
     const still = new ImageData(w, h), mov = new ImageData(w, h);
     const spec = L.filter(({ d }) => d >= 0.05).map(({ a, n, color, d, r }) =>
       ({ a, n, d, mv: moving(r), rgb: rgbOf(color), w: weak(r) ? 0.35 : 1 }));
+    const dimMv = !!track.est;                    // the estimate leads: the links' own red glow steps back
     for (let j = 0; j < h; j++) {
       const wy = M.view.y + (j * S - H / 2) / M.view.s;
       for (let i = 0; i < w; i++) {
@@ -379,6 +433,7 @@ window.AckMap = (() => {
         if (clearMv < 1) { mov.data[o] = motionRgb[0]; mov.data[o + 1] = motionRgb[1]; mov.data[o + 2] = motionRgb[2]; mov.data[o + 3] = 255 * (1 - clearMv); }
       }
     }
+    if (dimMv) for (let o = 3; o < mov.data.length; o += 4) mov.data[o] *= 0.35;
     for (const [c, img] of [[heatCv, still], [heatMv, mov]]) {
       c.width = w; c.height = h;
       c.getContext('2d').putImageData(img, 0, 0);
@@ -600,6 +655,7 @@ window.AckMap = (() => {
     if (!M.view || (cnt > nodeCount && autoFit && !viewByUser)) fit();   // never over a view you set
     nodeCount = cnt;
     locate(t);
+    stepTrack(t);
     drawPlans();
     grid();
     drawLikely();
@@ -639,6 +695,14 @@ window.AckMap = (() => {
       ctx.restore();
     }
     particles(L, t, motionC);
+    drawTrack(t, motionC);
+    if (demoPerson) {                              // demo: the truth, to see how close the estimate is
+      const x = X(demoPerson.x), y = Y(demoPerson.y);
+      ctx.save(); ctx.strokeStyle = css('--fg'); ctx.globalAlpha = 0.8; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.moveTo(x - 4, y); ctx.lineTo(x + 4, y); ctx.moveTo(x, y - 4); ctx.lineTo(x, y + 4); ctx.stroke();
+      ctx.restore();
+      label(x, y - 24, 'real person (demo)', null, css('--muted'));
+    }
     // the board
     const bx = X(0), by = Y(0);
     ctx.fillStyle = css('--card'); ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2.5;
@@ -699,6 +763,157 @@ window.AckMap = (() => {
     }
     ctx.restore();
   }
+  // Each link's excess activity: its strength over its own idle level (a slow
+  // low envelope: falls at once, rises over ~1 min), so 0 = idle, 1 = clearly moving
+  function excess(r, now) {
+    const st = strength(r);
+    if (st === null) return null;
+    let b = track.base.get(r.key);
+    if (b === undefined || st < b) b = st;
+    else b += (st - b) * Math.min(1, (now - (track.baseAt || now)) / 60000);
+    track.base.set(r.key, b);
+    return Math.max(0, st - b) / Math.max(0.3, 1 - b);
+  }
+  function stepTrack(t) {
+    if (t - track.at < 500) return;
+    const dt = Math.min(5, (t - track.at) / 1000);
+    track.at = t;
+    const L = links().filter(({ d, r }) => d >= 0.3 && !weak(r) && judged(r));
+    const obs = L.map(({ a, n, r }) => ({ a: excess(r, t), ends: endSamples(a, n) })).filter((o) => o.a !== null);
+    track.baseAt = t;
+    const active = obs.some((o) => o.a >= 0.6);
+    if (obs.length < 2 || !active) {             // nothing moving: let it fade
+      if (track.est) { track.est = null; track.post = null; dirty = true; }
+      return;
+    }
+    // the grid: everything that matters, 2 m around
+    let x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+    for (const o of obs) for (const [a, n] of o.ends) for (const m of [a, n]) {
+      x0 = Math.min(x0, m.x); x1 = Math.max(x1, m.x); y0 = Math.min(y0, m.y); y1 = Math.max(y1, m.y);
+    }
+    x0 = Math.floor(x0 - 2); y0 = Math.floor(y0 - 2); x1 = Math.ceil(x1 + 2); y1 = Math.ceil(y1 + 2);
+    let cs = CELL, gw = Math.ceil((x1 - x0) / cs), gh = Math.ceil((y1 - y0) / cs);
+    while (gw * gh > 16000) { cs *= 1.5; gw = Math.ceil((x1 - x0) / cs); gh = Math.ceil((y1 - y0) / cs); }
+    const g = track.grid, same = g && g.x0 === x0 && g.y0 === y0 && g.gw === gw && g.gh === gh;
+    if (!same) { track.grid = { x0, y0, gw, gh, cs }; track.post = null; }
+    const lam = lambda(), lik = new Float32Array(gw * gh);
+    const w = obs.map((o) => 1 / (SIG0 + SIG1 * o.a) ** 2);
+    const G0 = 1.2, WG = 1 / 1.5 ** 2;              // the movement prior: about 1.2, loosely
+    let Rmin = Infinity;
+    for (let j = 0; j < gh; j++) {
+      const wy = y0 + (j + 0.5) * cs;
+      for (let i = 0; i < gw; i++) {
+        const wx = x0 + (i + 0.5) * cs;
+        const sv = obs.map((o) => {
+          let v = 0;
+          for (const [ea, en] of o.ends) v += sensitivity(wx, wy, ea, en, dist3(ea, en), lam);
+          return v / o.ends.length;
+        });
+        let num = G0 * WG, den = WG;
+        sv.forEach((v, k) => { num += w[k] * obs[k].a * v; den += w[k] * v * v; });
+        const gg = Math.max(0, num / den);
+        let R = (gg - G0) ** 2 * WG;
+        sv.forEach((v, k) => { R += w[k] * (obs[k].a - gg * v) ** 2; });
+        lik[j * gw + i] = R;
+        if (R < Rmin) Rmin = R;
+      }
+    }
+    // Bayes: the last estimate spread by how far a person walks meanwhile, times now
+    const prior = track.post ? blur(track.post, gw, gh, Math.max(1, Math.round(1.0 * dt / cs))) : null;
+    const post = new Float32Array(gw * gh);
+    let sum = 0;
+    for (let k = 0; k < post.length; k++) {
+      const l = Math.exp(-(lik[k] - Rmin) / 2);
+      post[k] = l * (prior ? 0.85 * prior[k] + 0.15 / post.length : 1);
+      sum += post[k];
+    }
+    // the estimate: the most likely spot (an average of two likely places
+    // would land between them, in neither), taken on a lightly smoothed copy
+    for (let k = 0; k < post.length; k++) post[k] /= sum;
+    const sm = blur(post, gw, gh, Math.max(1, Math.round(0.5 / cs)));
+    let mx = 0, best = 0;
+    for (let k = 0; k < post.length; k++) if (sm[k] > sm[best]) best = k;
+    for (let k = 0; k < post.length; k++) if (post[k] > mx) mx = post[k];
+    const sx = x0 + ((best % gw) + 0.5) * cs, sy = y0 + (Math.floor(best / gw) + 0.5) * cs;
+    // the ring: the circle around the estimate holding 68% of the probability
+    const byDist = [];
+    for (let k = 0; k < post.length; k++)
+      if (post[k] > 1e-7) byDist.push([Math.hypot(x0 + ((k % gw) + 0.5) * cs - sx, y0 + (Math.floor(k / gw) + 0.5) * cs - sy), post[k]]);
+    byDist.sort((p1, p2) => p1[0] - p2[0]);
+    let acc = 0, r68 = cs;
+    for (const [dd, pp] of byDist) { acc += pp; r68 = dd; if (acc >= 0.68) break; }
+    track.post = post;
+    // plus the model's own error (walls, the zones' shape): measured ~1 m in the demo house
+    track.est = { x: sx, y: sy, r: Math.hypot(Math.max(cs, r68), MODEL_ERR) };
+    track.trail.push({ x: sx, y: sy, t });
+    while (track.trail.length && t - track.trail[0].t > 12000) track.trail.shift();
+    // its picture: the motion colour, opacity by probability
+    const c = track.img, rgb = rgbOf(css('--motion'));
+    c.width = gw; c.height = gh;
+    const im = c.getContext('2d').createImageData(gw, gh);
+    for (let k = 0; k < post.length; k++) {
+      const q = post[k] / mx;
+      if (q < 0.08) continue;
+      im.data[4 * k] = rgb[0]; im.data[4 * k + 1] = rgb[1]; im.data[4 * k + 2] = rgb[2];
+      im.data[4 * k + 3] = 235 * Math.min(1, q ** 0.8);
+    }
+    c.getContext('2d').putImageData(im, 0, 0);
+    dirty = true;
+  }
+  // a box blur, r cells, applied twice (close to a Gaussian)
+  function blur(src, gw, gh, r) {
+    let a = src, b = new Float32Array(src.length);
+    for (let pass = 0; pass < 2; pass++) {
+      for (let j = 0; j < gh; j++) {
+        let acc = 0;
+        for (let i = -r; i <= r; i++) acc += a[j * gw + Math.min(gw - 1, Math.max(0, i))];
+        for (let i = 0; i < gw; i++) {
+          b[j * gw + i] = acc / (2 * r + 1);
+          acc += a[j * gw + Math.min(gw - 1, i + r + 1)] - a[j * gw + Math.max(0, i - r)];
+        }
+      }
+      const c = new Float32Array(src.length);
+      for (let i = 0; i < gw; i++) {
+        let acc = 0;
+        for (let j = -r; j <= r; j++) acc += b[Math.min(gh - 1, Math.max(0, j)) * gw + i];
+        for (let j = 0; j < gh; j++) {
+          c[j * gw + i] = acc / (2 * r + 1);
+          acc += b[Math.min(gh - 1, j + r + 1) * gw + i] - b[Math.max(0, j - r) * gw + i];
+        }
+      }
+      a = c;
+    }
+    return a;
+  }
+  // The estimate: its probability haze, a fading trail of where it was, and
+  // a ring (about 1.5 sigma) with how sure, pulsing gently
+  function drawTrack(t, motionC) {
+    const g = track.grid, e = track.est;
+    if (!g || !e) return;
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.globalAlpha = 0.9;
+    ctx.drawImage(track.img, X(g.x0), Y(g.y0), g.gw * g.cs * M.view.s, g.gh * g.cs * M.view.s);
+    ctx.globalAlpha = 1;
+    const tr = track.trail;
+    for (let i = 1; i < tr.length; i++) {          // the trail: thin and faint to thick and bright
+      const age = (t - tr[i].t) / 12000;
+      ctx.strokeStyle = alpha(motionC, 0.7 * (1 - age)); ctx.lineWidth = 1 + 3 * (1 - age); ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(X(tr[i - 1].x), Y(tr[i - 1].y)); ctx.lineTo(X(tr[i].x), Y(tr[i].y)); ctx.stroke();
+    }
+    const x = X(e.x), y = Y(e.y), rr = Math.max(12, e.r * M.view.s);
+    const pulse = reduced.matches ? 0 : 0.5 + 0.5 * Math.sin(t / 300);
+    ctx.shadowColor = motionC; ctx.shadowBlur = 12 + 10 * pulse;
+    ctx.fillStyle = motionC;
+    ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = alpha(motionC, 0.85); ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.arc(x, y, rr, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+    label(x, y + rr + 4, 'someone here', `within about ${fmtLen(e.r)}`, motionC);
+  }
+
   // A walk: a glowing line through the boards in the order their motion
   // started, an arrow at each step and a dot running along it; fades in ~8 s
   const WALK_S = 8000;
@@ -1239,8 +1454,11 @@ window.AckMap = (() => {
     },
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
-      if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; if (slow.channel) channel = slow.channel; }
-      if (header) boardMotion = hubMoving(header);
+      if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPerson = slow.demo_person || null; if (slow.channel) channel = slow.channel; }
+      if (header) {
+        boardMotion = hubMoving(header);
+        hubAct = header.activity && header.activity.pct !== undefined ? header.activity.pct / 100 : null;
+      }
       if (header && header.light) {
         lightInfo = header.light;
         const on = lightInfo.state === 'on';
@@ -1270,6 +1488,8 @@ window.AckMap = (() => {
     },
     focus: focusKey,
     showPath,
+    _likely: () => track.est,
+    _truth: () => demoPerson,
     fmtLen,                                    // for tests in the browser
     _env: () => ({ fit: envFit, hearings, nodes: [...M.nodes.values()].map(({ key, x, y, placed, board }) => ({ key, x, y, placed, board })) }),
     _layers: () => M.plans.map(({ img, ...p }) => p),
