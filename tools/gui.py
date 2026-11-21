@@ -1314,6 +1314,12 @@ def reader(lines, q, log=None):
                 if log:
                     log.idle()                   # says so after a while (data stopped)
                 continue
+            if line.startswith(('#ERR', '#OK')):  # the port went away / came back (SerialSource)
+                if log:
+                    log.say('Board disconnected: ' + line[5:].strip() if line.startswith('#ERR')
+                            else 'Board reconnected')
+                q.put(line)
+                continue
             if log:
                 try:
                     log.feed(line)               # in this thread: never waits for drawing

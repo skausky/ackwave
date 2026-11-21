@@ -7,6 +7,7 @@ import argparse
 import base64
 import math
 import sys
+import threading
 import time
 from collections import defaultdict
 
@@ -409,11 +410,72 @@ def skip_backlog(port, wait_s=1.0):
     port.readline()                          # the rest of a line cut by the reset
 
 
-def open_port(src, baud):
+class SerialSource:
+    """A serial port that reopens itself: unplugged, replugged or the board
+    restarting (it re-enumerates on USB). lines() yields text lines ('' when a
+    second passes without one), '#ERR <why>' when the port goes away and
+    '#OK reconnected' once it is back. The first open raises, so a wrong port
+    name is still an error at once."""
+    RETRY_S = 2.0
+
+    def __init__(self, src, baud):
+        import serial                            # pip install pyserial
+        self._errors = (serial.SerialException, OSError)
+        self._serial = serial
+        self.src, self.baud = src, baud
+        self.lock = threading.Lock()
+        self.ser = self._open()
+        self.lost_at = None                      # monotonic time it went away (None: connected)
+
+    def _open(self):
+        ser = self._serial.Serial(self.src, self.baud, timeout=1)
+        skip_backlog(ser)
+        return ser
+
+    def lines(self):
+        while True:
+            with self.lock:
+                ser = self.ser
+            if ser is None:
+                try:
+                    ser = self._open()
+                except self._errors:
+                    time.sleep(self.RETRY_S)
+                    yield ''
+                    continue
+                with self.lock:
+                    self.ser, self.lost_at = ser, None
+                yield '#OK reconnected'
+            try:
+                b = ser.readline()
+            except self._errors as e:
+                with self.lock:
+                    self.ser, self.lost_at = None, time.monotonic()
+                try:
+                    ser.close()
+                except self._errors:
+                    pass
+                yield f"#ERR {e}"
+                continue
+            yield b.decode('utf-8', 'ignore')    # UTF-8: a network name may hold any bytes
+
+    def send(self, text):
+        with self.lock:
+            ser = self.ser
+        if ser is None:
+            raise OSError('the board is not connected')
+        ser.write(text.encode('utf-8') + b'\n')
+
+
+def open_port(src, baud, reconnect=False):
     """(lines, send): an iterator of text lines, and send(text) to write a
-    command to the board (None for stdin / a file)."""
+    command to the board (None for stdin / a file). reconnect: the port
+    reopens itself (SerialSource) instead of ending on an error."""
     if src == '-':
         return sys.stdin, None
+    if reconnect:
+        sp = SerialSource(src, baud)
+        return sp.lines(), sp.send
     import serial                            # pip install pyserial
     port = serial.Serial(src, baud, timeout=1)
     skip_backlog(port)

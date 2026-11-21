@@ -32,4 +32,4 @@ if [ -f "$FW/FLASH_ME" ] && [ -f "$FW/flash_args" ]; then
     fi
 fi
 # shellcheck disable=SC2086
-exec python3 -u /app/tools/web.py $PORTS --ingress --port 8765 --out "$OUT" $NORAW
+exec python3 -u /app/tools/web.py $PORTS --ingress --port 8765 --out "$OUT" --give-up 60 $NORAW

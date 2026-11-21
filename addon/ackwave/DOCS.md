@@ -18,3 +18,8 @@ Firmware for the hub: the PC builds it and copies `flash_args` with the
 files it names into `/share/ackwave/firmware`, plus an empty `FLASH_ME`.
 The next start of the add-on flashes the hub (on the Pi's USB) once, then
 renames the marker. The hub never has to come back to the PC.
+
+If the hub's USB drops (a glitch, a replug, the board restarting after a
+network change), the dashboard reconnects by itself. If the port stays gone
+a minute, the add-on exits; with **Watchdog** on (the add-on's Info tab)
+Home Assistant starts it again, which also picks up a re-created USB device.

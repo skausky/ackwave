@@ -319,6 +319,7 @@ class SessionLog:
         self.lock = threading.Lock()
         self.rec = Recorder(self._write, now=now)
         self.next_mark = 0.0
+        self.marks = 0
         self.closed = False
         self.rec.say("Recording started")
 
@@ -342,6 +343,9 @@ class SessionLog:
                     ts = self.rec.last_ts
                     self.raw.write(f"#T,{t:.3f},{ts if ts is not None else ''}\n")
                     self.next_mark = t + self.MARK_S
+                    self.marks += 1
+                    if self.marks % 3 == 0:          # every 30 s: a hard kill loses at most that
+                        self.raw.flush()             # (gzip sync flush: the file reads up to here)
                 self.raw.write(line if line.endswith('\n') else line + '\n')
             self.rec.feed(line)
 

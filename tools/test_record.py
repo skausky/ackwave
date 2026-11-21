@@ -76,6 +76,8 @@ def main():
     calibration_notes()
     network_lines()
     replay_raw_log()
+    log_survives_a_kill()
+    port_reconnects()
     data_stops()
     print("RECORD TESTS PASSED")
 
@@ -243,6 +245,87 @@ def replay_raw_log():
     assert rec.periods[0] == (1_800_000_005.0, 1_800_000_005.5), rec.periods   # first marker
     assert len(rec.periods) == 2 and rec.periods[1] == (1_800_000_012.5, 1_800_000_015.0)
     assert "1 motion period(s)" in text and "1 brief blip" in text
+
+
+def log_survives_a_kill():
+    # the raw log is sync-flushed every 30 s: killed without close(), it still
+    # reads up to the last flush
+    import zlib
+    with tempfile.TemporaryDirectory() as tmp:
+        clk = [1_800_000_000.0]
+        log = SessionLog(tmp, echo=False, now=lambda: clk[0])
+        for i in range(40):
+            log.feed(f"STATS,{(i + 1) * 1_000_000},1,0,1,0,0,0\n")
+            clk[0] += 1
+        raw = open(log.raw_path, 'rb').read()      # no close: as after a kill
+        text = zlib.decompressobj(31).decompress(raw).decode()
+        assert "STATS,20000000," in text, text[-200:]     # the flush at the 3rd marker (20 s)
+        log.close()
+
+
+def port_reconnects():
+    # SerialSource: an error yields #ERR, the port is reopened, #OK, lines flow again
+    from analyze import SerialSource
+
+    class Gone(OSError):
+        pass
+
+    class FakePort:
+        def __init__(self, script):
+            self.script, self.written = script, []
+            self.in_waiting = 0
+
+        def readline(self):
+            x = self.script.pop(0) if self.script else b''
+            if isinstance(x, Exception):
+                raise x
+            return x
+
+        def read(self, n):
+            return b''
+
+        def reset_input_buffer(self):
+            pass
+
+        def write(self, b):
+            self.written.append(b)
+
+        def close(self):
+            pass
+
+    opens = []
+    plan = [[b'x\n', b'A\n', Gone('unplugged')], OSError('not yet'), [b'x\n', b'B\n']]
+
+    class FakeSerial:
+        SerialException = Gone
+
+        @staticmethod
+        def Serial(*_a, **_k):
+            x = plan.pop(0)
+            opens.append(x)
+            if isinstance(x, Exception):
+                raise x
+            return FakePort(x)
+
+    sp = SerialSource.__new__(SerialSource)
+    sp._serial, sp._errors = FakeSerial, (Gone, OSError)
+    sp.src, sp.baud, sp.lost_at = 'fake', 1, None
+    import threading
+    sp.lock = threading.Lock()
+    sp.RETRY_S = 0.0
+    sp.ser = sp._open()                          # skip_backlog eats the cut first line
+    it = sp.lines()
+    got = [next(it) for _ in range(5)]
+    assert got[0] == 'A\n' and got[1].startswith('#ERR') and got[2] == '' and got[3] == '#OK reconnected', got
+    assert got[4] == 'B\n', got
+    sp.send('PING')
+    assert sp.ser.written == [b'PING\n']
+    sp.ser = None
+    try:
+        sp.send('PING')
+        assert False, "sending while unplugged must fail"
+    except OSError:
+        pass
 
 
 if __name__ == '__main__':

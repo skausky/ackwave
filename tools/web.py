@@ -22,6 +22,7 @@ import math
 import os
 import queue
 import re
+import signal
 import sys
 import threading
 import time
@@ -218,6 +219,7 @@ class Dashboard:
         self.event_id = 0
         self.started_wall = time.time()
         self.sat_links = {}              # other board -> {its link's far end: SatLink}
+        self.lost_since = None           # monotonic: when the hub's port went away (None: connected)
         self.surveys = {}                # other board -> {who it hears: {kind, rssi, at}}
         self.house_now = (False, [])     # (motion, the boards that count)
         # Several boards on USB (boards.py): the primary is self.s; the rest are watched
@@ -2139,6 +2141,27 @@ def serve(dash, host='127.0.0.1', port=8765, only_from=None):
     return srv
 
 
+class LagQueue(queue.Queue):
+    """The readers' lines for the pump. If the dashboard falls behind (a busy
+    Pi), CSI lines past LIMIT waiting are dropped instead of piling up (memory,
+    a live view minutes late); every other line (states, commands, reports)
+    always gets through."""
+    LIMIT = 4000                                 # ~20 s of CSI from one board
+
+    def __init__(self):
+        super().__init__()
+        self.dropped = 0
+
+    def put(self, item, block=True, timeout=None):
+        line = item[1] if isinstance(item, tuple) else item
+        if isinstance(line, str) and self.qsize() > self.LIMIT:
+            body = line[19:] if line.startswith('@') else line      # '@<mac>,' tagged: another board's
+            if body.startswith('CSI,'):
+                self.dropped += 1
+                return
+        super().put(item, block, timeout)
+
+
 def pump(dash, q):
     """Feed lines from the reader thread into the dashboard until input ends."""
     s = dash.s
@@ -2149,9 +2172,15 @@ def pump(dash, q):
                 s.ended = s.lost is None
             return
         if line.startswith('#ERR'):
-            print(line[1:], file=sys.stderr)
+            print(line[1:], file=sys.stderr, flush=True)
             with dash.lock:
                 s.lost = line[5:].strip() or 'connection lost'
+                dash.lost_since = dash.lost_since or time.monotonic()
+            continue
+        if line.startswith('#OK'):               # the port is back (SerialSource)
+            print('Board reconnected', flush=True)
+            with dash.lock:
+                s.lost, dash.lost_since = None, None
             continue
         try:
             if line.startswith('@'):             # another board, in a tagged stream
@@ -2168,7 +2197,7 @@ def reader_src(i, lines, q):
     """One port of several: (port index, line) into the queue."""
     try:
         for line in lines:
-            if line:
+            if line:                             # '#ERR' / '#OK' too: the port went away / came back
                 q.put((i, line))
     except Exception as e:                       # unplugged etc.
         q.put((i, f"#ERR {e}"))
@@ -2184,10 +2213,17 @@ def pump_multi(dash, q, n):
             open_ -= 1
             continue
         if line.startswith('#ERR'):
-            print(f"port {i + 1}: {line[1:]}", file=sys.stderr)
+            print(f"port {i + 1}: {line[1:]}", file=sys.stderr, flush=True)
             if dash.src_board.get(i) == dash.primary:
                 with dash.lock:
                     dash.s.lost = line[5:].strip() or 'connection lost'
+                    dash.lost_since = dash.lost_since or time.monotonic()
+            continue
+        if line.startswith('#OK'):
+            print(f"port {i + 1}: reconnected", flush=True)
+            if dash.src_board.get(i) == dash.primary:
+                with dash.lock:
+                    dash.s.lost, dash.lost_since = None, None
             continue
         try:
             dash.feed_src(i, line)
@@ -2209,6 +2245,9 @@ def main():
     ap.add_argument('--no-log', action='store_true', help="don't log to sessions/")
     ap.add_argument('--no-raw', action='store_true', help="log events only, not every board line (small disks)")
     ap.add_argument('--demo', action='store_true', help='demo data: a simulated light, nothing switched for real')
+    ap.add_argument('--give-up', type=float, default=0, metavar='S',
+                    help="exit (code 1) when the hub's port has been gone S seconds, so a supervisor "
+                         "restarts it (the Home Assistant add-on: 60); 0 = keep waiting")
     ap.add_argument('--out', default=os.path.join(os.path.dirname(HERE), 'sessions'), help='log folder')
     a = ap.parse_args()
 
@@ -2233,12 +2272,12 @@ def main():
               "Device makers: no list found (install ieee-data or arp-scan): devices show as 'unknown'",
               flush=True)
     threading.Thread(target=say_oui, daemon=True).start()
-    opened = [open_port(src, a.baud) for src in a.source]
+    opened = [open_port(src, a.baud, reconnect=True) for src in a.source]
     lines, send = opened[0]
     state.live = send is not None
     dash = Dashboard(state, send, os.path.basename(log.ev_path) if log else None, prefs,
                      os.path.join(a.out, 'dashboard.json'), sessions_dir=a.out, demo=a.demo)
-    q = queue.Queue()
+    q = LagQueue()
     if multi:
         dash.set_sources([sd for _l, sd in opened], log)
         for i, (ls, _sd) in enumerate(opened):
@@ -2249,13 +2288,36 @@ def main():
     srv = serve(dash, a.host, a.port, only_from=INGRESS_PROXY if a.ingress else None)
 
     def ticker():
+        said, said_at = 0, 0.0
         while True:
             time.sleep(1.0)
+            if q.dropped > said and time.monotonic() - said_at > 60:
+                print(f"Falling behind: skipped {q.dropped - said} CSI lines to keep up "
+                      f"({q.qsize()} waiting)", flush=True)
+                said, said_at = q.dropped, time.monotonic()
             try:
                 dash.tick()
             except Exception as e:               # the light and EXT must keep running
                 print(f"tick failed ({e})", file=sys.stderr)
     threading.Thread(target=ticker, daemon=True).start()
+    gave_up = []
+
+    def watch_port():                            # the hub's port gone too long: exit, be restarted
+        import _thread
+        while True:
+            time.sleep(2.0)
+            since = dash.lost_since
+            if since is not None and time.monotonic() - since > a.give_up:
+                print(f"The board has been gone {a.give_up:g} s: exiting so it is restarted", flush=True)
+                gave_up.append(1)
+                _thread.interrupt_main()
+                return
+    if a.give_up > 0:
+        threading.Thread(target=watch_port, daemon=True).start()
+    # Docker / Home Assistant stop with SIGTERM: leave like Ctrl+C, so the logs close cleanly
+    def on_term(*_a):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, on_term)
     url = f"http://localhost:{srv.server_address[1]}"
     print(f"Dashboard: {url}   (Ctrl+C to stop)")
     if a.host not in ('127.0.0.1', 'localhost', '::1'):
@@ -2283,6 +2345,8 @@ def main():
         if awake:
             from record import release
             release(awake)
+    if gave_up:
+        sys.exit(1)
 
 
 if __name__ == '__main__':

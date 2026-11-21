@@ -11,7 +11,7 @@ from compare import compare, report
 from fake_csi import OTHER_BOARDS, generate_boards
 from gui import State
 from timeline import Timeline
-from web import Dashboard, pump
+from web import Dashboard, LagQueue, pump
 import queue
 
 
@@ -267,6 +267,37 @@ def live_stream_and_demo():
     assert ids == sorted(ids) and len(set(ids)) == len(ids)
 
 
+def reconnects():
+    # the hub's port goes away and comes back: DISCONNECTED, then data again
+    tmp = tempfile.mkdtemp()
+    d = Dashboard(State(60), settings=os.path.join(tmp, 'dashboard.json'))
+    q = queue.Queue()
+    q.put('#ERR device reports readiness to read but returned no data')
+    q.put(None)
+    pump(d, q)
+    assert d.s.lost and d.lost_since is not None, "the port is gone"
+    assert d.s.source_status()[0] == 'DISCONNECTED'
+    q.put('#OK reconnected')
+    q.put(None)
+    pump(d, q)
+    assert d.s.lost is None and d.lost_since is None, "back"
+    assert d.s.source_status() is None or d.s.source_status()[0] != 'DISCONNECTED'
+
+
+def lag_queue():
+    # behind: CSI lines (own or tagged) are dropped past the limit, nothing else
+    q = LagQueue()
+    q.LIMIT = 3
+    tag = '@' + ':'.join(['aa'] * 6) + ','
+    for i in range(6):
+        q.put('CSI,1,0,1,6,-50,0,0,4,AAAA')
+    q.put(tag + 'CSI,1,0,1,6,-50,0,0,4,AAAA')
+    q.put((1, 'CSI,1'))
+    q.put('STATE,1,motion,1,1')
+    q.put((0, tag + 'SAT,x'))
+    assert q.dropped == 4 and q.qsize() == 6, (q.dropped, q.qsize())
+
+
 if __name__ == '__main__':
     clock()
     comparing()
@@ -275,4 +306,6 @@ if __name__ == '__main__':
     live_stream_and_demo()
     tagged_stream()
     ports()
+    reconnects()
+    lag_queue()
     print("MULTI TESTS PASSED")
