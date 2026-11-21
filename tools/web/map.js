@@ -1137,8 +1137,17 @@ window.AckMap = (() => {
     const r = m && routersInfo.find((x) => x.idx === +m[1]);
     return r ? r.bssid : null;
   }
+  // The list has three parts: the board picker, the floors panel and the
+  // links. Only the first and last are rebuilt on every update; the floors
+  // panel stays in the page (moving it closes an open picker on a phone).
+  let listParts = null;
   function renderList() {
-    const box = $('#map-links');
+    const root = $('#map-links');
+    if (!listParts || listParts.top.parentNode !== root) {
+      listParts = { top: el('div'), floors: el('div'), list: el('div') };
+      root.replaceChildren(listParts.top, listParts.floors, listParts.list);
+    }
+    let box = listParts.top;
     box.replaceChildren();
     if (others.length) {                       // which board's links to show
       const seg = el('div', { className: 'seg map-show' });
@@ -1152,7 +1161,10 @@ window.AckMap = (() => {
       }
       box.append(el('div', { className: 'muted small', textContent: 'Show the links of' }), seg);
     }
-    box.append(floorsPanel());
+    const fp = floorsPanel();
+    if (listParts.floors.firstChild !== fp) listParts.floors.replaceChildren(fp);
+    box = listParts.list;
+    box.replaceChildren();
     const L = links();
     if (!L.length) box.append(el('p', { className: 'muted small', textContent: 'No live links yet.' }));
     for (const { r, n, color, d } of L) {
@@ -1224,22 +1236,27 @@ window.AckMap = (() => {
   }
   // Which floor each thing is on: the hub, the boards, then routers and devices
   // (those can be left to the signals). Floors are M.floorH apart.
-  let floorsOpen = false, floorsEl = null, floorsSig = '';
+  let floorsOpen = false, floorsEl = null, floorsSig = '', floorsTouched = 0;
+  // Someone is using the panel: a picker or box has focus, or it was touched
+  // in the last few seconds (a phone's picker may not keep the focus).
+  const floorsBusy = () => !!floorsEl && (floorsEl.contains(document.activeElement) || performance.now() - floorsTouched < 4000);
   function floorsPanel() {
     const sig = JSON.stringify([M.hubFacing, others.map((b) => (M.nodes.get(b.key) || {}).facing), envFit && [envFit.n.toFixed(1), Math.round(envFit.lf), envFit.checks.map((c) => c.key + c.by)],
       M.hubFloor, M.floorH, others.map((b) => [b.key, b.label]),
       links().map(({ n }) => [n.key, n.name, n.floor, n.autoFloor]), [...M.nodes.values()].map((n) => n.floor)]);
-    if (floorsEl && sig === floorsSig) return floorsEl;   // unchanged: keep it (an open dropdown stays open)
+    if (floorsEl && (sig === floorsSig || floorsBusy())) return floorsEl;   // unchanged, or in use: keep it
     floorsSig = sig;
     const det = el('details', { className: 'map-floors', open: floorsOpen });
     det.ontoggle = () => { floorsOpen = det.open; };
+    for (const ev of ['pointerdown', 'touchstart', 'focusin', 'input', 'change'])
+      det.addEventListener(ev, () => { floorsTouched = performance.now(); }, { passive: true });
     det.append(el('summary', { textContent: 'Floors, facing and signal' }));
     const row = (name, val, auto, set) => {
       const sel = el('select', { className: 'small' });
       if (auto !== null) sel.append(el('option', { value: '0', textContent: auto ? `auto (${auto})` : 'auto' }));
       for (let f = 1; f <= 4; f++) sel.append(el('option', { value: String(f), textContent: `Floor ${f}` }));
       sel.value = String(val || 0);
-      sel.onchange = () => { set(+sel.value); locAt = 0; heatKey = ''; dirty = true; renderList(); scheduleSave(); };
+      sel.onchange = () => { set(+sel.value); locAt = 0; heatKey = ''; dirty = true; floorsEl = null; renderList(); scheduleSave(); };
       return el('label', { className: 'map-floor-row' }, el('span', { textContent: name }), sel);
     };
     const aim = (m, clear) => {                    // facing: shown, and clearable
@@ -1248,7 +1265,7 @@ window.AckMap = (() => {
       const compass = ['east', 'south-east', 'south', 'south-west', 'west', 'north-west', 'north', 'north-east'];
       const i = ((Math.round(f / (Math.PI / 4)) % 8) + 8) % 8;
       const b = el('button', { type: 'button', className: 'ghost small', textContent: `faces ${compass[i]} · clear` });
-      b.onclick = () => { clear(); heatKey = ''; locAt = 0; dirty = true; renderList(); scheduleSave(); };
+      b.onclick = () => { clear(); heatKey = ''; locAt = 0; dirty = true; floorsEl = null; renderList(); scheduleSave(); };
       return b;
     };
     det.append(row('Hub', M.hubFloor, null, (f) => { M.hubFloor = f || 1; }), aim(HUB, () => { M.hubFacing = null; }));
