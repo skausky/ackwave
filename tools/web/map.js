@@ -69,12 +69,17 @@ window.AckMap = (() => {
   const freq = () => (2407 + 5 * channel) * 1e6;
   const lambda = () => C / freq();
   const pl1 = () => 20 * Math.log10(4 * Math.PI * freq() / C);     // free-space loss over the first metre
-  const envN = () => ENVS[M.env].n;
+  // The fade with distance: measured from your placed boards when it can be
+  // (envFit), else the environment you picked
+  let envFit = null;                        // {A, n, lf, pairs, checks} from board-to-board signals
+  const envN = () => (envFit ? envFit.n : ENVS[M.env].n);
+  const FLOOR_LOSS_DB = 10;                 // a floor/ceiling, until measured
   const eirpOf = (r) => (r.ap ? EIRP.ap : EIRP.device);
   // What the board should hear at d metres in this environment (no walls)
-  const expected = (r, d) => eirpOf(r) + BOARD.gainDbi - pl1() - 10 * envN() * Math.log10(Math.max(d, 0.3));
+  const at1m = (r) => (envFit ? envFit.A + eirpOf(r) - BOARD.txDbm : eirpOf(r) + BOARD.gainDbi - pl1());   // its level at 1 m
+  const expected = (r, d) => at1m(r) - 10 * envN() * Math.log10(Math.max(d, 0.3));
   // A first guess at the distance from the signal (rough: walls and furniture make it look farther)
-  const guessDist = (r) => Math.min(40, Math.max(1, 10 ** ((eirpOf(r) - pl1() - r.rssi) / (10 * envN()))));
+  const guessDist = (r) => Math.min(40, Math.max(1, 10 ** ((at1m(r) - r.rssi) / (10 * envN()))));
   const zoneR = (n, d1, d2) => Math.sqrt(n * lambda() * d1 * d2 / (d1 + d2));
 
   // ---------- units ----------
@@ -192,13 +197,15 @@ window.AckMap = (() => {
     const obs = [];
     for (const [by] of hearings[key] || []) {
       const a = anchorOf(by);
-      if (a && a !== n) obs.push([a, heardAvg.get(key + '|' + by), zOf(a)]);
+      if (a && a !== n) obs.push([a, heardAvg.get(key + '|' + by), zOf(a), floorOf(a)]);
     }
     if (!obs.length) return null;
     // its floor: the one you chose, else every floor the anchors are on (and the ground), best fit wins
     const floors = n.floor ? [n.floor] : [...new Set([1, M.hubFloor, ...obs.map(([a]) => floorOf(a))])];
     const kind = key.startsWith('sat:') ? BOARD.txDbm : (key.startsWith('ap:') || key.startsWith('r:')) ? EIRP.ap : EIRP.device;
-    const P0 = kind - pl1(), nn = 10 * envN(), wm = 1 / SIGMA_DB ** 2, wp = 1 / SIGMA_P ** 2;
+    // its likely power: from the boards' own (measured) when there is a fit
+    const P0 = envFit ? envFit.A + (kind - BOARD.txDbm) : kind - pl1();
+    const nn = 10 * envN(), lf = envFit ? envFit.lf : FLOOR_LOSS_DB, wm = 1 / SIGMA_DB ** 2, wp = 1 / SIGMA_P ** 2;
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
     for (const [a] of obs) { x0 = Math.min(x0, a.x); x1 = Math.max(x1, a.x); y0 = Math.min(y0, a.y); y1 = Math.max(y1, a.y); }
     const pad = 15, G = 90;
@@ -211,7 +218,10 @@ window.AckMap = (() => {
       for (let gy = y0; gy <= y1; gy += step)
         for (let gx = x0; gx <= x1; gx += step) {
           let sp = 0;
-          const ls = obs.map(([a, r, az]) => { const l = nn * Math.log10(Math.max(0.5, Math.hypot(gx - a.x, gy - a.y, gz - az))); sp += (r + l) * wm; return l; });
+          const ls = obs.map(([a, r, az, af]) => {
+            const l = nn * Math.log10(Math.max(0.5, Math.hypot(gx - a.x, gy - a.y, gz - az))) + lf * Math.abs(fl - af);
+            sp += (r + l) * wm; return l;
+          });
           const P = (sp + P0 * wp) / (obs.length * wm + wp);
           let J = (P - P0) ** 2 * wp;
           obs.forEach(([, r], i) => { J += (r - (P - ls[i])) ** 2 * wm; });
@@ -233,11 +243,63 @@ window.AckMap = (() => {
     return { x: best[0], y: best[1], a: Math.sqrt(tr + det) + step / 2, b: Math.sqrt(Math.max(0, tr - det)) + step / 2,
       rot: 0.5 * Math.atan2(2 * sxy, sxx - syy), heardBy: obs.length, floor: best.floor };
   }
+  // The house's own radio model, from boards whose places you know hearing
+  // each other: dBm = A - 10 n log10(d) - lf * floors between. Least squares
+  // over the pairs: n (how fast signal fades here), lf (what a floor costs,
+  // when some pairs cross floors), A (a board's level at 1 m). Each pair's
+  // misfit is a check of the placement: far off means a square is misplaced
+  // (or a wall in the way).
+  function fitEnv() {
+    const rows = [];
+    for (const [key, obs] of Object.entries(hearings)) {
+      if (key !== 'hub' && !key.startsWith('sat:')) continue;   // boards only: routers send at other powers
+      const t = anchorOf(key);
+      if (!t) continue;
+      for (const [by] of obs) {
+        const a = anchorOf(by);
+        if (!a || a === t) continue;
+        const d = dist3(a, t), r = heardAvg.get(key + '|' + by);
+        if (d < 0.5 || r === undefined) continue;
+        rows.push({ key, by, d, r, fl: Math.abs(floorOf(a) - floorOf(t)) });
+      }
+    }
+    const cross = rows.some((x) => x.fl > 0);
+    const dists = new Set(rows.map((x) => Math.round(x.d)));
+    if (rows.length < 3 || dists.size < 2) return null;
+    // normal equations for [A, n, lf] (lf fixed when no pair crosses floors)
+    const k = cross && rows.length >= 4 ? 3 : 2;
+    const N = Array.from({ length: k }, () => new Array(k).fill(0)), b = new Array(k).fill(0);
+    for (const x of rows) {
+      const f = [1, -10 * Math.log10(x.d), -x.fl].slice(0, k);
+      const y = x.r + (k === 2 ? FLOOR_LOSS_DB * x.fl : 0);
+      for (let i = 0; i < k; i++) { b[i] += f[i] * y; for (let j = 0; j < k; j++) N[i][j] += f[i] * f[j]; }
+    }
+    for (let i = 0; i < k; i++) N[i][i] += 1e-6;   // Gauss-Jordan on a 2x2 / 3x3
+    for (let c = 0; c < k; c++) {
+      let p = c;
+      for (let r = c + 1; r < k; r++) if (Math.abs(N[r][c]) > Math.abs(N[p][c])) p = r;
+      [N[c], N[p]] = [N[p], N[c]]; [b[c], b[p]] = [b[p], b[c]];
+      if (Math.abs(N[c][c]) < 1e-9) return null;
+      for (let r = 0; r < k; r++) {
+        if (r === c) continue;
+        const m = N[r][c] / N[c][c];
+        for (let j = c; j < k; j++) N[r][j] -= m * N[c][j];
+        b[r] -= m * b[c];
+      }
+    }
+    const sol = b.map((v, i) => v / N[i][i]);
+    const n = Math.min(5, Math.max(1.6, sol[1])), lf = k === 3 ? Math.min(25, Math.max(0, sol[2])) : FLOOR_LOSS_DB;
+    const A = rows.reduce((s2, x) => s2 + x.r + 10 * n * Math.log10(x.d) + lf * x.fl, 0) / rows.length;
+    const checks = rows.map((x) => ({ ...x, off: x.r - (A - 10 * n * Math.log10(x.d) - lf * x.fl) }))
+      .filter((x) => Math.abs(x.off) > 10).sort((p, q) => Math.abs(q.off) - Math.abs(p.off));
+    return { A, n, lf, measuredLf: k === 3, pairs: rows.length, checks };
+  }
   // Every few seconds: move what you haven't placed to where its signals say
   function locate(t) {
     if (t - locAt < 3000) return;
     locAt = t;
     smoothHeard();
+    envFit = fitEnv();
     let moved = false;
     for (const [key, n] of M.nodes) {
       if (n.placed || key === 'light') continue;
@@ -779,17 +841,37 @@ window.AckMap = (() => {
     $('#map-wave').textContent = `Channel ${channel} · ${(freq() / 1e6).toFixed(0)} MHz · wavelength ${M.unit === 'ft' ? (lambda() / IN).toFixed(1) + '″' : (lambda() * 100).toFixed(1) + ' cm'}`;
   }
 
+  // What the boards measured about the house, and placements that don't fit
+  function envNote() {
+    const box = el('div', { className: 'map-env-fit' });
+    if (!envFit) {
+      box.append(el('p', { className: 'muted small', textContent:
+        'Place the hub and at least two boards: their signals to each other then measure how this house fades a signal (instead of the environment picked above).' }));
+      return box;
+    }
+    const f = envFit;
+    box.append(el('p', { className: 'small', textContent:
+      `Measured from ${f.pairs} board-to-board signals: signal fades with n = ${f.n.toFixed(1)} here` +
+      (f.measuredLf ? `, a floor costs about ${Math.round(f.lf)} dB.` : ` (a floor counted as ${FLOOR_LOSS_DB} dB until boards on two floors hear each other).`) }));
+    const nm = (k) => (k === 'hub' ? 'Hub' : (others.find((o) => o.key === k) || {}).label || k);
+    for (const c of f.checks.slice(0, 3))
+      box.append(el('p', { className: 'small warn-text', textContent:
+        `${nm(c.by)} hears ${nm(c.key)} ${Math.abs(Math.round(c.off))} dB ${c.off < 0 ? 'weaker' : 'stronger'} than their places suggest: ` +
+        (c.off < 0 ? 'a wall or appliance between them, or one is farther than placed.' : 'one may be closer than placed (or on another floor).') }));
+    return box;
+  }
   // Which floor each thing is on: the hub, the boards, then routers and devices
   // (those can be left to the signals). Floors are M.floorH apart.
   let floorsOpen = false, floorsEl = null, floorsSig = '';
   function floorsPanel() {
-    const sig = JSON.stringify([M.hubFloor, M.floorH, others.map((b) => [b.key, b.label]),
+    const sig = JSON.stringify([envFit && [envFit.n.toFixed(1), Math.round(envFit.lf), envFit.checks.map((c) => c.key + c.by)],
+      M.hubFloor, M.floorH, others.map((b) => [b.key, b.label]),
       links().map(({ n }) => [n.key, n.name, n.floor, n.autoFloor]), [...M.nodes.values()].map((n) => n.floor)]);
     if (floorsEl && sig === floorsSig) return floorsEl;   // unchanged: keep it (an open dropdown stays open)
     floorsSig = sig;
     const det = el('details', { className: 'map-floors', open: floorsOpen });
     det.ontoggle = () => { floorsOpen = det.open; };
-    det.append(el('summary', { textContent: 'Floors' }));
+    det.append(el('summary', { textContent: 'Floors and signal' }));
     const row = (name, val, auto, set) => {
       const sel = el('select', { className: 'small' });
       if (auto !== null) sel.append(el('option', { value: '0', textContent: auto ? `auto (${auto})` : 'auto' }));
@@ -812,7 +894,8 @@ window.AckMap = (() => {
     const h = el('input', { type: 'number', min: '2', max: '6', step: '0.1', value: String(M.floorH), className: 'small' });
     h.onchange = () => { const v = +h.value; if (v >= 2 && v <= 6) { M.floorH = v; locAt = 0; heatKey = ''; dirty = true; scheduleSave(); } };
     det.append(el('label', { className: 'map-floor-row' }, el('span', { textContent: 'Floor to floor (m)' }), h),
-      el('p', { className: 'muted small', textContent: 'Distances count the height between floors. A router or device on auto gets the floor its signals fit best.' }));
+      el('p', { className: 'muted small', textContent: 'Distances count the height between floors. A router or device on auto gets the floor its signals fit best.' }),
+      envNote());
     floorsEl = det;
     return det;
   }
@@ -1188,6 +1271,7 @@ window.AckMap = (() => {
     focus: focusKey,
     showPath,
     fmtLen,                                    // for tests in the browser
+    _env: () => ({ fit: envFit, hearings, nodes: [...M.nodes.values()].map(({ key, x, y, placed, board }) => ({ key, x, y, placed, board })) }),
     _layers: () => M.plans.map(({ img, ...p }) => p),
     _screenOf(id, u, v) {                      // where picture pixel (u, v) is on the canvas
       const p = plan(id), k = p.w / p.iw, c = Math.cos(p.rot), s = Math.sin(p.rot);

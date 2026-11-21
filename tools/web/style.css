@@ -593,3 +593,5 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .map-floor-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 3px 0; }
 .map-floor-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .map-floor-row input { width: 5em; }
+.map-env-fit { margin-top: 6px; }
+.map-env-fit .warn-text { color: var(--warn, #ffb547); }
