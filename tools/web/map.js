@@ -26,7 +26,7 @@ window.AckMap = (() => {
   };
 
   // ---------- state ----------
-  const M = { unit: 'ft', env: 'home', view: null, nodes: new Map(), plans: [], hubFloor: 1, floorH: 3.0 };
+  const M = { unit: 'ft', env: 'home', view: null, nodes: new Map(), plans: [], hubFloor: 1, floorH: 3.0, hubFacing: null };
   // nodes: key -> {key, name, x, y, placed, floor}. floor: the one you chose (1 = ground); a router or
   // device you haven't given one gets the floor that fits its signals best (autoFloor)
   // Picture layers, bottom first: {id, name, x, y (top-left corner, metres), w (width, metres), rot (radians),
@@ -220,7 +220,8 @@ window.AckMap = (() => {
         for (let gx = x0; gx <= x1; gx += step) {
           let sp = 0;
           const ls = obs.map(([a, r, az, af]) => {
-            const l = nn * Math.log10(Math.max(0.5, Math.hypot(gx - a.x, gy - a.y, gz - az))) + lf * Math.abs(fl - af);
+            const l = nn * Math.log10(Math.max(0.5, Math.hypot(gx - a.x, gy - a.y, gz - az))) + lf * Math.abs(fl - af)
+              - gainDb(a, gx, gy);                 // a router behind a board reads weaker
             sp += (r + l) * wm; return l;
           });
           const P = (sp + P0 * wp) / (obs.length * wm + wp);
@@ -261,7 +262,7 @@ window.AckMap = (() => {
         if (!a || a === t) continue;
         const d = dist3(a, t), r = heardAvg.get(key + '|' + by);
         if (d < 0.5 || r === undefined) continue;
-        rows.push({ key, by, d, r, fl: Math.abs(floorOf(a) - floorOf(t)) });
+        rows.push({ key, by, d, r: r - gainDb(a, t.x, t.y) - gainDb(t, a.x, a.y), fl: Math.abs(floorOf(a) - floorOf(t)) });
       }
     }
     const cross = rows.some((x) => x.fl > 0);
@@ -350,7 +351,12 @@ window.AckMap = (() => {
   // spots along its uncertainty (centre and 1 sigma either way)
   function endSamples(a, n) {
     const spread = (m) => {
-      if (!m || m === HUB || m.placed || !m.auto || m.auto.a < 1) return [m];
+      if (!m || m === HUB || m.placed || m.board || (m.key || '').startsWith('sat:')) return [m];
+      if (!m.auto) {                             // nothing known but a rough distance: anywhere around 3 m
+        const at = (ang) => ({ x: m.x + 3 * Math.cos(ang), y: m.y + 3 * Math.sin(ang), floor: m.floor, autoFloor: m.autoFloor });
+        return [m, at(0), at(Math.PI / 2), at(Math.PI), at(-Math.PI / 2)];
+      }
+      if (m.auto.a < 1) return [m];
       const c = Math.cos(m.auto.rot), sn = Math.sin(m.auto.rot), k = m.auto.a;
       const at = (f) => ({ x: m.x + f * k * c, y: m.y + f * k * sn, floor: m.floor, autoFloor: m.autoFloor });
       return [m, at(1), at(-1)];
@@ -375,9 +381,25 @@ window.AckMap = (() => {
     const d1 = Math.hypot(px - a.x, py - a.y, pz - za), d2 = Math.hypot(px - n.x, py - n.y, pz - zn);
     const zones = (d1 + d2 - d) / (lam / 2);           // which Fresnel zone the point is in
     const along = 1 / (1 + 0.22 * zones);               // ~0.8 at the first zone's edge, ~0.2 at 1.5 m out
-    const ends = 0.55 * Math.exp(-Math.min(d1, d2) / 0.7);
-    return Math.min(1, along * along + ends);
+    // a board hears best where it faces: both ends' patterns towards the point
+    const ga = gainAt(a, px, py), gn = gainAt(n, px, py);
+    const ends = 0.55 * Math.max(Math.exp(-d1 / 0.7) * ga, Math.exp(-d2 / 0.7) * gn);
+    return Math.min(1, along * along * ga * gn + ends);
   }
+  // ---------- facing: a board's antenna pattern ----------
+  // Its PCB antenna on a wall: strongest ahead, the wall behind (about 45% of
+  // the amplitude, -7 dB), the sides in between. No facing set: the same all round.
+  const BACK = 0.45;
+  const facingOf = (m) => (m === HUB ? M.hubFacing : m && m.facing);
+  function gainAt(m, px, py) {
+    const f = facingOf(m);
+    if (f === null || f === undefined) return 1;
+    const dx = px - m.x, dy = py - m.y;
+    if (dx * dx + dy * dy < 0.09) return 1;            // right at it
+    const c = Math.cos(Math.atan2(dy, dx) - f);
+    return BACK + (1 - BACK) * ((1 + c) / 2) ** 1.5;
+  }
+  const gainDb = (m, px, py) => 20 * Math.log10(gainAt(m, px, py));
   const heatCv = document.createElement('canvas'), heatMv = document.createElement('canvas');
   // Where the person likely is: a tracking estimate from every link's strength.
   //
@@ -404,7 +426,7 @@ window.AckMap = (() => {
     const S = fx.quality === 2 ? 3 : 4, w = Math.max(1, Math.ceil(W / S)), h = Math.max(1, Math.ceil(H / S));
     const vk = JSON.stringify(M.view);
     if (vk !== viewSeen) { viewSeen = vk; viewMovedAt = t; }
-    const geo = JSON.stringify([w, h, channel, !!track.est, L.map(({ a, n, color, r }) => [a.x, a.y, n.x, n.y, color, moving(r)])]);
+    const geo = JSON.stringify([w, h, channel, !!track.est, L.map(({ a, n, color, r }) => [a.x, a.y, n.x, n.y, color, moving(r), facingOf(a), facingOf(n)])]);
     const key = geo + '|' + vk;
     if (key === heatKey) return heatView;
     if (heatView && geo === heatKey.split('|')[0] && t - viewMovedAt < 200) return heatView;   // still moving
@@ -634,6 +656,46 @@ window.AckMap = (() => {
     ctx.fill(); ctx.stroke();
     label(x, y + 13, 'Light', on ? 'on' : lightInfo.state, on ? warn : css('--fg'));
   }
+  // A board's facing: an arrow you drag to aim, and its pattern as a faint
+  // outline (how far it hears each way). Not set yet: a faint arrow up,
+  // on the Map page only, as a hint that it can be turned.
+  const AIM_PX = 34;
+  const aimOf = (m) => { const f = facingOf(m); return typeof f === 'number' ? f : -Math.PI / 2; };
+  function drawFacing(m) {
+    const f = facingOf(m), set = typeof f === 'number';
+    if (!set && readOnly) return;
+    const x = X(m.x), y = Y(m.y), a = aimOf(m), col = css('--accent');
+    ctx.save();
+    if (set) {                                     // the pattern: r(angle) ~ gain that way
+      ctx.beginPath();
+      for (let i = 0; i <= 48; i++) {
+        const th = (i / 48) * 2 * Math.PI, g = BACK + (1 - BACK) * ((1 + Math.cos(th)) / 2) ** 1.5, rr = 14 + 30 * g;
+        const px = x + rr * Math.cos(th + a), py = y + rr * Math.sin(th + a);
+        i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+      }
+      ctx.fillStyle = alpha(col, 0.07); ctx.fill();
+      ctx.strokeStyle = alpha(col, 0.3); ctx.lineWidth = 1; ctx.stroke();
+    }
+    const tx = x + AIM_PX * Math.cos(a), ty = y + AIM_PX * Math.sin(a);
+    ctx.globalAlpha = set ? 1 : 0.35;
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 2; ctx.setLineDash(set ? [] : [3, 3]);
+    ctx.beginPath(); ctx.moveTo(x + 12 * Math.cos(a), y + 12 * Math.sin(a)); ctx.lineTo(tx, ty); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(tx + 6 * Math.cos(a), ty + 6 * Math.sin(a));
+    ctx.lineTo(tx + 6 * Math.cos(a + 2.4), ty + 6 * Math.sin(a + 2.4));
+    ctx.lineTo(tx + 6 * Math.cos(a - 2.4), ty + 6 * Math.sin(a - 2.4));
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  function facingHit(px, py) {
+    const nodes = [HUB, ...others.map((b) => M.nodes.get(b.key)).filter(Boolean)];
+    for (const m of nodes) {
+      const a = aimOf(m), tx = X(m.x) + AIM_PX * Math.cos(a), ty = Y(m.y) + AIM_PX * Math.sin(a);
+      if (Math.hypot(px - tx, py - ty) <= 11) return m;
+    }
+    return null;
+  }
   // A small glyph in a dot: Wi-Fi arcs for a router, the maker's initial for a device
   function glyph(x, y, r, n) {
     ctx.save();
@@ -651,6 +713,7 @@ window.AckMap = (() => {
   function draw(t) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
+    if (!loaded) return;                           // the saved layout first: guesses would set the view
     const cnt = links().length;                    // something new appeared: show it (a saved view stays at load)
     if (!M.view || (cnt > nodeCount && autoFit && !viewByUser)) fit();   // never over a view you set
     nodeCount = cnt;
@@ -722,6 +785,8 @@ window.AckMap = (() => {
         ctx.strokeRect(x - 14, y - 14, 28, 28); ctx.setLineDash([]); }
       label(x, y + 14, b.label + ft(n), { motion: 'MOTION', still: 'still', calibrating: 'calibrating', gone: 'not heard' }[b.state] || b.state, mv ? motionC : css('--fg'));
     }
+    drawFacing(HUB);
+    for (const b of others) { const n = M.nodes.get(b.key); if (n) drawFacing(n); }
     const drawn = new Set();                      // a router two boards share: one dot, its own name
     for (const { r, n, color } of L) {
       if (n === HUB || n.board || drawn.has(n.key)) continue;   // boards are squares, drawn above
@@ -1079,14 +1144,14 @@ window.AckMap = (() => {
   // (those can be left to the signals). Floors are M.floorH apart.
   let floorsOpen = false, floorsEl = null, floorsSig = '';
   function floorsPanel() {
-    const sig = JSON.stringify([envFit && [envFit.n.toFixed(1), Math.round(envFit.lf), envFit.checks.map((c) => c.key + c.by)],
+    const sig = JSON.stringify([M.hubFacing, others.map((b) => (M.nodes.get(b.key) || {}).facing), envFit && [envFit.n.toFixed(1), Math.round(envFit.lf), envFit.checks.map((c) => c.key + c.by)],
       M.hubFloor, M.floorH, others.map((b) => [b.key, b.label]),
       links().map(({ n }) => [n.key, n.name, n.floor, n.autoFloor]), [...M.nodes.values()].map((n) => n.floor)]);
     if (floorsEl && sig === floorsSig) return floorsEl;   // unchanged: keep it (an open dropdown stays open)
     floorsSig = sig;
     const det = el('details', { className: 'map-floors', open: floorsOpen });
     det.ontoggle = () => { floorsOpen = det.open; };
-    det.append(el('summary', { textContent: 'Floors and signal' }));
+    det.append(el('summary', { textContent: 'Floors, facing and signal' }));
     const row = (name, val, auto, set) => {
       const sel = el('select', { className: 'small' });
       if (auto !== null) sel.append(el('option', { value: '0', textContent: auto ? `auto (${auto})` : 'auto' }));
@@ -1095,10 +1160,19 @@ window.AckMap = (() => {
       sel.onchange = () => { set(+sel.value); locAt = 0; heatKey = ''; dirty = true; renderList(); scheduleSave(); };
       return el('label', { className: 'map-floor-row' }, el('span', { textContent: name }), sel);
     };
-    det.append(row('Hub', M.hubFloor, null, (f) => { M.hubFloor = f || 1; }));
+    const aim = (m, clear) => {                    // facing: shown, and clearable
+      const f = facingOf(m);
+      if (typeof f !== 'number') return el('span', { className: 'muted small', textContent: 'facing: drag its arrow' });
+      const compass = ['east', 'south-east', 'south', 'south-west', 'west', 'north-west', 'north', 'north-east'];
+      const i = ((Math.round(f / (Math.PI / 4)) % 8) + 8) % 8;
+      const b = el('button', { type: 'button', className: 'ghost small', textContent: `faces ${compass[i]} · clear` });
+      b.onclick = () => { clear(); heatKey = ''; locAt = 0; dirty = true; renderList(); scheduleSave(); };
+      return b;
+    };
+    det.append(row('Hub', M.hubFloor, null, (f) => { M.hubFloor = f || 1; }), aim(HUB, () => { M.hubFacing = null; }));
     for (const b of others) {
       const n = M.nodes.get(b.key);
-      if (n) det.append(row(b.label, n.floor || M.hubFloor, null, (f) => { n.floor = f; }));
+      if (n) det.append(row(b.label, n.floor || M.hubFloor, null, (f) => { n.floor = f; }), aim(n, () => { n.facing = undefined; }));
     }
     const seen = new Set();
     for (const { n, r } of links()) {
@@ -1128,7 +1202,7 @@ window.AckMap = (() => {
   }
   function pos(e) { const b = cv.getBoundingClientRect(); return [e.clientX - b.left, e.clientY - b.top]; }
   function down(e) {
-    cv.setPointerCapture(e.pointerId);
+    try { cv.setPointerCapture(e.pointerId); } catch (err) { /* a synthetic or ended pointer: fine without */ }
     const [x, y] = pos(e);
     ptrs.set(e.pointerId, { x, y });
     if (ptrs.size === 2) {                         // pinch
@@ -1146,6 +1220,8 @@ window.AckMap = (() => {
       drag = { layer: p, x0: x, y0: y, lx: p.x, ly: p.y };
       return;
     }
+    const fh = tool ? null : facingHit(x, y);       // a board's arrow: aim it
+    if (fh) { drag = { facing: fh }; autoFit = false; return; }
     const n = tool ? null : hit(x, y);              // while scaling or aligning, taps mark points
     if (!n && !tool && Math.hypot(X(0) - x, Y(0) - y) <= 18) {
       // the board: everything is measured from it, so moving it shifts the rest the other way
@@ -1165,6 +1241,11 @@ window.AckMap = (() => {
       const [a, b] = [...ptrs.values()], dist = Math.hypot(a.x - b.x, a.y - b.y);
       if (drag.dist > 0) zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, dist / drag.dist);
       drag.dist = dist;
+    } else if (drag.facing) {
+      const m = drag.facing, deg = Math.round(Math.atan2(y - Y(m.y), x - X(m.x)) * 180 / Math.PI / 5) * 5;
+      const f = deg * Math.PI / 180;                 // 5-degree steps
+      if (m === HUB) M.hubFacing = f; else m.facing = f;
+      heatKey = ''; locAt = 0; dirty = true;
     } else if (drag.key) {
       const n = M.nodes.get(drag.key), [wx, wy] = toWorld(x, y);
       n.x = wx; n.y = wy; n.placed = true;
@@ -1190,7 +1271,7 @@ window.AckMap = (() => {
   function up(e) {
     ptrs.delete(e.pointerId);
     if (drag && drag.pan && drag.tap && tool && e.type === 'pointerup') toolTap(...toWorld(...pos(e)));
-    if (!readOnly && drag && (drag.key || drag.pan || drag.layer || drag.board)) scheduleSave();
+    if (!readOnly && drag && (drag.key || drag.pan || drag.layer || drag.board || drag.facing)) { scheduleSave(); if (drag.facing) renderList(); }
     drag = ptrs.size === 1 ? { pan: true, x0: [...ptrs.values()][0].x, y0: [...ptrs.values()][0].y, vx: M.view.x, vy: M.view.y } : null;
   }
 
@@ -1202,7 +1283,9 @@ window.AckMap = (() => {
   async function save() {
     const body = { unit: M.unit, env: M.env, nodes: [...M.nodes.values()].slice(0, 64).map((n) =>
       Object.assign({ key: n.key, name: String(n.name).slice(0, 64), x: n.x, y: n.y, placed: !!n.placed },
-        n.floor ? { floor: n.floor } : {})), hub_floor: M.hubFloor, floor_h: M.floorH };
+        n.floor ? { floor: n.floor } : {}, typeof n.facing === 'number' ? { facing: n.facing } : {})),
+      hub_floor: M.hubFloor, floor_h: M.floorH };
+    if (typeof M.hubFacing === 'number') body.hub_facing = M.hubFacing;
     if (M.view && viewByUser) body.view = M.view;
     body.plans = M.plans.map((p) => ({ id: p.id, name: String(p.name).slice(0, 64), x: p.x, y: p.y, w: p.w,
       rot: p.rot, opacity: p.opacity, hidden: !!p.hidden }));
@@ -1216,7 +1299,9 @@ window.AckMap = (() => {
     if (m.view) { M.view = m.view; autoFit = false; viewByUser = true; }
     if (m.hub_floor) M.hubFloor = m.hub_floor;
     if (m.floor_h) M.floorH = m.floor_h;
-    for (const n of m.nodes || []) M.nodes.set(n.key, { key: n.key, name: n.name || n.key, x: n.x, y: n.y, placed: !!n.placed, floor: n.floor || 0 });
+    if (typeof m.hub_facing === 'number') M.hubFacing = m.hub_facing;
+    for (const n of m.nodes || []) M.nodes.set(n.key, { key: n.key, name: n.name || n.key, x: n.x, y: n.y, placed: !!n.placed, floor: n.floor || 0,
+      facing: typeof n.facing === 'number' ? n.facing : undefined });
     if (m.plans) {
       M.plans = m.plans.map((p) => Object.assign({ name: p.id, rot: 0, opacity: 1, hidden: false }, p));
       for (const p of M.plans) loadPicture(p);
@@ -1349,10 +1434,13 @@ window.AckMap = (() => {
     }));
   }
   async function load() {
+    let saved = {};
     try {
       const r = await fetch('api/map', { headers: { 'X-Ackwave': '1' } });
-      apply(r.ok ? await r.json() : {});
+      saved = r.ok ? await r.json() : {};
+      apply(saved);
     } catch (e) { /* start fresh */ }
+    if (!saved.view) { M.view = null; autoFit = true; viewByUser = false; }   // fit to the real layout, not first guesses
     loaded = true;
     syncControls();
     dirty = true;
@@ -1489,6 +1577,8 @@ window.AckMap = (() => {
     focus: focusKey,
     showPath,
     _likely: () => track.est,
+    _screenOfWorld: (x, y) => [X(x), Y(y)],
+    _view: () => ({ view: M.view, nodes: [...M.nodes.values()].map((n) => [n.key.slice(-5), +n.x.toFixed(1), +n.y.toFixed(1), !!n.placed, n.auto ? +n.auto.a.toFixed(1) : null]) }),
     _truth: () => demoPerson,
     fmtLen,                                    // for tests in the browser
     _env: () => ({ fit: envFit, hearings, nodes: [...M.nodes.values()].map(({ key, x, y, placed, board }) => ({ key, x, y, placed, board })) }),
