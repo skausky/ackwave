@@ -967,6 +967,28 @@ class Dashboard:
                             via=d.get('via', 'air')))
         return out
 
+    def _hearings(self):
+        """Who hears whom, how strongly: {target key: [[observer key, dBm], ...]}.
+        The Map places what you haven't (routers, devices, unplaced boards)
+        from these and the boards you placed. Observers: 'hub' (its own links
+        and the boards' hellos) and 'sat:<mac>' (their surveys, every 10 s)."""
+        now = time.time()
+        out = {}
+        add = lambda key, by, rssi: rssi and -100 < rssi < 0 and key != by and \
+            out.setdefault(key, []).append([by, int(rssi)])
+        for r in self._radio():
+            add(r['key'], 'hub', r['rssi'])
+        for mac, d in self.sats.items():
+            if now - d['at'] > SAT_GONE_S:
+                continue
+            add('sat:' + mac, 'hub', d.get('rssi'))
+            for tmac, e in self.surveys.get(mac, {}).items():
+                if now - e['at'] > 120:
+                    continue
+                key, _nm = self._target_key(tmac, 2 if e['kind'] == 'router' else 0)
+                add(key, 'sat:' + mac, e['rssi'])
+        return out
+
     def _house_slow(self):
         motion, by = self.house_now
         off = set(self.cfg['house_off'])
@@ -1353,7 +1375,7 @@ class Dashboard:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        routers=self._routers(), boards=self._boards(), house=self._house_slow(), tz=PC_TZ,
-                       map_boards=self._map_boards(), events=list(self.events)[-80:],
+                       map_boards=self._map_boards(), hearings=self._hearings(), events=list(self.events)[-80:],
                        board_settings=self._board_settings(), primary=self.primary or self.s.me,
                        pairing=self.pair.status(self.pair.me == self.cfg['hub'], self._hub_boards()),
                        settings=self.cfg, sound=s.sound, sens=s.sens, led=s.led, gates=self._gates(),

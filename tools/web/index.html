@@ -258,10 +258,11 @@
             <div class="seg" id="map-unit"><button type="button" data-u="ft">ft</button><button type="button" data-u="m">m</button></div>
             <select id="map-env" title="How fast the signal fades with distance indoors"></select>
             <button type="button" id="map-fit">Fit</button>
+            <button type="button" id="map-auto" title="Place routers and devices from the signals your boards hear">Auto-place</button>
             <button type="button" id="map-reset" class="ghost">Reset</button>
           </div>
         </div>
-        <p class="cap">Every board (squares), router and poked device (dots), and each link between them. The glow is where a person changes that link's signal, an estimate: strongest inside the thin outline (the 1st Fresnel zone, drawn to scale), fading outward as reflections carry the change around the room, and strong right next to either end. It pulses red while that link sees motion. Walls and furniture bend it; drag each square and dot to where it really is; pinch or scroll to zoom, drag empty space to pan.</p>
+        <p class="cap">Every board (squares), router and poked device (dots), and each link between them. The glow is where a person changes that link's signal, an estimate: strongest inside the thin outline (the 1st Fresnel zone, drawn to scale), fading outward as reflections carry the change around the room, and strong right next to either end. It pulses red while that link sees motion. Walls and furniture bend it. Place the hub and your boards (drag the squares); routers and devices then place themselves from the signals the boards hear, with a faint area for how sure that is. Drag a dot only if you know where it is. Pinch or scroll to zoom, drag empty space to pan: the view stays where you leave it.</p>
         <div class="map-stage"><canvas id="map-cv"></canvas><div class="overlay" id="map-msg"></div>
           <div class="map-hint" id="map-hint" hidden><span id="map-hint-text"></span><button type="button" id="map-hint-done">Done</button></div></div>
       </section>
@@ -271,7 +272,7 @@
         <details class="map-notes">
           <summary>How to read this</summary>
           <p>A link's motion zone depends only on its length and the channel, so once the dots are where things really are, the ovals are exact. Motion right next to the board or the device counts too, even outside the oval, because that end of the link is so close.</p>
-          <p>The dashed ring around a dot means it was placed from its signal strength, which is rough: walls and furniture make things look farther away. Drag it to its real place.</p>
+          <p>The dashed ring around a dot means ackwave placed it from the signals: every placed board that hears it gives a distance, and together they give a spot. The faint area around it is how sure that is: one board gives only a ring, two a pair of spots, three or more a point. Walls make things look farther away, so it is a good start, not a survey. Drag a dot to fix it; <b>Place automatically</b> (in its row) or <b>Auto-place</b> hands it back.</p>
           <p>The "open air" estimate uses the free-space loss and the environment's fade rate. A link that is many dB weaker than that has walls or furniture in between.</p>
         </details>
         <details class="map-notes">

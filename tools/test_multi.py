@@ -224,7 +224,11 @@ def sat_links():
     for i in range(10):
         d.feed(f'SATL,{S},{R}:3:22:21,{FIRST}:4:25:24,{D}:4:30:28\n')
     d.feed(f'SURV,{S},{R}:0:-60,{FIRST}:1:-58\n')
-    mb = d.slow(30)['map_boards'][0]
+    sl = d.slow(30)
+    mb = sl['map_boards'][0]
+    hr = sl['hearings']                             # who hears whom: the Map places from these
+    assert ['sat:' + S, -60] in hr['ap:1'] and ['sat:' + S, -58] in hr['hub'], hr
+    assert ['hub', -40] in hr['sat:' + S], hr
     keys = {l['key']: l for l in mb['links']}
     assert set(keys) == {'ap:1', 'hub', D} and keys['ap:1']['router'] and not keys[D]['router'], keys
     assert mb['router'] == 'ap:1', "a router the hub watches shares its dot"

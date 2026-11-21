@@ -34,9 +34,13 @@ window.AckMap = (() => {
   let tool = null;                          // {kind: 'move'|'scale'|'align', id, pts: [], step}
   let readOnly = false;                     // on Home: look, pan and zoom; nothing is moved or saved
   let stageMark = null;                     // where the map lives on the Map page (it visits Home)
-  let pageView = null, homeFit = false;     // the Map page's view, kept while Home fits its own
+  let pageView = null, homeFit = false;     // the Map page's view, kept while Home shows its own
+  let homeView = null;                      // Home's view: fitted once, then yours (this visit)
   let radio = [], channel = 6, boardMotion = false;
   let others = [];                          // the other boards (slow.map_boards): each a point with its router
+  let hearings = {};                        // slow.hearings: target key -> [[observer key, dBm]]
+  const heardAvg = new Map();               // 'target|observer' -> smoothed dBm
+  let locAt = 0;
   let routersInfo = [];                     // the hub's routers (slow.routers): idx -> bssid, for naming
   let showOnly = null;                      // null = every board's links; 'hub' or 'sat:<mac>' = one board's
   const WEAK_DBM = -80;                     // links weaker than this are drawn faint
@@ -155,6 +159,89 @@ window.AckMap = (() => {
   const moving = (r) => (r.link ? !!r.link.moving && r.board.state !== 'gone'
     : r.board ? r.board.state === 'motion' : r.key === 'ap:0' ? boardMotion : !!r.moving);
 
+  // ---------- placing what you didn't: from who hears it, how strongly ----------
+  // Anchors are the hub (always at 0, 0) and the boards you placed. For a
+  // router, a device or a board you haven't placed, every anchor that hears it
+  // gives a signal; the log-distance model (this environment's n) says how far
+  // that is. Its transmit power is unknown, so it is solved too (pulled towards
+  // a typical value). A grid search finds the best spot and how sure that is:
+  // one anchor gives a ring, two a pair of spots, three or more a point.
+  const SIGMA_DB = 6, SIGMA_P = 15;           // a signal's scatter indoors; how far its power may be from typical (walls)
+  function smoothHeard() {
+    for (const [key, obs] of Object.entries(hearings))
+      for (const [by, dbm] of obs) {
+        const k = key + '|' + by, v = heardAvg.get(k);
+        heardAvg.set(k, v === undefined ? dbm : 0.8 * v + 0.2 * dbm);
+      }
+  }
+  function anchorOf(by) {
+    if (by === 'hub') return HUB;
+    const n = M.nodes.get(by);
+    return n && n.placed ? n : null;
+  }
+  function solveOne(key, n) {
+    const obs = [];
+    for (const [by] of hearings[key] || []) {
+      const a = anchorOf(by);
+      if (a && a !== n) obs.push([a, heardAvg.get(key + '|' + by)]);
+    }
+    if (!obs.length) return null;
+    const kind = key.startsWith('sat:') ? BOARD.txDbm : (key.startsWith('ap:') || key.startsWith('r:')) ? EIRP.ap : EIRP.device;
+    const P0 = kind - pl1(), nn = 10 * envN(), wm = 1 / SIGMA_DB ** 2, wp = 1 / SIGMA_P ** 2;
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const [a] of obs) { x0 = Math.min(x0, a.x); x1 = Math.max(x1, a.x); y0 = Math.min(y0, a.y); y1 = Math.max(y1, a.y); }
+    const pad = 15, G = 90;
+    x0 -= pad; x1 += pad; y0 -= pad; y1 += pad;
+    const step = Math.max(x1 - x0, y1 - y0) / G;
+    const cells = [];
+    let best = null;
+    for (let gy = y0; gy <= y1; gy += step)
+      for (let gx = x0; gx <= x1; gx += step) {
+        let sp = 0;
+        const ls = obs.map(([a, r]) => { const l = nn * Math.log10(Math.max(0.5, Math.hypot(gx - a.x, gy - a.y))); sp += (r + l) * wm; return l; });
+        const P = (sp + P0 * wp) / (obs.length * wm + wp);
+        let J = (P - P0) ** 2 * wp;
+        obs.forEach(([, r], i) => { J += (r - (P - ls[i])) ** 2 * wm; });
+        cells.push([gx, gy, J]);
+        if (!best || J < best[2]) best = [gx, gy, J];
+      }
+    // how sure: the spread of the likely cells around the best one
+    let sw = 0, sxx = 0, syy = 0, sxy = 0;
+    for (const [gx, gy, J] of cells) {
+      const w = Math.exp(-(J - best[2]) / 2);
+      if (w < 1e-3) continue;
+      const dx = gx - best[0], dy = gy - best[1];
+      sw += w; sxx += w * dx * dx; syy += w * dy * dy; sxy += w * dx * dy;
+    }
+    sxx /= sw; syy /= sw; sxy /= sw;
+    const tr = (sxx + syy) / 2, det = Math.sqrt(Math.max(0, ((sxx - syy) / 2) ** 2 + sxy * sxy));
+    return { x: best[0], y: best[1], a: Math.sqrt(tr + det) + step / 2, b: Math.sqrt(Math.max(0, tr - det)) + step / 2,
+      rot: 0.5 * Math.atan2(2 * sxy, sxx - syy), heardBy: obs.length };
+  }
+  // Every few seconds: move what you haven't placed to where its signals say
+  function locate(t) {
+    if (t - locAt < 3000) return;
+    locAt = t;
+    smoothHeard();
+    let moved = false;
+    for (const [key, n] of M.nodes) {
+      if (n.placed || key === 'light') continue;
+      const s = solveOne(key, n);
+      if (!s) { n.auto = null; continue; }
+      const k = n.auto ? 0.5 : 1;                // glide, don't jump
+      n.x += (s.x - n.x) * k; n.y += (s.y - n.y) * k;
+      n.auto = s;
+      moved = true;
+    }
+    if (moved) { dirty = true; scheduleSave(); }
+  }
+  // An unplaced node: back to the signals (a placed one keeps where you put it)
+  function unplace(key) {
+    const n = M.nodes.get(key);
+    if (!n) return;
+    n.placed = false; n.auto = null; locAt = 0; dirty = true; renderList(); scheduleSave();
+  }
+
   // ---------- sensitivity: where a person changes each link ----------
   // An estimate, not a measurement. A body changes a link most inside its
   // first Fresnel zone (path through the point at most lambda/2 longer than
@@ -221,9 +308,13 @@ window.AckMap = (() => {
   const Y = (y) => H / 2 + (y - M.view.y) * M.view.s;
   const toWorld = (px, py) => [M.view.x + (px - W / 2) / M.view.s, M.view.y + (py - H / 2) / M.view.s];
   function fit() {
-    const pts = [[0, 0], ...links().flatMap(({ a, n }) => [[a.x, a.y], [n.x, n.y]])];
-    for (const p of M.plans) {                       // and every picture's corners
-      if (p.hidden || !p.img) continue;
+    // the hub, the boards, and what is placed or well located; a rough guess
+    // (a ring from one board) or a picture never pulls the view far out
+    const sure = (n) => n === HUB || n.board || n.placed || (n.auto && n.auto.a < 6);
+    const pts = [[0, 0], ...links().flatMap(({ a, n }) => [a, n]).filter(sure).map((n) => [n.x, n.y])];
+    for (const b of others) { const n = M.nodes.get(b.key); if (n) pts.push([n.x, n.y]); }
+    for (const p of M.plans) {                       // pictures only when there is nothing else
+      if (pts.length > 1 || p.hidden || !p.img) continue;
       const h = p.w * p.ih / p.iw, c = Math.cos(p.rot), s = Math.sin(p.rot);
       for (const [u, v] of [[0, 0], [p.w, 0], [0, h], [p.w, h]]) pts.push([p.x + u * c - v * s, p.y + u * s + v * c]);
     }
@@ -423,10 +514,12 @@ window.AckMap = (() => {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
     const cnt = links().length;                    // something new appeared: show it (a saved view stays at load)
-    if (!M.view || (cnt > nodeCount && (nodeCount > 0 || autoFit))) fit();
+    if (!M.view || (cnt > nodeCount && autoFit && !viewByUser)) fit();   // never over a view you set
     nodeCount = cnt;
+    locate(t);
     drawPlans();
     grid();
+    drawLikely();
     const L = links(), lam = lambda(), motionC = css('--motion');
     const pulse = 0.5 + 0.5 * Math.sin(t / 260);
     const hv = heat(L, t);                         // where each link is sensitive (estimate)
@@ -507,6 +600,19 @@ window.AckMap = (() => {
     ripples(t, keys);
     $('#map-msg').textContent = L.length ? '' : 'Waiting for live links: the router appears once the board hears it.';
   }
+  // Where an auto-placed node probably is: a soft ellipse (about 1 sigma)
+  function drawLikely() {
+    ctx.save();
+    for (const [key, n] of M.nodes) {
+      if (n.placed || !n.auto || key === 'light') continue;
+      if (showOnly && !links().some(({ n: m }) => m === n)) continue;
+      ctx.beginPath();
+      ctx.ellipse(X(n.x), Y(n.y), Math.max(n.auto.a * M.view.s, 6), Math.max(n.auto.b * M.view.s, 6), n.auto.rot, 0, Math.PI * 2);
+      ctx.fillStyle = alpha(css('--accent'), 0.06); ctx.fill();
+      ctx.strokeStyle = alpha(css('--accent'), 0.35); ctx.lineWidth = 1; ctx.setLineDash([2, 4]); ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
   function label(x, y, text, sub, color) {
     ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.lineWidth = 3; ctx.strokeStyle = css('--bg'); ctx.strokeText(text, x, y);
@@ -573,7 +679,17 @@ window.AckMap = (() => {
           : diff < 0 ? `${-diff} dB weaker than open air would give here (${Math.round(exp)} dBm): walls, furniture or people in between`
             : `${diff} dB stronger than expected here (${Math.round(exp)} dBm): it may be closer than placed, or a strong device`);
       }
-      if (!n.placed && !n.board && n !== HUB) rows.push('Placed from its signal (rough): drag the dot to where it really is.');
+      if (n !== HUB && !n.placed) {
+        const au = n.auto;
+        rows.push(au ? `Placed automatically from ${au.heardBy} board${au.heardBy > 1 ? 's' : ''} that hear it, within about ${fmtLen(au.a)}`
+          + (au.heardBy === 1 ? ' (one board gives only a distance: place more boards to pin it down)' : au.heardBy === 2 ? ' (two boards: it could be the mirror spot)' : '')
+          + '. Drag it if you know better.'
+          : 'Placed from its signal (rough): drag it to where it really is, or place the boards that hear it.');
+      } else if (n !== HUB && n.placed && !n.board) {
+        const b = el('button', { type: 'button', className: 'ghost small', textContent: 'Place automatically' });
+        b.onclick = () => unplace(n.key);
+        rows.push(b);
+      }
       if (weak(r)) rows.push(`Weak (${WEAK_DBM} dBm or less): drawn faint; its board relies on it little.`);
       const bssid = r.ap ? bssidOf(n.key || '') : null;
       if (bssid) {                               // name a router once, every page and board uses it
@@ -612,6 +728,7 @@ window.AckMap = (() => {
       return;
     }
     if (readOnly) {                                // Home: pan only
+      autoFit = false;
       drag = { pan: true, x0: x, y0: y, vx: M.view.x, vy: M.view.y };
       return;
     }
@@ -700,7 +817,6 @@ window.AckMap = (() => {
       p.img = await createImageBitmap(await r.blob());
       p.iw = p.img.width; p.ih = p.img.height;
     } catch (e) { p.img = null; p.missing = true; }
-    if (readOnly && visible) fit();                 // Home: show the whole property once it loads
     dirty = true;
     renderLayers();
   }
@@ -827,7 +943,6 @@ window.AckMap = (() => {
     } catch (e) { /* start fresh */ }
     loaded = true;
     syncControls();
-    if (readOnly) fit();
     dirty = true;
     renderList();
   }
@@ -845,6 +960,11 @@ window.AckMap = (() => {
     $('#map-fit').onclick = () => { fit(); viewByUser = true; scheduleSave(); };
     $('#map-file').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) addPicture(f); };
     $('#map-hint-done').onclick = () => setTool(null);
+    $('#map-auto').onclick = () => {           // routers and devices back to their signals; boards stay
+      if (!confirm('Let ackwave place every router and device from the signals your boards hear? (Boards stay where you put them.)')) return;
+      for (const [key, n] of M.nodes) if (!n.board && !key.startsWith('sat:') && key !== 'light') { n.placed = false; n.auto = null; }
+      locAt = 0; dirty = true; renderList(); scheduleSave();
+    };
     renderLayers();
     $('#map-reset').onclick = () => {
       if (!confirm('Put every dot back where its signal suggests (and forget where you placed them)?')) return;
@@ -890,8 +1010,14 @@ window.AckMap = (() => {
       const box = sel ? document.querySelector(sel) : null;
       if (box && stage.parentElement !== box) box.append(stage);
       if (!box && stage.nextSibling !== stageMark) stageMark.before(stage);
-      if (ro && !readOnly) { pageView = M.view && { ...M.view }; homeFit = true; }   // Home: its own view
-      if (!ro && readOnly && pageView) { M.view = pageView; pageView = null; }       // back: the page's view
+      if (ro && !readOnly) {                     // Home: its own view, fitted only the first time
+        pageView = M.view && { ...M.view };
+        if (homeView) M.view = { ...homeView }; else homeFit = true;
+      }
+      if (!ro && readOnly) {                     // back: the page's view
+        homeView = M.view && { ...M.view };
+        if (pageView) { M.view = pageView; pageView = null; }
+      }
       readOnly = !!ro;
       if (readOnly && tool) setTool(null);
       dirty = true;
@@ -916,7 +1042,7 @@ window.AckMap = (() => {
     },
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
-      if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; if (slow.channel) channel = slow.channel; }
+      if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; if (slow.channel) channel = slow.channel; }
       if (header) boardMotion = hubMoving(header);
       if (header && header.light) {
         lightInfo = header.light;
