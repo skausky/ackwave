@@ -342,15 +342,16 @@ def main():
         st, body = request(port, 'GET', '/api/map', headers={'X-Ackwave': '1'})
         assert st == 200 and json.loads(body) == {}, "no map yet: empty"
         mac = ':'.join(f'{x:02x}' for x in (0x50, 2, 0x91, 1, 2, 3))
-        layout = {'unit': 'ft', 'env': 'home', 'view': {'x': 1.5, 'y': -2, 's': 30},
+        layout = {'unit': 'ft', 'env': 'home', 'view': {'x': 1.5, 'y': -2, 's': 30}, 'hub_floor': 2, 'floor_h': 3.1,
                   'nodes': [{'key': 'ap:0', 'name': 'router', 'x': 6.1, 'y': 0.4, 'placed': True, 'junk': 1},
-                            {'key': mac, 'name': 'Amazon', 'x': -2, 'y': 3.5, 'eirp': 16}],
+                            {'key': mac, 'name': 'Amazon', 'x': -2, 'y': 3.5, 'eirp': 16, 'floor': 1}],
                   'img': 'data:image/png;base64,AAAA', 'extra': {'a': 1}}
         st, body = request(port, 'POST', '/api/map', json.dumps(layout), hdr)
         assert st == 200 and json.loads(body)['ok'], body
         st, body = request(port, 'GET', '/api/map', headers={'X-Ackwave': '1'})
         got = json.loads(body)
         assert got['nodes'][0] == {'key': 'ap:0', 'name': 'router', 'x': 6.1, 'y': 0.4, 'placed': True}, got
+        assert got['hub_floor'] == 2 and got['floor_h'] == 3.1 and got['nodes'][1]['floor'] == 1, "floors kept"
         assert got['nodes'][1]['eirp'] == 16 and got['view'] == {'x': 1.5, 'y': -2, 's': 30}
         assert 'extra' not in got and 'img' not in got and 'junk' not in got['nodes'][0], "unknown keys dropped"
         mpath = os.path.join(os.path.dirname(dash.settings_path), 'map.json')

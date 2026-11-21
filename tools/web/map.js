@@ -26,7 +26,9 @@ window.AckMap = (() => {
   };
 
   // ---------- state ----------
-  const M = { unit: 'ft', env: 'home', view: null, nodes: new Map(), plans: [] };   // nodes: key -> {key, name, x, y, placed}
+  const M = { unit: 'ft', env: 'home', view: null, nodes: new Map(), plans: [], hubFloor: 1, floorH: 3.0 };
+  // nodes: key -> {key, name, x, y, placed, floor}. floor: the one you chose (1 = ground); a router or
+  // device you haven't given one gets the floor that fits its signals best (autoFloor)
   // Picture layers, bottom first: {id, name, x, y (top-left corner, metres), w (width, metres), rot (radians),
   // opacity, hidden, img (once loaded), iw, ih (its pixels)}. A picture pixel (u, v) lands at
   // (x, y) + rotate(rot) * (u, v) * w / iw.
@@ -99,6 +101,11 @@ window.AckMap = (() => {
     return n;
   }
   const HUB = { x: 0, y: 0 };                // positions are metres from the hub
+  // Height: floors are M.floorH apart (about 3 m: ceiling plus floor)
+  const floorOf = (n) => (n === HUB ? M.hubFloor : n.floor || n.autoFloor || M.hubFloor);
+  const zOf = (n) => (floorOf(n) - 1) * M.floorH;
+  const dist3 = (a, n) => Math.hypot(n.x - a.x, n.y - a.y, zOf(n) - zOf(a));
+  const floorsUsed = () => new Set([M.hubFloor, ...[...M.nodes.values()].map((n) => n.floor || n.autoFloor || M.hubFloor)]).size > 1;
   // Another board: first placed from how strongly the hub hears it
   function boardNode(b, k) {
     let n = M.nodes.get(b.key);
@@ -136,7 +143,7 @@ window.AckMap = (() => {
     const out = live.map((r, k) => {
       const bk = others.findIndex((o) => o.key === 'sat:' + r.key);   // a board the hub pokes: its square
       const n = bk >= 0 ? boardNode(others[bk], bk) : nodeFor(r, k);
-      return { r, a: HUB, n, color: PALETTE[k % PALETTE.length], d: Math.hypot(n.x, n.y) };
+      return { r, a: HUB, n, color: PALETTE[k % PALETTE.length], d: dist3(HUB, n) };
     });
     others.forEach((b, k) => {
       const a = boardNode(b, k);
@@ -149,7 +156,7 @@ window.AckMap = (() => {
         const r = { key: `${b.key}>${l.key}`, label: `${b.label} → ${l.name || 'its router'}`, ap: !!l.router,
           rssi: l.router && l.key === b.router ? b.router_rssi : null, board: b, link: l,
           state: b.state === 'gone' ? 'silent' : l.moving ? 'motion' : b.state === 'calibrating' ? 'calibrating' : 'still' };
-        out.push({ r, a, n, color: PALETTE[(live.length + 3 * k + j) % PALETTE.length], d: Math.hypot(n.x - a.x, n.y - a.y) });
+        out.push({ r, a, n, color: PALETTE[(live.length + 3 * k + j) % PALETTE.length], d: dist3(a, n) });
       });
     });
     if (!showOnly) return out;
@@ -183,9 +190,11 @@ window.AckMap = (() => {
     const obs = [];
     for (const [by] of hearings[key] || []) {
       const a = anchorOf(by);
-      if (a && a !== n) obs.push([a, heardAvg.get(key + '|' + by)]);
+      if (a && a !== n) obs.push([a, heardAvg.get(key + '|' + by), zOf(a)]);
     }
     if (!obs.length) return null;
+    // its floor: the one you chose, else every floor the anchors are on (and the ground), best fit wins
+    const floors = n.floor ? [n.floor] : [...new Set([1, M.hubFloor, ...obs.map(([a]) => floorOf(a))])];
     const kind = key.startsWith('sat:') ? BOARD.txDbm : (key.startsWith('ap:') || key.startsWith('r:')) ? EIRP.ap : EIRP.device;
     const P0 = kind - pl1(), nn = 10 * envN(), wm = 1 / SIGMA_DB ** 2, wp = 1 / SIGMA_P ** 2;
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
@@ -193,18 +202,22 @@ window.AckMap = (() => {
     const pad = 15, G = 90;
     x0 -= pad; x1 += pad; y0 -= pad; y1 += pad;
     const step = Math.max(x1 - x0, y1 - y0) / G;
-    const cells = [];
-    let best = null;
-    for (let gy = y0; gy <= y1; gy += step)
-      for (let gx = x0; gx <= x1; gx += step) {
-        let sp = 0;
-        const ls = obs.map(([a, r]) => { const l = nn * Math.log10(Math.max(0.5, Math.hypot(gx - a.x, gy - a.y))); sp += (r + l) * wm; return l; });
-        const P = (sp + P0 * wp) / (obs.length * wm + wp);
-        let J = (P - P0) ** 2 * wp;
-        obs.forEach(([, r], i) => { J += (r - (P - ls[i])) ** 2 * wm; });
-        cells.push([gx, gy, J]);
-        if (!best || J < best[2]) best = [gx, gy, J];
-      }
+    let cells = [], best = null;
+    for (const fl of floors) {
+      const gz = (fl - 1) * M.floorH, fc = [];
+      let fb = null;
+      for (let gy = y0; gy <= y1; gy += step)
+        for (let gx = x0; gx <= x1; gx += step) {
+          let sp = 0;
+          const ls = obs.map(([a, r, az]) => { const l = nn * Math.log10(Math.max(0.5, Math.hypot(gx - a.x, gy - a.y, gz - az))); sp += (r + l) * wm; return l; });
+          const P = (sp + P0 * wp) / (obs.length * wm + wp);
+          let J = (P - P0) ** 2 * wp;
+          obs.forEach(([, r], i) => { J += (r - (P - ls[i])) ** 2 * wm; });
+          fc.push([gx, gy, J]);
+          if (!fb || J < fb[2]) fb = [gx, gy, J];
+        }
+      if (!best || fb[2] < best[2]) { best = fb; best.floor = fl; cells = fc; }
+    }
     // how sure: the spread of the likely cells around the best one
     let sw = 0, sxx = 0, syy = 0, sxy = 0;
     for (const [gx, gy, J] of cells) {
@@ -216,7 +229,7 @@ window.AckMap = (() => {
     sxx /= sw; syy /= sw; sxy /= sw;
     const tr = (sxx + syy) / 2, det = Math.sqrt(Math.max(0, ((sxx - syy) / 2) ** 2 + sxy * sxy));
     return { x: best[0], y: best[1], a: Math.sqrt(tr + det) + step / 2, b: Math.sqrt(Math.max(0, tr - det)) + step / 2,
-      rot: 0.5 * Math.atan2(2 * sxy, sxx - syy), heardBy: obs.length };
+      rot: 0.5 * Math.atan2(2 * sxy, sxx - syy), heardBy: obs.length, floor: best.floor };
   }
   // Every few seconds: move what you haven't placed to where its signals say
   function locate(t) {
@@ -231,6 +244,7 @@ window.AckMap = (() => {
       const k = n.auto ? 0.5 : 1;                // glide, don't jump
       n.x += (s.x - n.x) * k; n.y += (s.y - n.y) * k;
       n.auto = s;
+      if (!n.floor) n.autoFloor = s.floor;
       moved = true;
     }
     if (moved) { dirty = true; scheduleSave(); }
@@ -248,8 +262,13 @@ window.AckMap = (() => {
   // the direct one); multipath carries the change well beyond it, fading over
   // the outer zones; and a body next to either end changes every path at
   // once. Walls and furniture bend all of this: the walk test measures it.
+  // Across floors the link slopes: the point is taken at the link's height
+  // above it, so the glow is the zone seen from above.
   function sensitivity(px, py, a, n, d, lam) {
-    const d1 = Math.hypot(px - a.x, py - a.y), d2 = Math.hypot(px - n.x, py - n.y);
+    const za = zOf(a), zn = zOf(n), hx = n.x - a.x, hy = n.y - a.y, hh = hx * hx + hy * hy;
+    const t = hh > 1e-6 ? Math.min(1, Math.max(0, ((px - a.x) * hx + (py - a.y) * hy) / hh)) : 0.5;
+    const pz = za + t * (zn - za);
+    const d1 = Math.hypot(px - a.x, py - a.y, pz - za), d2 = Math.hypot(px - n.x, py - n.y, pz - zn);
     const zones = (d1 + d2 - d) / (lam / 2);           // which Fresnel zone the point is in
     const along = 1 / (1 + 0.22 * zones);               // ~0.8 at the first zone's edge, ~0.2 at 1.5 m out
     const ends = 0.55 * Math.exp(-Math.min(d1, d2) / 0.7);
@@ -537,7 +556,8 @@ window.AckMap = (() => {
     for (const { r, a: e, n, color, d } of L) {    // zones first, dots on top
       if (d < 0.05) continue;
       const rot = Math.atan2(n.y - e.y, n.x - e.x), cx = (e.x + n.x) / 2, cy = (e.y + n.y) / 2;
-      const a = (d + lam / 2) / 2, b = Math.sqrt(Math.max(a * a - d * d / 4, 0));
+      const A = (d + lam / 2) / 2, b = Math.sqrt(Math.max(A * A - d * d / 4, 0));
+      const a = Math.max(A * Math.hypot(n.x - e.x, n.y - e.y) / d, b);   // seen from above
       ellipse(cx, cy, a, b, rot);                  // the first Fresnel zone: a thin outline
       const mv = moving(r), wk = weak(r) && !mv;
       ctx.strokeStyle = mv ? motionC : alpha(color, wk ? 0.3 : 0.8); ctx.lineWidth = mv ? 1.8 : 1;
@@ -560,7 +580,8 @@ window.AckMap = (() => {
     ctx.fillStyle = css('--card'); ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx - 9, by - 9, 18, 18, 4) : ctx.rect(bx - 9, by - 9, 18, 18);
     ctx.fill(); ctx.stroke();
-    label(bx, by + 14, others.length ? 'hub' : 'board', null, css('--accent'));
+    const fl = floorsUsed(), ft = (n) => (fl ? ` · F${floorOf(n)}` : '');
+    label(bx, by + 14, (others.length ? 'hub' : 'board') + ft(HUB), null, css('--accent'));
     for (const b of others) {                      // the other boards: squares too, in their state's colour
       const n = M.nodes.get(b.key);
       if (!n) continue;
@@ -571,7 +592,7 @@ window.AckMap = (() => {
       ctx.fill(); ctx.stroke();
       if (!n.placed) { ctx.strokeStyle = alpha(css('--accent'), 0.7); ctx.lineWidth = 1.2; ctx.setLineDash([3, 3]);
         ctx.strokeRect(x - 14, y - 14, 28, 28); ctx.setLineDash([]); }
-      label(x, y + 14, b.label, { motion: 'MOTION', still: 'still', calibrating: 'calibrating', gone: 'not heard' }[b.state] || b.state, mv ? motionC : css('--fg'));
+      label(x, y + 14, b.label + ft(n), { motion: 'MOTION', still: 'still', calibrating: 'calibrating', gone: 'not heard' }[b.state] || b.state, mv ? motionC : css('--fg'));
     }
     const drawn = new Set();                      // a router two boards share: one dot, its own name
     for (const { r, n, color } of L) {
@@ -591,7 +612,7 @@ window.AckMap = (() => {
       }
       const sub = [r.rssi !== null && r.rssi !== undefined ? `${r.rssi} dBm` : '',
         r.breathing ? `breathing ${Math.round(r.breathing.rate)}/min` : ''].filter(Boolean).join(' · ');
-      label(x, y + 15, r.board ? n.name : r.label, r.board ? null : sub || null, css('--fg'));
+      label(x, y + 15, (r.board ? n.name : r.label) + ft(n), r.board ? null : sub || null, css('--fg'));
     }
     drawLight(t);
     lightWaves(t);
@@ -656,6 +677,7 @@ window.AckMap = (() => {
       }
       box.append(el('div', { className: 'muted small', textContent: 'Show the links of' }), seg);
     }
+    box.append(floorsPanel());
     const L = links();
     if (!L.length) box.append(el('p', { className: 'muted small', textContent: 'No live links yet.' }));
     for (const { r, n, color, d } of L) {
@@ -704,6 +726,44 @@ window.AckMap = (() => {
         ...rows.map((t) => (typeof t === 'string' ? el('div', { className: 'muted small', textContent: t }) : t))));
     }
     $('#map-wave').textContent = `Channel ${channel} · ${(freq() / 1e6).toFixed(0)} MHz · wavelength ${M.unit === 'ft' ? (lambda() / IN).toFixed(1) + '″' : (lambda() * 100).toFixed(1) + ' cm'}`;
+  }
+
+  // Which floor each thing is on: the hub, the boards, then routers and devices
+  // (those can be left to the signals). Floors are M.floorH apart.
+  let floorsOpen = false, floorsEl = null, floorsSig = '';
+  function floorsPanel() {
+    const sig = JSON.stringify([M.hubFloor, M.floorH, others.map((b) => [b.key, b.label]),
+      links().map(({ n }) => [n.key, n.name, n.floor, n.autoFloor]), [...M.nodes.values()].map((n) => n.floor)]);
+    if (floorsEl && sig === floorsSig) return floorsEl;   // unchanged: keep it (an open dropdown stays open)
+    floorsSig = sig;
+    const det = el('details', { className: 'map-floors', open: floorsOpen });
+    det.ontoggle = () => { floorsOpen = det.open; };
+    det.append(el('summary', { textContent: 'Floors' }));
+    const row = (name, val, auto, set) => {
+      const sel = el('select', { className: 'small' });
+      if (auto !== null) sel.append(el('option', { value: '0', textContent: auto ? `auto (${auto})` : 'auto' }));
+      for (let f = 1; f <= 4; f++) sel.append(el('option', { value: String(f), textContent: `Floor ${f}` }));
+      sel.value = String(val || 0);
+      sel.onchange = () => { set(+sel.value); locAt = 0; heatKey = ''; dirty = true; renderList(); scheduleSave(); };
+      return el('label', { className: 'map-floor-row' }, el('span', { textContent: name }), sel);
+    };
+    det.append(row('Hub', M.hubFloor, null, (f) => { M.hubFloor = f || 1; }));
+    for (const b of others) {
+      const n = M.nodes.get(b.key);
+      if (n) det.append(row(b.label, n.floor || M.hubFloor, null, (f) => { n.floor = f; }));
+    }
+    const seen = new Set();
+    for (const { n, r } of links()) {
+      if (n === HUB || n.board || n.key.startsWith('sat:') || seen.has(n.key)) continue;
+      seen.add(n.key);
+      det.append(row(r.link ? r.link.name || n.name : r.label, n.floor, n.autoFloor ? `Floor ${n.autoFloor}` : '', (f) => { n.floor = f; }));
+    }
+    const h = el('input', { type: 'number', min: '2', max: '6', step: '0.1', value: String(M.floorH), className: 'small' });
+    h.onchange = () => { const v = +h.value; if (v >= 2 && v <= 6) { M.floorH = v; locAt = 0; heatKey = ''; dirty = true; scheduleSave(); } };
+    det.append(el('label', { className: 'map-floor-row' }, el('span', { textContent: 'Floor to floor (m)' }), h),
+      el('p', { className: 'muted small', textContent: 'Distances count the height between floors. A router or device on auto gets the floor its signals fit best.' }));
+    floorsEl = det;
+    return det;
   }
 
   // ---------- touch / mouse ----------
@@ -792,7 +852,8 @@ window.AckMap = (() => {
   }
   async function save() {
     const body = { unit: M.unit, env: M.env, nodes: [...M.nodes.values()].slice(0, 64).map((n) =>
-      ({ key: n.key, name: String(n.name).slice(0, 64), x: n.x, y: n.y, placed: !!n.placed })) };
+      Object.assign({ key: n.key, name: String(n.name).slice(0, 64), x: n.x, y: n.y, placed: !!n.placed },
+        n.floor ? { floor: n.floor } : {})), hub_floor: M.hubFloor, floor_h: M.floorH };
     if (M.view && viewByUser) body.view = M.view;
     body.plans = M.plans.map((p) => ({ id: p.id, name: String(p.name).slice(0, 64), x: p.x, y: p.y, w: p.w,
       rot: p.rot, opacity: p.opacity, hidden: !!p.hidden }));
@@ -804,7 +865,9 @@ window.AckMap = (() => {
     if (m.unit) M.unit = m.unit;
     if (m.env) M.env = m.env;
     if (m.view) { M.view = m.view; autoFit = false; viewByUser = true; }
-    for (const n of m.nodes || []) M.nodes.set(n.key, { key: n.key, name: n.name || n.key, x: n.x, y: n.y, placed: !!n.placed });
+    if (m.hub_floor) M.hubFloor = m.hub_floor;
+    if (m.floor_h) M.floorH = m.floor_h;
+    for (const n of m.nodes || []) M.nodes.set(n.key, { key: n.key, name: n.name || n.key, x: n.x, y: n.y, placed: !!n.placed, floor: n.floor || 0 });
     if (m.plans) {
       M.plans = m.plans.map((p) => Object.assign({ name: p.id, rot: 0, opacity: 1, hidden: false }, p));
       for (const p of M.plans) loadPicture(p);

@@ -1912,6 +1912,10 @@ def clean_map(m):
         if not isinstance(v, dict):
             raise ValueError('bad view')
         out['view'] = dict(x=_num(v.get('x')), y=_num(v.get('y')), s=_num(v.get('s'), 0.01, 1e5))
+    if 'hub_floor' in m:
+        out['hub_floor'] = int(_num(m['hub_floor'], 1, 9))
+    if 'floor_h' in m:
+        out['floor_h'] = _num(m['floor_h'], 2, 6)
     if 'nodes' in m:
         nodes = m['nodes']
         if not isinstance(nodes, list) or len(nodes) > MAP_NODES:
@@ -1927,6 +1931,8 @@ def clean_map(m):
                 c['eirp'] = _num(n['eirp'], -10, 40)
             if 'placed' in n:
                 c['placed'] = bool(n['placed'])
+            if n.get('floor'):
+                c['floor'] = int(_num(n['floor'], 1, 9))
             out['nodes'].append(c)
     if 'plans' in m:                            # picture layers: where each sits, in metres
         plans = m['plans']
