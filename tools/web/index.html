@@ -445,6 +445,26 @@
       <p class="muted small"><b>Status</b> shows everything: motion in your colour, amber fading for 30 s after it, a quick purple flash for a blip too faint to count, a slow blue pulse while calibrating, yellow while looking for the router, and dark when the room is still. <b>Motion only</b> lights it for motion and nothing else. Saved on the board, so it stays the same when the board runs on its own.</p>
     </section>
 
+    <section class="card" id="notify-card">
+      <div class="card-head">
+        <h2>Phone notifications <span id="notify-state" class="muted small"></span></h2>
+        <label class="switch inline"><input type="checkbox" id="notify-on"><span class="track"><span class="knob"></span></span><span class="small">on</span></label>
+      </div>
+      <label class="field"><span>Pushover API token <span class="muted">(your ackwave application)</span></span><input type="password" id="notify-token" autocomplete="off" spellcheck="false" placeholder="30 letters and digits"></label>
+      <label class="field"><span>Your Pushover user key</span><input type="password" id="notify-user" autocomplete="off" spellcheck="false" placeholder="30 letters and digits"></label>
+      <label class="field"><span>A new message only after the house was quiet for</span>
+        <select id="notify-quiet"><option value="0">no wait (every motion)</option><option value="2">2 min</option><option value="5">5 min</option><option value="10">10 min</option><option value="20">20 min</option><option value="30">30 min</option><option value="60">1 hour</option><option value="120">2 hours</option></select></label>
+      <label class="field"><span>When</span>
+        <select id="notify-hours"><option value="always">any time</option><option value="22-7">night (22:00 to 7:00)</option><option value="23-6">late night (23:00 to 6:00)</option><option value="8-18">daytime (8:00 to 18:00)</option></select></label>
+      <label class="field"><span>At most, per day</span>
+        <select id="notify-max"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="300">300</option></select></label>
+      <label class="check"><input type="checkbox" id="notify-urgent"> High priority (gets through Pushover's quiet hours; iPhone can show it as Time Sensitive)</label>
+      <label class="check"><input type="checkbox" id="notify-offline"> Also tell me when a board stops being heard</label>
+      <div class="dlg-tools gap"><button type="button" class="primary" id="notify-save">Save keys</button><button type="button" id="notify-test">Send a test</button><button type="button" id="notify-clear">Forget keys</button></div>
+      <p class="muted small" id="notify-last"></p>
+      <p class="muted small">Uses the <a href="https://pushover.net" target="_blank" rel="noopener">Pushover</a> app (iPhone and Android). Make an application on pushover.net called ackwave, then paste its API token and your user key above. One message when the house goes from still to motion, then nothing until it has been quiet for the time above, so a busy evening is one message, not hundreds. It goes with the same boards as the light (Settings, boards that count). The keys are kept in <code>dashboard.json</code> with the board secret and never shown again.</p>
+    </section>
+
     <section class="card" id="light-card">
       <div class="card-head">
         <h2>Light or smart device on motion <span id="light-state" class="muted small"></span></h2>

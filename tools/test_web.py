@@ -133,7 +133,9 @@ def main():
     assert len(saved.pop('board_secret') or '0' * 64) == 64, "the boards' secret, if a board was seen"
     assert dict(saved, hub=None) == {
         'per_link': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': [],
-        'light': {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120}}
+        'light': {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120},
+        'notify': {'enabled': False, 'token': '', 'user': '', 'quiet_min': 10, 'max_day': 50, 'hours': None,
+                   'urgent': False, 'offline': True}}
     for line in lines[half:]:
         dash.feed(line)
     sl = dash.slow(30)

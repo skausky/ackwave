@@ -194,6 +194,7 @@ function renderHeader(h) {
   $('#foot-log').textContent = h.log ? `logging to ${h.log}` : '';
   for (const id of ['#btn-cal', '#net-scan', '#net-default']) $(id).disabled = !h.board_connected;
   renderLight(h.light);
+  renderNotify(h.notify);
 }
 
 // ---------------------------------------------------------------- light on motion
@@ -256,6 +257,56 @@ $('#light-clear').onclick = async () => {
   if (await cmd({ cmd: 'light', enabled: false, on_url: '', off_url: '' }))
     for (const id of ['#light-on-url', '#light-off-url']) { $(id).dataset.saved = ''; $(id).placeholder = $(id).dataset.hint; }
 };
+
+// ---------------------------------------------------------------- phone notifications
+function renderNotify(n) {
+  if (!n || page !== 'settings') return;
+  const keep = (id) => document.activeElement === $(id);
+  if (!keep('#notify-on')) $('#notify-on').checked = n.enabled;
+  for (const [id, has] of [['#notify-token', n.has_token], ['#notify-user', n.has_user]]) {
+    const e = $(id);
+    if (!e.value) e.placeholder = has ? 'saved (paste a new one to replace it)' : '30 letters and digits';
+  }
+  const pick = (id, v) => {
+    const sel = $(id);
+    if (keep(id)) return;
+    if (![...sel.options].some((o) => o.value === String(v))) sel.append(el('option', { value: String(v), textContent: String(v) }));
+    sel.value = String(v);
+  };
+  pick('#notify-quiet', n.quiet_min);
+  pick('#notify-max', n.max_day);
+  pick('#notify-hours', n.hours ? `${n.hours[0]}-${n.hours[1]}` : 'always');
+  if (!keep('#notify-urgent')) $('#notify-urgent').checked = n.urgent;
+  if (!keep('#notify-offline')) $('#notify-offline').checked = n.offline;
+  $('#notify-test').disabled = !(n.has_token && n.has_user);
+  $('#notify-state').textContent = !n.enabled ? '' : n.live === false ? '· sends only while the board is connected'
+    : `· ${n.sent_today} sent today` + (n.left !== null && n.left !== undefined ? ` · ${n.left} left this month` : '');
+  const last = $('#notify-last');
+  last.textContent = n.last ? `last: "${n.last.text}" at ${clock(n.last.t, true)} · ${n.last.ok ? 'OK' : 'failed'} (${n.last.msg})` : '';
+  last.classList.toggle('err', !!(n.last && !n.last.ok));
+}
+const notifyKeys = () => {
+  const body = {}, t = $('#notify-token').value.trim(), u = $('#notify-user').value.trim();
+  if (t) body.token = t;
+  if (u) body.user = u;
+  return body;
+};
+const notifyClearInputs = () => { $('#notify-token').value = ''; $('#notify-user').value = ''; };
+$('#notify-on').onchange = async (e) => {
+  if (!(await cmd({ cmd: 'notify', enabled: e.target.checked, ...notifyKeys() }))) e.target.checked = !e.target.checked;
+  else notifyClearInputs();
+};
+$('#notify-save').onclick = async () => { if (await cmd({ cmd: 'notify', ...notifyKeys() })) notifyClearInputs(); };
+$('#notify-test').onclick = () => cmd({ cmd: 'notify_test' });
+$('#notify-clear').onclick = () => cmd({ cmd: 'notify', enabled: false, token: '', user: '' });
+$('#notify-quiet').onchange = (e) => cmd({ cmd: 'notify', quiet_min: +e.target.value });
+$('#notify-max').onchange = (e) => cmd({ cmd: 'notify', max_day: +e.target.value });
+$('#notify-hours').onchange = (e) => {
+  const v = e.target.value;
+  cmd({ cmd: 'notify', hours: v === 'always' ? 'always' : v.split('-').map(Number) });
+};
+$('#notify-urgent').onchange = (e) => cmd({ cmd: 'notify', urgent: e.target.checked });
+$('#notify-offline').onchange = (e) => cmd({ cmd: 'notify', offline: e.target.checked });
 
 // Recent motion as short sentences: when, what, how long, where
 function renderRecent(rows) {

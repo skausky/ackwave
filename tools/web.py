@@ -43,6 +43,7 @@ from devices import MAX_DEVS, MODES, Devices, Oui, fmt_age
 from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
 from light import Light, http_call
+from notify import Notify, pushover_call
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LED_MODES, LED_PATTERNS, LONG_C, MOTION_C,
                  SCAN_C, STILL_C, SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
 
@@ -208,7 +209,7 @@ class Dashboard:
     """Owns the State; turns it into JSON for the page and runs its commands."""
 
     def __init__(self, state, send=None, log_name=None, prefs=None, settings=None, sessions_dir=None,
-                 light_call=http_call, light_run=None, demo=False):
+                 light_call=http_call, light_run=None, demo=False, notify_call=pushover_call):
         self.s, self.send, self.log_name, self.prefs = state, send, log_name, prefs
         self.demo = demo                 # demo mode: a simulated light, nothing sent anywhere
         state.devices.router_name = self._router_name   # nicknames on every page
@@ -315,6 +316,12 @@ class Dashboard:
         else:
             self.light = Light(got.get('light') if isinstance(got.get('light'), dict) else None,
                                call=light_call, run=light_run)
+        # Phone notifications (Pushover): the demo pretends, nothing leaves the PC
+        nc = got.get('notify') if isinstance(got.get('notify'), dict) else None
+        if demo:
+            self.notify = Notify(nc, call=lambda *_a: (True, 'demo: not sent', None), run=light_run)
+        else:
+            self.notify = Notify(nc, call=notify_call, run=light_run)
         if send and state.sound_want is None:
             state.outbox.append('SOUND')         # ask the board for its buzzer settings
         if send and state.sens_want is None:
@@ -690,6 +697,8 @@ class Dashboard:
                 if not d.get('gone_said'):
                     d['gone_said'] = True
                     self._event('health', f"{self.board_label(mac)} not heard", 'sat:' + mac, important=True)
+                    if self.send:
+                        self.notify.board_offline(f"Board {self.board_label(mac)} is not heard any more")
 
     def _boards(self):
         """The other boards, as the hub hears them (their hellos). A board heard
@@ -945,6 +954,9 @@ class Dashboard:
         ext = bool(self._alerting()) or now_m < getattr(self, 'others_until', 0.0)
         was = self.light.on
         self.light.update(motion or ext)
+        names = [('Hub' if b == 'board' else 'board ' + self.board_label(b)) for b in by]
+        if self.notify.update(motion or ext, ', '.join(names) or ('a device link' if ext else '')):
+            self._event('automation', 'Phone notified · motion', 'notify')
         if self.light.on != was and self.light.on is not None and self.light.cfg.get('enabled'):
             src = ', '.join('Hub' if b == 'board' else self.board_label(b) for b in by) or 'a device link'
             self._event('automation', f"Light on · motion at {src}" if self.light.on else 'Light off · the house is still',
@@ -1246,6 +1258,20 @@ class Dashboard:
                 msg = ('Light on motion: off' if not cf['enabled'] else
                        'Light on motion: on, off as soon as the room is still' if not cf['off_after'] else
                        f"Light on motion: on, off after {fmt_age(cf['off_after'])} of stillness")
+            elif what == 'notify':
+                try:
+                    always = c.get('hours') == 'always'
+                    self.notify.set(**{k: (None if k == 'hours' and always else c.get(k))
+                                       for k in ('enabled', 'token', 'user', 'quiet_min', 'max_day',
+                                                 'hours', 'urgent', 'offline')}, clear_hours=always)
+                except (ValueError, TypeError) as e:
+                    return False, str(e) if isinstance(e, ValueError) else 'bad notification setting'
+                self._save_settings()
+                cf = self.notify.cfg
+                msg = ('Phone notifications: off' if not cf['enabled'] else
+                       f"Phone notifications: on, at most one per {cf['quiet_min']} min of quiet")
+            elif what == 'notify_test':
+                return self.notify.test()
             elif what == 'light_test':
                 if c.get('what') not in ('on', 'off'):
                     return False, 'bad test'
@@ -1367,7 +1393,8 @@ class Dashboard:
                 fd = os.open(self.settings_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 os.fchmod(fd, 0o600)                 # an older file may have been readable
                 with os.fdopen(fd, 'w') as f:
-                    json.dump(dict(self.cfg, light=self.light.config(), board_secret=self.board_secret), f)
+                    json.dump(dict(self.cfg, light=self.light.config(), notify=self.notify.config(),
+                                   board_secret=self.board_secret), f)
             except OSError:
                 pass
 
@@ -1745,7 +1772,8 @@ class Dashboard:
                     devices=f"{len(dv.devs)} heard · poking {len(dv.poking)}/{MAX_DEVS} ({dv.mode})",
                     log=self.log_name, board_connected=bool(self.send),
                     alerting=[s.devices.link_label(x) for x in self._alerting()] if self.send else [],
-                    light=dict(self.light.view(), live=bool(self.send) or self.demo))
+                    light=dict(self.light.view(), live=bool(self.send) or self.demo),
+                    notify=dict(self.notify.view(), live=bool(self.send) or self.demo))
 
     def _score(self, t0, t1, win):
         s, det = self.s, self.s.det
