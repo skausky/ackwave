@@ -1140,6 +1140,9 @@ class Dashboard:
     def _track_step(self):
         if not (self.send or self.demo):
             return
+        if not getattr(self, '_walk_err_done', False):   # the walks so far set the circle's floor
+            self._walk_err_done = True
+            self._walk_err()
         links, m = self._track_links()
         now = time.time()
         if not self.tracker.step(links, now):
@@ -1168,6 +1171,15 @@ class Dashboard:
                 if z.get('notify') and self.send and now - self.zone_said.get(z['id'], 0) >= 60 * self.notify.cfg['quiet_min']:
                     if self.notify.zone(f"Someone in {z['name']}" + (f" · {n} people home" if n > 1 else ''), z.get('night')):
                         self.zone_said[z['id']] = now
+
+    def _walk_err(self):
+        """The circle's floor: the median real error of the last week's walk-check
+        taps (at least 8), never below the model's own allowance."""
+        errs = sorted(math.hypot(r['est'][0] - r['x'], r['est'][1] - r['y'])
+                      for r in self.walks(hours=24 * 7)['walks'] if r.get('est'))
+        if len(errs) >= 8:
+            self.tracker.model_err = max(1.2, errs[len(errs) // 2])
+        return self.tracker.model_err
 
     def walks(self, hours=24.0):
         """The walk check's taps (sessions/walks.jsonl) from the last hours, newest 500."""
@@ -1199,6 +1211,22 @@ class Dashboard:
         return dict(boards=boards, counts=mltrain.counts(rows), rec=rec, sending=sorted(self.mlw_q),
                     model=dict(score=m['score'], labels=m['labels'], n=m['n']) if m else None)
 
+    def _where_words(self):
+        """'someone near board 3 (within 6 ft)' for the Pi's best-tracked person, or ''."""
+        ppl = sorted((p for p in self.tracker.people if p.est), key=lambda p: p.est['r'])
+        if not ppl:
+            return ''
+        e = ppl[0].est
+        nodes = {n['key']: n for n in self._layout().get('nodes', [])}
+        spots = [('the hub', 0.0, 0.0)] + [(f"board {self.board_label(k[4:])}" if self.board_label(k[4:]).isdigit()
+                                            else self.board_label(k[4:]), n['x'], n['y'])
+                                           for k, n in nodes.items() if k.startswith('sat:')]
+        name, d = min(((nm, math.hypot(x - e['x'], y - e['y'])) for nm, x, y in spots), key=lambda v: v[1])
+        unit = self._layout().get('unit', 'ft')
+        r = f"{e['r'] / 0.3048:.0f} ft" if unit == 'ft' else f"{e['r']:.0f} m"
+        many = f"{len(ppl)} people · " if len(ppl) > 1 else ''
+        return f"{many}someone {'near' if d < 3 else 'closest to'} {name} (within {r})"
+
     def _people(self):
         """For the page: the Pi's tracking (works with no page open), the zones, and
         who's still but breathing near a board (presence)."""
@@ -1209,6 +1237,7 @@ class Dashboard:
         cells = sorted(self.today[1].items(), key=lambda kv: -kv[1])[:2000]
         return dict(people=[p.view() for p in self.tracker.people if p.est], near=nk,
                     zones={k: v for k, v in self.zone_in.items()}, breathing=still,
+                    model_err=round(self.tracker.model_err, 2),
                     today=dict(cs=0.5, cells=[[c[0], c[1], n] for c, n in cells]))
 
     def _switch_network(self, line, what):
@@ -1327,7 +1356,8 @@ class Dashboard:
             light_by = board_words or (['a device link'] if ext else [])
             self.light.update(motion or ext)
         names = board_words
-        if self.notify.update(motion or ext, ', '.join(names) or ('a device link' if ext else '')):
+        where = (self._where_words() if motion or ext else '') or ', '.join(names) or ('a device link' if ext else '')
+        if self.notify.update(motion or ext, where):
             self._event('automation', 'Phone notified · motion', 'notify')
         if self.light.on != was and self.light.on is not None and self.light.cfg.get('enabled'):
             src = ', '.join(light_by) or 'a device link'
@@ -1697,6 +1727,7 @@ class Dashboard:
                             f.write(json.dumps(rec) + '\n')
                     except OSError:
                         pass
+                self._walk_err()
                 msg = (f"Marked · the Pi's tracking was {err:.1f} m off [pi {err:.2f}]" if err is not None
                        else 'Marked · the Pi tracks nobody right now')
             elif what == 'out':                          # the hub's own light output pin

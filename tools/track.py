@@ -95,6 +95,7 @@ class Tracker:
         self.at = None
         self.grid = None
         self.near = None                  # dict(key, t): the end the motion is at
+        self.model_err = MODEL_ERR        # the circle's floor: the walk check's measured error once there is one
 
     def excess(self, key, st, t):
         b = self.base.get(key)
@@ -204,7 +205,7 @@ class Tracker:
         cum = np.cumsum(pp[order])
         r68 = float(dist[order][min(len(cum) - 1, int(np.searchsorted(cum, 0.68)))])
         p.post = post
-        p.est = dict(x=sx, y=sy, r=math.hypot(max(cs, r68), MODEL_ERR))
+        p.est = dict(x=sx, y=sy, r=math.hypot(max(cs, r68), self.model_err))
         p.seen = t
         p.trail.append((sx, sy, t))
         p.trail = [q for q in p.trail if t - q[2] <= 12]

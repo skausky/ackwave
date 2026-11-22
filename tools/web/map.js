@@ -335,6 +335,7 @@ window.AckMap = (() => {
     let moved = false;
     for (const [key, n] of M.nodes) {
       if (n.placed || key === 'light') continue;
+      if (n.hint && n.hint.r <= 2) { n.x = n.hint.x; n.y = n.hint.y; n.auto = null; continue; }   // your spot, give or take 5 ft
       const s = solveOne(key, n);
       if (!s) { n.auto = null; continue; }
       // calm: a new estimate within half its own uncertainty is the same
@@ -445,6 +446,7 @@ window.AckMap = (() => {
   const track = { grid: null, people: [], nextId: 0, est: null, base: new Map(), at: 0 };
   let zoneIn = {};                                  // zone id -> people inside, from the Pi's tracking
   let breathing = {};                               // 'hub' / 'sat:<mac>' -> breathing near that board
+  let modelErr = MODEL_ERR;                         // the circle's floor: the walk check's measured error (from the Pi)
   let todayMap = null;                              // where people were today (the Pi's tracking): {cs, cells}
   let homeDetails = false, showToday = false;       // Home: the technical layers; today's heat (the page remembers them)
   const simple = () => readOnly && !homeDetails;   // Home's clean view
@@ -871,7 +873,8 @@ window.AckMap = (() => {
   // A router: how sure you are of where it is. Exactly (placed), roughly
   // (a circle you drag: auto-placement and the tracking stay inside it), or
   // not at all (auto, anywhere its signals fit).
-  const SURE = [['auto', 0], ['r10', 3], ['r30', 9], ['r60', 18], ['exact', -1]];
+  const SURE = [['auto', 0], ['r5', 1.524], ['r10', 3], ['r30', 9], ['r60', 18], ['exact', -1]];
+  const DRAG_HINT = 1.524;                          // a router you drag: within 5 ft of where you put it
   function whereSure(n) {
     const sel = el('select', { className: 'small', title: 'How sure you are of where this router is' });
     for (const [v, r] of SURE)
@@ -1077,7 +1080,7 @@ window.AckMap = (() => {
     let acc = 0, r68 = cs;
     for (const [dd, pp] of byDist) { acc += pp; r68 = dd; if (acc >= 0.68) break; }
     p.post = post;
-    p.est = { x: sx, y: sy, r: Math.hypot(Math.max(cs, r68), MODEL_ERR) };
+    p.est = { x: sx, y: sy, r: Math.hypot(Math.max(cs, r68), modelErr) };
     p.seen = t;
     p.trail.push({ x: sx, y: sy, t });
     while (p.trail.length && t - p.trail[0].t > 12000) p.trail.shift();
@@ -1646,7 +1649,9 @@ window.AckMap = (() => {
       const n = M.nodes.get(drag.key), [wx, wy] = toWorld(x, y);
       n.x = wx; n.y = wy;
       if (n.hint) { n.hint.x = wx; n.hint.y = wy; n.auto = null; locAt = 0; }   // the rough spot moves with it
-      else n.placed = true;
+      else if (!n.placed && !n.board && (n.key || '').startsWith('r:')) {   // a router: "within 5 ft" of your spot
+        n.hint = { x: wx, y: wy, r: DRAG_HINT }; n.auto = null; locAt = 0;
+      } else n.placed = true;
       dirty = true;
       renderList();
     } else if (drag.board) {
@@ -2287,6 +2292,7 @@ window.AckMap = (() => {
     },
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
+      if (slow && slow.tracked && slow.tracked.model_err) modelErr = slow.tracked.model_err;
       if (slow && slow.tracked) { zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; todayMap = slow.tracked.today || null; }
       if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPeople = slow.demo_people || []; if (slow.channel) channel = slow.channel; }
       if (header) {

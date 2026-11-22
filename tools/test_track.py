@@ -68,6 +68,11 @@ def main():
     rec = json.loads(open(os.path.join(tmp, 'walks.jsonl')).read().splitlines()[-1])
     assert rec['x'] == 2.0 and rec['est'] == [2.0, 3.0], rec
     assert not d.command(dict(cmd='walk_mark', x='a', y=1))[0]
+    for i in range(8):                            # walks measured: the circle can't be smaller than they say
+        d.command(dict(cmd='walk_mark', x=2.0, y=3.0 + 2.5))
+    assert abs(d.tracker.model_err - 2.5) < 0.01 and d._people()['model_err'] == 2.5, d.tracker.model_err
+    words = d._where_words()
+    assert words.startswith('someone') and 'the hub' in words and 'within' in words, words
     # a zone near a router switches the light; board motion elsewhere doesn't
     import time as _t
     calls = []
