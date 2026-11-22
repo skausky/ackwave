@@ -446,12 +446,12 @@ window.AckMap = (() => {
   const track = { grid: null, people: [], nextId: 0, est: null, base: new Map(), at: 0 };
   let zoneIn = {};                                  // zone id -> people inside, from the Pi's tracking
   let breathing = {};                               // 'hub' / 'sat:<mac>' -> breathing near that board
-  let modelErr = MODEL_ERR;                         // the circle's floor: the walk check's measured error (from the Pi)
   let todayMap = null;                              // where people were today (the Pi's tracking): {cs, cells}
   let homeDetails = false, showToday = false;       // Home: the technical layers; today's heat (the page remembers them)
   const simple = () => readOnly && !homeDetails;   // Home's clean view
   const CELL = 0.25;
   const SIG0 = 0.45, SIG1 = 0.25, MODEL_ERR = 1.2;          // a link's scatter: idle noise, plus more the stronger it reacts
+  let modelErr = MODEL_ERR;                         // the circle's floor: the walk check's measured error (from the Pi)
   let heatKey = '', heatView = null, viewSeen = '', viewMovedAt = 0;
   function rgbOf(hex) { const v = parseInt(hex.slice(1), 16); return [v >> 16 & 255, v >> 8 & 255, v & 255]; }
   // Two layers at a third of the screen's resolution: still links in their
