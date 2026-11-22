@@ -552,6 +552,54 @@ int main(void) {
             CHECK(parse_sens("SENS,16000", &x) == SENS_BAD && parse_sens("SENSE", &x) == SENS_BAD);
             CHECK(parse_sens("SOUND", &x) == SENS_BAD && parse_cmd("SENS,160", cm) == CMD_NONE);
         }
+        {   // OUT: the light output
+            int m, sec;
+            CHECK(parse_out("OUT", &m, &sec) == OUT_QUERY && parse_out("OUT\r\n", &m, &sec) == OUT_QUERY);
+            CHECK(parse_out("OUT,default", &m, &sec) == OUT_DEFAULT && parse_out("OUT,default\n", &m, &sec) == OUT_DEFAULT);
+            CHECK(parse_out("OUT,motion,90", &m, &sec) == OUT_SET && m == OUT_MODE_MOTION && sec == 90);
+            CHECK(parse_out("OUT,off,0", &m, &sec) == OUT_SET && m == OUT_MODE_OFF && sec == 0);
+            CHECK(parse_out("OUT,on,86400\r\n", &m, &sec) == OUT_SET && m == OUT_MODE_ON && sec == 86400);
+            CHECK(parse_out("OUT,motion", &m, &sec) == OUT_SET && m == OUT_MODE_MOTION && sec == -1);
+            CHECK(parse_out("OUT,on,86401", &m, &sec) == OUT_BAD && m == -1 && sec == -1);
+            CHECK(parse_out("OUT,motion,", &m, &sec) == OUT_BAD && parse_out("OUT,motion,1.5", &m, &sec) == OUT_BAD);
+            CHECK(parse_out("OUT,motion,-5", &m, &sec) == OUT_BAD && parse_out("OUT,motion,30,1", &m, &sec) == OUT_BAD);
+            CHECK(parse_out("OUT,motions", &m, &sec) == OUT_BAD && parse_out("OUT,", &m, &sec) == OUT_BAD);
+            CHECK(parse_out("OUT,ON", &m, &sec) == OUT_BAD && parse_out("OUTS", &m, &sec) == OUT_BAD);
+            CHECK(parse_out("OUT,defaults", &m, &sec) == OUT_BAD && parse_out("OUT,motion,9999999", &m, &sec) == OUT_BAD);
+            CHECK(parse_out("SOUND,on", &m, &sec) == OUT_BAD && parse_out(NULL, &m, &sec) == OUT_BAD);
+            CHECK(parse_cmd("OUT,on,5", cm) == CMD_NONE && parse_sens("OUT", &m) == SENS_BAD);
+            int sm, sv, sh;
+            CHECK(parse_sound("OUT,on", &sm, &sv, &sh) == SOUND_BAD && parse_ext("OUT,1") == -1);
+
+            out_state_t os = {0};
+            // motion: on at once, held off_after_s past the last motion
+            CHECK(!out_step(&os, OUT_MODE_MOTION, 10, false, 1000));
+            CHECK(out_step(&os, OUT_MODE_MOTION, 10, true, 2000));
+            CHECK(out_step(&os, OUT_MODE_MOTION, 10, false, 2001));
+            CHECK(out_step(&os, OUT_MODE_MOTION, 10, true, 5000));          // motion again: from here
+            CHECK(out_step(&os, OUT_MODE_MOTION, 10, false, 14999));
+            CHECK(!out_step(&os, OUT_MODE_MOTION, 10, false, 15000));
+            CHECK(!out_step(&os, OUT_MODE_MOTION, 10, false, 99999));
+            // 0 s: off at the first still poll
+            CHECK(out_step(&os, OUT_MODE_MOTION, 0, true, 100000) && !out_step(&os, OUT_MODE_MOTION, 0, false, 100050));
+            // the clock wrapping in the middle of the hold
+            CHECK(out_step(&os, OUT_MODE_MOTION, 5, true, 0xFFFFF000u));
+            CHECK(out_step(&os, OUT_MODE_MOTION, 5, false, 0x00000100u));    // 4352 ms later
+            CHECK(!out_step(&os, OUT_MODE_MOTION, 5, false, 0x00000400u));   // 5120 ms later
+            // off / on ignore motion
+            CHECK(!out_step(&os, OUT_MODE_OFF, 10, true, 200000));
+            CHECK(out_step(&os, OUT_MODE_ON, 10, false, 300000));
+            // on -> motion: stays on for off_after_s, then off
+            CHECK(out_step(&os, OUT_MODE_MOTION, 30, false, 310000));
+            CHECK(out_step(&os, OUT_MODE_MOTION, 30, false, 329999));
+            CHECK(!out_step(&os, OUT_MODE_MOTION, 30, false, 330000));
+            // on with motion, then off: off at once
+            CHECK(out_step(&os, OUT_MODE_MOTION, 30, true, 400000) && !out_step(&os, OUT_MODE_OFF, 30, true, 400050));
+            // a long hold doesn't overflow
+            CHECK(out_step(&os, OUT_MODE_MOTION, OUT_OFF_MAX, true, 0) &&
+                  out_step(&os, OUT_MODE_MOTION, OUT_OFF_MAX, false, OUT_OFF_MAX * 1000u - 1) &&
+                  !out_step(&os, OUT_MODE_MOTION, OUT_OFF_MAX, false, OUT_OFF_MAX * 1000u));
+        }
         {   // LEDSET: what the status LED shows
             led_cfg_t lc = led_cfg_default(40), keep;
             CHECK(lc.mode == LED_MODE_STATUS && lc.pattern == LED_PAT_STRENGTH && lc.bright == 40 && lc.rgb == 0xff0000);
@@ -1277,6 +1325,8 @@ int main(void) {
             CHECK(order_allowed("USE,Net") && order_allowed("USE_DEFAULT") && order_allowed("APS,clear") &&
                   order_allowed("CAL") && order_allowed("SENS,150") && order_allowed("SENS") &&
                   order_allowed("SOUND,beep,80,2700") && order_allowed("LEDSET,default") && order_allowed("BEEP,200"));
+            CHECK(order_allowed("OUT") && order_allowed("OUT,motion,60") && order_allowed("OUT,default") &&
+                  !order_allowed("OUTX") && !order_allowed("OUTPUT,on"));
             CHECK(!order_allowed("KEY,00") && !order_allowed("PEERKEY,clear") && !order_allowed("HUB,clear") &&
                   !order_allowed("POKE,aa") && !order_allowed("CALX") && !order_allowed("SCAN") &&
                   !order_allowed("USEX") && !order_allowed("") && !order_allowed("SENSE"));
