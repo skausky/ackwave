@@ -334,6 +334,8 @@ $('#light-clear').onclick = async () => {
     for (const id of ['#light-on-url', '#light-off-url']) { $(id).dataset.saved = ''; $(id).placeholder = $(id).dataset.hint; }
 };
 
+$('#net-sync').onclick = () => cmd({ cmd: 'net_sync' });
+
 // ---------------------------------------------------------------- light output (GPIO 5)
 let outBoard = '';                                 // '' = the hub, else a board's MAC
 function renderOut(h) {

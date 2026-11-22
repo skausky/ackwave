@@ -285,6 +285,10 @@ def follow_network():
     ok, _ = d.command(dict(cmd='out', mode='on', secs=0))
     assert ok and sent[-1] == 'OUT,on,0', "the hub's own pin"
     assert not d.command(dict(cmd='out', mode='disco', secs=1))[0] and not d.command(dict(cmd='out', mode='on', secs=-1))[0]
+    d.feed('NETWORK,chosen,HomeNet\n')                # the other boards onto the hub's network; the hub stays
+    sent.clear()
+    ok, _ = d.command(dict(cmd='net_sync'))
+    assert ok and sorted(sent) == sorted([f'SATCMD,{S1},USE,HomeNet', f'SATCMD,{S2},USE,HomeNet']), sent
     d.feed(f'BREATH,{S2},clear,14.5,180,75\n')        # someone still near board S2 (presence)
     d.feed(f'BREATH,{FIRST},none,0.0,0,0\n')
     br = d._people()['breathing']

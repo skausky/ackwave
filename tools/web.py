@@ -1534,6 +1534,23 @@ class Dashboard:
                 if not self.send:
                     return False, 'choosing a network needs a board'
                 msg = self._switch_network('USE_DEFAULT', 'Back to the default network')
+            elif what == 'net_sync':                     # the other boards onto the hub's network, the hub stays
+                st = self.s
+                if st.ap_list:
+                    line = 'APS,' + ','.join(st.ap_list)
+                elif st.network and st.network[0] in ('default', 'chosen') and st.network[1]:
+                    line = f'USE,{st.network[1]}'
+                else:
+                    return False, "the hub hasn't said its network yet"
+                now = time.time()
+                boards = [m for m, dd in self.sats.items() if now - dd['at'] <= SAT_GONE_S and dd.get('via') != 'usb']
+                if not boards or not self.send:
+                    return False, 'no other board heard right now'
+                for m in boards:
+                    self.s.outbox.append(f'SATCMD,{m},{line}')
+                    self.sat_cmds[m] = dict(line=line, state='sent', at=now)
+                msg = (f"Sending the hub's network to {', '.join(self.board_label(m) for m in boards)}: each restarts on it "
+                       '(about 15 s); the hub stays as it is')
             elif what == 'house_use':                    # a board counts for the house, or not
                 key, use = c.get('key'), c.get('use')
                 if not isinstance(key, str) or not (key == 'board' or MAC_RE.fullmatch(key)) \

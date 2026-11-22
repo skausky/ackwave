@@ -119,6 +119,7 @@ class Tracker:
                             end_keys=ln.get('end_keys', ())))
         self.base_at = t
         self._near(obs, t)
+        self._router_shared(obs)
         self.people = [p for p in self.people if t - p.seen < KEEP_S]
         if len(obs) < 2 or not any(o['a'] >= 0.6 for o in obs):
             return True
@@ -216,6 +217,24 @@ class Tracker:
             p.speed = 0.6 * p.speed + 0.4 * min(sp, 4.0)
             if math.hypot(dx, dy) > 0.4:
                 p.heading = math.atan2(dy, dx)
+
+    @staticmethod
+    def _router_shared(obs):
+        """map.js routerShared(): what every link to one router shares at once is that
+        router's end (someone there, or the router itself): taken out before people
+        are placed. Needs links from two or more boards to that router."""
+        by = {}
+        for o in obs:
+            ek = o.get('end_keys') or ()
+            if len(ek) == 2 and str(ek[1]).startswith('r:'):
+                by.setdefault(ek[1], []).append(o)
+        for g in by.values():
+            if len({o['end_keys'][0] for o in g}) < 2:
+                continue
+            shared = min(o['a'] for o in g)
+            if shared > 0:
+                for o in g:
+                    o['a'] = max(0.0, o['a'] - shared)
 
     def _near(self, obs, t):
         """map.js nearEnd(): the end whose links react much more than the rest."""

@@ -1096,10 +1096,11 @@ static inline bool order_open(const uint8_t *f, int len, const uint8_t me[6], ae
 }
 
 // The commands a board takes from the air: which network to watch,
-// recalibrate, sensitivity, sounds, the LED and the light output. Never keys, the hub, pokes or
-// a settings reset: those need its USB cable.
+// recalibrate, sensitivity, sounds, the LED, the light output, its model and which
+// devices or boards it pokes (it still refuses one it hasn't heard). Never keys, the
+// hub or a settings reset: those need its USB cable.
 static inline bool order_allowed(const char *line) {
-    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE", "OUT", "MLW" };
+    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE", "OUT", "MLW", "POKE,", "UNPOKE," };
     for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++) {
         size_t k = strlen(ok[i]);
         if (strncmp(line, ok[i], k) == 0 && (ok[i][k - 1] == ',' || line[k] == '\0' || line[k] == ',')) return true;

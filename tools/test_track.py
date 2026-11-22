@@ -42,6 +42,24 @@ def main():
         t += 0.5
     assert not tr.people, "nobody once it is quiet"
     assert tr.step([], t + 1) and not tr.people, "no links: nothing"
+    # a router's shared reaction (every board's link to it at once) never drags a person:
+    # board 'a' sees someone right in front of it; the router end lights up too
+    tr2 = Tracker()
+    t2 = 5000.0
+    def lk(level_ar, level_br, level_hr, level_ab):
+        ra, rb, rh = End(6, 6), End(6, 6), End(6, 6)
+        return [dict(key='a>r', ends=[(a, ra)], end_keys=('sat:a', 'r:x'), level=level_ar),
+                dict(key='b>r', ends=[(b, rb)], end_keys=('sat:b', 'r:x'), level=level_br),
+                dict(key='h>r', ends=[(hub, rh)], end_keys=('hub', 'r:x'), level=level_hr),
+                dict(key='a>b', ends=[(a, b)], end_keys=('sat:a', 'sat:b'), level=level_ab),
+                dict(key='h>a', ends=[(hub, a)], end_keys=('hub', 'sat:a'), level=0.9)]
+    for _ in range(130):
+        tr2.step(lk(0.05, 0.05, 0.05, 0.05), t2); t2 += 0.5
+    for _ in range(12):
+        tr2.step(lk(1.9, 1.0, 1.0, 0.9), t2); t2 += 0.5
+    assert tr2.people, "someone near board a"
+    pe = tr2.people[0].est
+    assert math.hypot(pe['x'] - 6, pe['y'] - 6) > 2.5, f"not dragged to the router: {pe}"
     z = dict(x=1, y=1, w=2, h=2)
     assert in_zone(z, 2, 2) and not in_zone(z, 3.5, 2)
     # the map keeps zones (checked), and refuses bad ones

@@ -443,7 +443,12 @@ window.AckMap = (() => {
   // differently put the person on the stronger one's side; quiet links rule
   // out their zones. A Bayes filter carries it over time (a person moves
   // ~1 m/s), so the estimate tracks and doesn't flicker.
-  const track = { grid: null, people: [], nextId: 0, est: null, base: new Map(), at: 0 };
+  const track = { grid: null, people: [], nextId: 0, est: null, base: new Map(), at: 0, ghosts: [] };
+  // a track that ended keeps its trail on the map, fading over TRAIL_MS
+  function keepGhosts(before, after, t) {
+    for (const p of before) if (!after.includes(p) && p.trail.length > 1) track.ghosts.push({ trail: p.trail, color: p.color, end: t });
+    track.ghosts = track.ghosts.filter((g) => t - g.end < TRAIL_MS).slice(-6);
+  }
   let zoneIn = {};                                  // zone id -> people inside, from the Pi's tracking
   let breathing = {};                               // 'hub' / 'sat:<mac>' -> breathing near that board
   let todayMap = null;                              // where people were today (the Pi's tracking): {cs, cells}
@@ -938,7 +943,28 @@ window.AckMap = (() => {
   //  4. each found person joins the nearest track (a Bayes filter each: last
   //     estimate spread by how far a person walks meanwhile, times now), or starts one
   const MAX_PEOPLE = 3, MULTI_GAIN = 4, MULTI_LEFT = 1.5, MULTI_SEP = 2.5, KEEP_MS = 2500;
+  const TRAIL_MS = 30000;                           // a person's trail: the last 30 s, fading
   const PERSON_C = ['--motion', '--warn', '#b48cff'];
+  // What every link to one router shares at the same moment is the router's end
+  // (someone by the router, or the router itself changing its signal): it is
+  // taken out before people are placed, so it never drags a person's dot
+  // towards the router or leaves it stuck halfway. Only links from two or more
+  // boards to the same router tell; what's left on each link places people.
+  function routerShared(obs) {
+    const by = new Map();
+    for (const o of obs) {
+      if (!o.ap || o.N === HUB || o.N.board) continue;
+      const g = by.get(o.N) || [];
+      g.push(o);
+      by.set(o.N, g);
+    }
+    for (const g of by.values()) {
+      if (new Set(g.map((o) => o.A)).size < 2) continue;
+      const shared = Math.min(...g.map((o) => o.a));
+      if (shared <= 0) continue;
+      for (const o of g) o.a = Math.max(0, o.a - shared);
+    }
+  }
   // Which end is the motion at? Links that share an end all react to motion
   // there; the others don't. So: the end whose links react much more than the
   // rest. No position needed for it: a router is just the end its links share.
@@ -971,9 +997,10 @@ window.AckMap = (() => {
     const obs = L.map(({ a, n, r }) => ({ a: excess(r, t), ends: endSamples(a, n), A: a, N: n, ap: !!r.ap })).filter((o) => o.a !== null);
     track.baseAt = t;
     nearEnd(obs, t);
+    routerShared(obs);
     const active = obs.length >= 2 && obs.some((o) => o.a >= 0.6);
     // tracks not seen lately end
-    track.people = track.people.filter((p) => t - p.seen < KEEP_MS);
+    { const before = track.people; track.people = track.people.filter((p) => t - p.seen < KEEP_MS); keepGhosts(before, track.people, t); }
     if (!active) { if (track.people.length) dirty = true; track.est = track.people[0] ? track.people[0].est : null; return; }
     let x0 = 0, x1 = 0, y0 = 0, y1 = 0;
     for (const o of obs) for (const [a, n] of o.ends) for (const m of [a, n]) {
@@ -1053,7 +1080,7 @@ window.AckMap = (() => {
       updatePerson(track.people[bi], f, t, dt);
     }
     // tracks no detection matched this step: gone once not seen for a second
-    track.people = track.people.filter((tp, i) => used.has(i) || t - tp.seen < 1000);
+    { const before = track.people; track.people = track.people.filter((tp, i) => used.has(i) || t - tp.seen < 1000); keepGhosts(before, track.people, t); }
     track.people.sort((p1, p2) => p1.id - p2.id);
     track.people.forEach((p, i) => { p.color = PERSON_C[i % PERSON_C.length]; });
     track.est = track.people[0] ? track.people[0].est : null;
@@ -1083,7 +1110,7 @@ window.AckMap = (() => {
     p.est = { x: sx, y: sy, r: Math.hypot(Math.max(cs, r68), modelErr) };
     p.seen = t;
     p.trail.push({ x: sx, y: sy, t });
-    while (p.trail.length && t - p.trail[0].t > 12000) p.trail.shift();
+    while (p.trail.length && t - p.trail[0].t > TRAIL_MS) p.trail.shift();
     // speed and heading: over the last ~2 s of the track, smoothed
     const back = p.trail.find((q) => t - q.t <= 2200);
     if (back && t - back.t >= 900) {
@@ -1230,6 +1257,18 @@ window.AckMap = (() => {
   }
   function drawTrack(t) {
     const g = track.grid;
+    for (const gh of track.ghosts) {                 // trails of people no longer tracked, still fading out
+      const col = gh.color && gh.color.startsWith('--') ? css(gh.color) : gh.color || css('--motion'), tr = gh.trail;
+      ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      for (let k = 1; k < tr.length; k++) {
+        const keep = (1 - Math.min(1, (t - tr[k].t) / TRAIL_MS)) ** 1.5;
+        if (keep <= 0) continue;
+        ctx.strokeStyle = alpha(col, 0.7 * keep); ctx.lineWidth = 1.5 + 3 * keep;
+        ctx.beginPath(); ctx.moveTo(X(tr[k - 1].x), Y(tr[k - 1].y)); ctx.lineTo(X(tr[k].x), Y(tr[k].y)); ctx.stroke();
+      }
+      ctx.restore();
+      dirty = true;
+    }
     if (!g || !track.people.length) return;
     const many = track.people.length > 1;
     track.people.forEach((p, i) => {
@@ -1248,10 +1287,18 @@ window.AckMap = (() => {
       ctx.drawImage(p.img, X(g.x0), Y(g.y0), g.gw * g.cs * M.view.s, g.gh * g.cs * M.view.s);
       ctx.globalAlpha = fade;
       const tr = p.trail;
-      for (let k = 1; k < tr.length; k++) {
-        const age = (t - tr[k].t) / 12000;
-        ctx.strokeStyle = alpha(col, 0.7 * (1 - age)); ctx.lineWidth = 1 + 3 * (1 - age); ctx.lineCap = 'round';
-        ctx.beginPath(); ctx.moveTo(X(tr[k - 1].x), Y(tr[k - 1].y)); ctx.lineTo(X(tr[k].x), Y(tr[k].y)); ctx.stroke();
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      for (const [glow, w0] of [[true, 9], [false, 4]]) {   // a soft glow under a bright line, both fading with age
+        for (let k = 1; k < tr.length; k++) {
+          const age = Math.min(1, (t - tr[k].t) / TRAIL_MS), keep = (1 - age) ** 1.5;
+          ctx.strokeStyle = alpha(col, (glow ? 0.18 : 0.9) * keep); ctx.lineWidth = (glow ? w0 : 1.5 + w0 * keep);
+          ctx.beginPath(); ctx.moveTo(X(tr[k - 1].x), Y(tr[k - 1].y)); ctx.lineTo(X(tr[k].x), Y(tr[k].y)); ctx.stroke();
+        }
+      }
+      for (let k = 0; k < tr.length; k += 4) {            // dots along it, every couple of seconds
+        const keep = 1 - Math.min(1, (t - tr[k].t) / TRAIL_MS);
+        ctx.fillStyle = alpha(col, 0.8 * keep);
+        ctx.beginPath(); ctx.arc(X(tr[k].x), Y(tr[k].y), 1.5 + 2 * keep, 0, Math.PI * 2); ctx.fill();
       }
       const x = X(e.x), y = Y(e.y), rr = Math.max(12, e.r * M.view.s);
       const pulse = reduced.matches ? 0 : 0.5 + 0.5 * Math.sin(t / 300 + i);
@@ -1261,13 +1308,13 @@ window.AckMap = (() => {
       ctx.shadowBlur = 0;
       if (simple()) { ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 2; ctx.stroke(); }
       if (p.heading !== null && p.speed > 0.25) {     // heading: an arrow out of the dot
-        const a = p.heading, L2 = 14 + 10 * Math.min(1, p.speed);
-        ctx.strokeStyle = col; ctx.lineWidth = 2;
+        const a = p.heading, L2 = 20 + 14 * Math.min(1, p.speed);
+        ctx.strokeStyle = col; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.moveTo(x + 7 * Math.cos(a), y + 7 * Math.sin(a)); ctx.lineTo(x + L2 * Math.cos(a), y + L2 * Math.sin(a)); ctx.stroke();
         ctx.beginPath();
-        ctx.moveTo(x + (L2 + 5) * Math.cos(a), y + (L2 + 5) * Math.sin(a));
-        ctx.lineTo(x + L2 * Math.cos(a + 0.5) , y + L2 * Math.sin(a + 0.5));
-        ctx.lineTo(x + L2 * Math.cos(a - 0.5), y + L2 * Math.sin(a - 0.5));
+        ctx.moveTo(x + (L2 + 9) * Math.cos(a), y + (L2 + 9) * Math.sin(a));
+        ctx.lineTo(x + L2 * Math.cos(a + 0.45), y + L2 * Math.sin(a + 0.45));
+        ctx.lineTo(x + L2 * Math.cos(a - 0.45), y + L2 * Math.sin(a - 0.45));
         ctx.closePath(); ctx.fill();
       }
       ctx.strokeStyle = alpha(col, 0.85); ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);

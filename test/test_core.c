@@ -1312,6 +1312,7 @@ int main(void) {
             CHECK(parse_mlw("MLW,1,x", &a, &b, vals, &nv) == MLW_BAD && parse_mlw("MLW,1,", &a, &b, vals, &nv) == MLW_BAD &&
                   parse_mlw("MLW,1,nan", &a, &b, vals, &nv) == MLW_BAD && parse_mlw("MLWX", &a, &b, vals, &nv) == MLW_BAD);
             CHECK(order_allowed("MLW,0,1,2") && order_allowed("MLW,commit,27"));
+            CHECK(order_allowed("POKE,x") && order_allowed("UNPOKE,x") && !order_allowed("POKEX"));
             static ml_model_t mm;
             ml_model_default(&mm);
             CHECK(ml_model_ok(&mm) && mm.np == ml_param_count(0, 1));
@@ -1400,7 +1401,7 @@ int main(void) {
             CHECK(order_allowed("OUT") && order_allowed("OUT,motion,60") && order_allowed("OUT,default") &&
                   !order_allowed("OUTX") && !order_allowed("OUTPUT,on"));
             CHECK(!order_allowed("KEY,00") && !order_allowed("PEERKEY,clear") && !order_allowed("HUB,clear") &&
-                  !order_allowed("POKE,aa") && !order_allowed("CALX") && !order_allowed("SCAN") &&
+                  !order_allowed("CALX") && !order_allowed("SCAN") &&
                   !order_allowed("USEX") && !order_allowed("") && !order_allowed("SENSE"));
             // its reports say which order it did last; the hub stops then
             rep_extra_t x = {0}, y;
