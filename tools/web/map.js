@@ -26,7 +26,7 @@ window.AckMap = (() => {
   };
 
   // ---------- state ----------
-  const M = { unit: 'ft', env: 'home', view: null, nodes: new Map(), plans: [], hubFloor: 1, floorH: 3.0, hubFacing: null };
+  const M = { unit: 'ft', env: 'home', view: null, nodes: new Map(), plans: [], zones: [], hubFloor: 1, floorH: 3.0, hubFacing: null };
   // nodes: key -> {key, name, x, y, placed, floor}. floor: the one you chose (1 = ground); a router or
   // device you haven't given one gets the floor that fits its signals best (autoFloor)
   // Picture layers, bottom first: {id, name, x, y (top-left corner, metres), w (width, metres), rot (radians),
@@ -443,6 +443,7 @@ window.AckMap = (() => {
   // out their zones. A Bayes filter carries it over time (a person moves
   // ~1 m/s), so the estimate tracks and doesn't flicker.
   const track = { grid: null, people: [], nextId: 0, est: null, base: new Map(), at: 0 };
+  let zoneIn = {};                                  // zone id -> people inside, from the Pi's tracking
   const CELL = 0.25;
   const SIG0 = 0.45, SIG1 = 0.25, MODEL_ERR = 1.2;          // a link's scatter: idle noise, plus more the stronger it reacts
   let heatKey = '', heatView = null, viewSeen = '', viewMovedAt = 0;
@@ -755,6 +756,8 @@ window.AckMap = (() => {
     locate(t);
     stepTrack(t);
     drawPlans();
+    drawAcc();
+    drawZones();
     grid();
     drawLikely();
     drawHints();
@@ -1125,6 +1128,26 @@ window.AckMap = (() => {
     }
     return d0 < 4 ? `near ${bs[0][1]}` : `${fmtLen(d0)} from ${bs[0][1]}`;
   }
+  function drawZones() {
+    for (const z of M.zones || []) {
+      const occ = zoneIn[z.id] > 0, x = X(z.x), y = Y(z.y), w = z.w * M.view.s, h = z.h * M.view.s;
+      ctx.save();
+      ctx.fillStyle = occ ? alpha(css('--motion'), 0.16) : alpha(css('--accent'), 0.06);
+      ctx.fillRect(x, y, w, h);
+      ctx.setLineDash(occ ? [] : [6, 4]);
+      ctx.strokeStyle = occ ? css('--motion') : alpha(css('--accent'), 0.7); ctx.lineWidth = occ ? 2 : 1.5;
+      ctx.strokeRect(x, y, w, h);
+      ctx.setLineDash([]);
+      ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillStyle = occ ? css('--motion') : css('--accent');
+      ctx.fillText(z.name + (occ ? ' · someone here' : '') + (z.notify ? ' 🔔' : ''), x + 6, y + 5);
+      if (!readOnly) {                               // the corner to resize it
+        ctx.beginPath(); ctx.arc(x + w, y + h, 6, 0, Math.PI * 2);
+        ctx.fillStyle = css('--accent'); ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
   function drawNear(t) {
     const nr = track.near;
     if (!nr || !nr.m) return;
@@ -1267,13 +1290,19 @@ window.AckMap = (() => {
   // The list has three parts: the board picker, the floors panel and the
   // links. Only the first and last are rebuilt on every update; the floors
   // panel stays in the page (moving it closes an open picker on a phone).
-  let listParts = null;
+  let listParts = null, forceList = false;
   function renderList() {
     const root = $('#map-links');
     if (!listParts || listParts.top.parentNode !== root) {
-      listParts = { top: el('div'), floors: el('div'), list: el('div') };
-      root.replaceChildren(listParts.top, listParts.floors, listParts.list);
+      listParts = { top: el('div'), floors: el('div'), zones: el('div'), list: el('div'), touched: 0 };
+      root.replaceChildren(listParts.top, listParts.floors, listParts.zones, listParts.list);
+      // a picker or button in the list being used: the list waits (a rebuild closes a phone's picker)
+      for (const ev of ['pointerdown', 'touchstart', 'focusin', 'input', 'change'])
+        root.addEventListener(ev, (e) => { if (listParts.list.contains(e.target) || listParts.top.contains(e.target)) listParts.touched = performance.now(); }, { passive: true });
     }
+    const busy = (part) => part.contains(document.activeElement) || performance.now() - listParts.touched < 4000;
+    if (!forceList && (busy(listParts.list) || busy(listParts.top))) return;   // the floors and zones panels guard themselves
+    forceList = false;
     let box = listParts.top;
     box.replaceChildren();
     if (others.length) {                       // which board's links to show
@@ -1290,6 +1319,8 @@ window.AckMap = (() => {
     }
     const fp = floorsPanel();
     if (listParts.floors.firstChild !== fp) listParts.floors.replaceChildren(fp);
+    const zp = zonesPanel();
+    if (listParts.zones.firstChild !== zp) listParts.zones.replaceChildren(zp);
     box = listParts.list;
     box.replaceChildren();
     const L = links();
@@ -1416,6 +1447,40 @@ window.AckMap = (() => {
     return det;
   }
 
+  // Zones: areas on the map. The Pi tracks people all the time and says when
+  // someone walks into one (the live stream), and can send a notification.
+  let zonesOpen = false, zonesEl = null, zonesSig = '';
+  function zonesPanel() {
+    const sig = JSON.stringify((M.zones || []).map((z) => [z.id, z.name, z.notify, z.night]));
+    if (zonesEl && sig === zonesSig) return zonesEl;
+    zonesSig = sig;
+    const det = el('details', { className: 'map-floors', open: zonesOpen });
+    det.ontoggle = () => { zonesOpen = det.open; };
+    det.append(el('summary', { textContent: `Zones${M.zones.length ? ` (${M.zones.length})` : ''}` }));
+    for (const z of M.zones) {
+      const name = el('button', { type: 'button', className: 'ghost small', textContent: z.name });
+      name.onclick = () => { const v = prompt('Name this zone (e.g. Front door, Stairs, Kitchen)', z.name); if (v) { z.name = v.slice(0, 32); dirty = true; zonesEl = null; renderList(); scheduleSave(); } };
+      const box = (label, key) => {
+        const cb = el('input', { type: 'checkbox', checked: !!z[key] });
+        cb.onchange = () => { z[key] = cb.checked; dirty = true; zonesEl = null; renderList(); scheduleSave(); };
+        return el('label', { className: 'check small' }, cb, label);
+      };
+      const del = el('button', { type: 'button', className: 'ghost small', textContent: 'Remove' });
+      del.onclick = () => { M.zones = M.zones.filter((q) => q !== z); dirty = true; zonesEl = null; renderList(); scheduleSave(); };
+      det.append(el('div', { className: 'map-zone-row' }, name, box('notify me', 'notify'), box('only at night', 'night'), del));
+    }
+    const add = el('button', { type: 'button', textContent: 'Add a zone' });
+    add.onclick = () => {
+      const v = M.view || { x: 0, y: 0 }, id = Math.random().toString(36).slice(2, 10);
+      M.zones.push({ id, name: `Zone ${M.zones.length + 1}`, x: v.x - 1.5, y: v.y - 1.5, w: 3, h: 3, notify: false, night: false });
+      zonesOpen = true; dirty = true; zonesEl = null; renderList(); scheduleSave();
+    };
+    det.append(add, el('p', { className: 'muted small', textContent:
+      'Drag a zone to move it, its corner dot to resize it. When someone walks in, the live stream says so; with "notify me", your phone too (Settings, Phone notifications: same wait and daily cap). Tracking is about 2 m accurate, so make zones room-sized.' }));
+    zonesEl = det;
+    return det;
+  }
+
   // ---------- touch / mouse ----------
   function hit(px, py) {
     const ln = M.nodes.get('light');
@@ -1456,9 +1521,19 @@ window.AckMap = (() => {
         nodes: [...M.nodes.values()].map((m) => [m, m.x, m.y]), plans: M.plans.map((p) => [p, p.x, p.y]) };
       return;
     }
+    const zh = !n && !tool ? zoneHit(x, y) : null;  // a zone: its corner resizes it, inside moves it
+    if (zh) { const [wx, wy] = toWorld(x, y); drag = { zone: zh.z, corner: zh.corner, wx, wy, zx: zh.z.x, zy: zh.z.y, zw: zh.z.w, zhh: zh.z.h }; return; }
     drag = n ? { key: n.key } : { pan: true, x0: x, y0: y, vx: M.view.x, vy: M.view.y, tap: true };
     autoFit = false; viewByUser = true;
     if (readOnly) homeTouched = true;
+  }
+  function zoneHit(x, y) {
+    for (const z of [...(M.zones || [])].reverse()) {
+      const cx = X(z.x + z.w), cy = Y(z.y + z.h);
+      if (Math.hypot(cx - x, cy - y) <= 14) return { z, corner: true };
+      if (x >= X(z.x) && x <= X(z.x + z.w) && y >= Y(z.y) && y <= Y(z.y + z.h)) return { z, corner: false };
+    }
+    return null;
   }
   function move(e) {
     if (!ptrs.has(e.pointerId)) return;
@@ -1469,6 +1544,11 @@ window.AckMap = (() => {
       const [a, b] = [...ptrs.values()], dist = Math.hypot(a.x - b.x, a.y - b.y);
       if (drag.dist > 0) zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, dist / drag.dist);
       drag.dist = dist;
+    } else if (drag.zone) {
+      const [wx, wy] = toWorld(x, y), z = drag.zone;
+      if (drag.corner) { z.w = Math.max(0.5, drag.zw + wx - drag.wx); z.h = Math.max(0.5, drag.zhh + wy - drag.wy); }
+      else { z.x = drag.zx + wx - drag.wx; z.y = drag.zy + wy - drag.wy; }
+      dirty = true;
     } else if (drag.facing) {
       const m = drag.facing, deg = Math.round(Math.atan2(y - Y(m.y), x - X(m.x)) * 180 / Math.PI / 5) * 5;
       const f = deg * Math.PI / 180;                 // 5-degree steps
@@ -1501,7 +1581,7 @@ window.AckMap = (() => {
   function up(e) {
     ptrs.delete(e.pointerId);
     if (drag && drag.pan && drag.tap && tool && e.type === 'pointerup') toolTap(...toWorld(...pos(e)));
-    if (!readOnly && drag && (drag.key || drag.pan || drag.layer || drag.board || drag.facing)) { scheduleSave(); if (drag.facing) renderList(); }
+    if (!readOnly && drag && (drag.key || drag.pan || drag.layer || drag.board || drag.facing || drag.zone)) { scheduleSave(); if (drag.facing) renderList(); }
     drag = ptrs.size === 1 ? { pan: true, x0: [...ptrs.values()][0].x, y0: [...ptrs.values()][0].y, vx: M.view.x, vy: M.view.y } : null;
   }
 
@@ -1514,9 +1594,12 @@ window.AckMap = (() => {
     const body = { unit: M.unit, env: M.env, nodes: [...M.nodes.values()].slice(0, 64).map((n) =>
       Object.assign({ key: n.key, name: String(n.name).slice(0, 64), x: n.x, y: n.y, placed: !!n.placed },
         n.floor ? { floor: n.floor } : {}, typeof n.facing === 'number' ? { facing: n.facing } : {},
-        n.hint ? { hint: [n.hint.x, n.hint.y, n.hint.r] } : {})),
+        n.hint ? { hint: [n.hint.x, n.hint.y, n.hint.r] } : {},
+        !n.placed && n.auto ? { auto: [Math.min(1000, n.auto.a), Math.min(1000, n.auto.b), n.auto.rot] } : {})),
       hub_floor: M.hubFloor, floor_h: M.floorH };
     if (typeof M.hubFacing === 'number') body.hub_facing = M.hubFacing;
+    body.zones = (M.zones || []).map((z) => ({ id: z.id, name: String(z.name).slice(0, 32), x: z.x, y: z.y, w: z.w, h: z.h,
+      notify: !!z.notify, night: !!z.night }));
     if (M.view && viewByUser) body.view = M.view;
     body.plans = M.plans.map((p) => ({ id: p.id, name: String(p.name).slice(0, 64), x: p.x, y: p.y, w: p.w,
       rot: p.rot, opacity: p.opacity, hidden: !!p.hidden }));
@@ -1534,6 +1617,7 @@ window.AckMap = (() => {
     for (const n of m.nodes || []) M.nodes.set(n.key, { key: n.key, name: n.name || n.key, x: n.x, y: n.y, placed: !!n.placed, floor: n.floor || 0,
       facing: typeof n.facing === 'number' ? n.facing : undefined,
       hint: Array.isArray(n.hint) && n.hint.length === 3 ? { x: n.hint[0], y: n.hint[1], r: n.hint[2] } : null });
+    M.zones = Array.isArray(m.zones) ? m.zones.map((z) => ({ ...z })) : [];
     if (m.plans) {
       M.plans = m.plans.map((p) => Object.assign({ name: p.id, rot: 0, opacity: 1, hidden: false }, p));
       for (const p of M.plans) loadPicture(p);
@@ -1603,7 +1687,180 @@ window.AckMap = (() => {
     }
     setTool(tool);                                   // the next step's hint
   }
-  async function addPicture(file) {
+  // ---------- accuracy: how precisely each spot can be told apart ----------
+  // For a person at p every link changes by its sensitivity there: a vector,
+  // one number per link. Spots whose vectors look alike (after scaling: how
+  // much someone moves is unknown) can't be told apart, so the error at p is
+  // the spread of the spots that look like it. No link reacting: blind.
+  const ACC_CELL = 0.5, ACC_SIG = 0.12;
+  function accPairs(move) {                         // the links, with one board moved (or added) in thought
+    const pos = (m) => (move && m && m.key && m.key === move.key ? { ...m, x: move.x, y: move.y } : m);
+    const pairs = links().filter(({ r }) => !weak(r)).map(({ a, n }) => [pos(a), pos(n)]);
+    if (move && move.add) {                         // a new board: links to the hub, the other boards and every router
+      const nb = { key: '+', x: move.x, y: move.y, board: true, floor: M.hubFloor };
+      const ends = new Set([HUB, ...others.map((b) => M.nodes.get(b.key)).filter(Boolean)]);
+      for (const { n, r } of links()) if (r.ap && n !== HUB && !n.board) ends.add(n);
+      for (const e of ends) pairs.push([nb, e]);
+    }
+    return pairs.filter(([a, n]) => a && n && dist3(a, n) >= 0.3);
+  }
+  function accArea() {
+    const pts = [[0, 0], ...others.map((b) => M.nodes.get(b.key)).filter(Boolean).map((n) => [n.x, n.y])];
+    let x0 = Math.min(...pts.map((p) => p[0])) - 3, x1 = Math.max(...pts.map((p) => p[0])) + 3;
+    let y0 = Math.min(...pts.map((p) => p[1])) - 3, y1 = Math.max(...pts.map((p) => p[1])) + 3;
+    return { x0, y0, x1, y1 };
+  }
+  function accMap(pairs, area, cell) {
+    const lam = lambda(), K = pairs.length, cs = cell || ACC_CELL;
+    const gw = Math.max(1, Math.ceil((area.x1 - area.x0) / cs)), gh = Math.max(1, Math.ceil((area.y1 - area.y0) / cs));
+    const N = gw * gh, U = new Float32Array(N * K), mag = new Float32Array(N), err = new Float32Array(N);
+    const ds = pairs.map(([a, n]) => dist3(a, n));
+    for (let c = 0; c < N; c++) {
+      const x = area.x0 + ((c % gw) + 0.5) * cs, y = area.y0 + (Math.floor(c / gw) + 0.5) * cs;
+      let m2 = 0;
+      for (let k = 0; k < K; k++) { const v = sensitivity(x, y, pairs[k][0], pairs[k][1], ds[k], lam); U[c * K + k] = v; m2 += v * v; }
+      const m = Math.sqrt(m2); mag[c] = m;
+      if (m > 0) for (let k = 0; k < K; k++) U[c * K + k] /= m;
+    }
+    for (let c = 0; c < N; c++) {
+      if (mag[c] < 0.15) { err[c] = -1; continue; }   // nothing reacts here
+      const cx = c % gw, cy = Math.floor(c / gw);
+      let sw = 0, sd = 0;
+      for (let q = 0; q < N; q++) {
+        if (mag[q] < 0.15) continue;
+        let d2 = 0;
+        for (let k = 0; k < K; k++) { const e = U[c * K + k] - U[q * K + k]; d2 += e * e; }
+        if (d2 > 9 * ACC_SIG * ACC_SIG) continue;
+        const w = Math.exp(-d2 / (2 * ACC_SIG * ACC_SIG)), dx = (q % gw - cx) * cs, dy = (Math.floor(q / gw) - cy) * cs;
+        sw += w; sd += w * (dx * dx + dy * dy);
+      }
+      err[c] = Math.sqrt(sd / Math.max(sw, 1e-9));
+    }
+    // smoothed over the neighbouring cells: an estimate, not a cell-exact truth
+    const sm = new Float32Array(N);
+    for (let c = 0; c < N; c++) {
+      if (err[c] < 0) { sm[c] = -1; continue; }
+      const cx = c % gw, cy = Math.floor(c / gw);
+      let t = 0, n = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const x = cx + dx, y = cy + dy;
+        if (x < 0 || y < 0 || x >= gw || y >= gh) continue;
+        const e = err[y * gw + x];
+        if (e >= 0) { t += e; n++; }
+      }
+      sm[c] = t / n;
+    }
+    return { ...area, gw, gh, cs, err: sm };
+  }
+  const accMean = (am) => {
+    let s2 = 0, n = 0, blind = 0;
+    for (const e of am.err) { if (e < 0) { blind++; s2 += 4; } else s2 += e; n++; }   // a blind spot counts as 4 m off
+    return { mean: s2 / Math.max(n, 1), blind: blind / Math.max(n, 1) };
+  };
+  let acc = null;                                   // the overlay shown (null: off)
+  function accColor(e) {
+    if (e < 0) return 'rgba(120,130,140,.35)';      // blind
+    return e < 1 ? 'rgba(62,207,142,.30)' : e < 2 ? 'rgba(255,214,79,.28)' : e < 3 ? 'rgba(255,150,60,.30)' : 'rgba(255,90,79,.32)';
+  }
+  function drawAcc() {
+    if (!acc) return;
+    const { x0, y0, gw, gh, cs, err } = acc.map;
+    for (let c = 0; c < gw * gh; c++) {
+      const x = x0 + (c % gw) * cs, y = y0 + Math.floor(c / gw) * cs;
+      ctx.fillStyle = accColor(err[c]);
+      ctx.fillRect(X(x), Y(y), cs * M.view.s + 0.5, cs * M.view.s + 0.5);
+    }
+    if (acc.best) {                                  // the suggested spot
+      const px = X(acc.best.x), py = Y(acc.best.y);
+      ctx.save();
+      ctx.beginPath(); ctx.arc(px, py, 12, 0, Math.PI * 2);
+      ctx.strokeStyle = css('--accent'); ctx.lineWidth = 3; ctx.setLineDash([4, 3]); ctx.stroke();
+      ctx.setLineDash([]); ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillStyle = css('--accent'); ctx.fillText(acc.best.label, px, py - 18);
+      if (acc.best.from) {
+        ctx.beginPath(); ctx.moveTo(X(acc.best.from.x), Y(acc.best.from.y)); ctx.lineTo(px, py);
+        ctx.strokeStyle = alpha(css('--accent'), 0.6); ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]); ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+  function accNote(text) { const e = $('#acc-note'); e.hidden = !text; e.textContent = text || ''; }
+  function toggleAcc() {
+    if (acc) { acc = null; accNote(''); dirty = true; return; }
+    const map = accMap(accPairs(null), accArea());
+    const m = accMean(map);
+    acc = { map };
+    accNote(`Green: within ${fmtLen(1)} · yellow: ${fmtLen(2)} · orange: ${fmtLen(3)} · red: more · grey: no link reacts there. ` +
+      `Typical error over the area around your boards: about ${fmtLen(m.mean)}` + (m.blind > 0.05 ? `, and ${Math.round(m.blind * 100)}% of it is blind.` : '.'));
+    dirty = true;
+  }
+  // Where would one board help most? Each board in turn tried on a coarse
+  // grid (and a new board), scored by the mean error over the area.
+  async function suggest() {
+    const area = accArea(), base = accMean(accMap(accPairs(null), area, 1.5));
+    accNote('Trying spots… (a few seconds)');
+    const cands = [];
+    for (let y = area.y0 + 1; y < area.y1; y += 2) for (let x = area.x0 + 1; x < area.x1; x += 2) cands.push([x, y]);
+    let best = null;
+    const tries = [...others.map((b) => ({ b, n: M.nodes.get(b.key) })).filter((t) => t.n), { add: true }];
+    for (const t of tries) {
+      for (const [x, y] of cands) {
+        const mv = t.add ? { add: true, x, y } : { key: t.n.key, x, y };
+        const sc = accMean(accMap(accPairs(mv), area, 1.5)).mean;
+        if (!best || sc < best.sc) best = { sc, x, y, t };
+      }
+      await new Promise((ok) => setTimeout(ok, 0));   // keep the page responsive
+    }
+    if (!best || best.sc > base.mean - 0.15) {
+      acc = { map: accMap(accPairs(null), area) };
+      accNote(`Your boards are already well placed: no single move gains much (typical error about ${fmtLen(base.mean)}).`);
+      dirty = true; return;
+    }
+    const who = best.t.add ? 'a new board' : (/^\d+$/.test(best.t.b.label) ? `board ${best.t.b.label}` : best.t.b.label);
+    const mv = best.t.add ? { add: true, x: best.x, y: best.y } : { key: best.t.n.key, x: best.x, y: best.y };
+    acc = { map: accMap(accPairs(mv), area), best: { x: best.x, y: best.y, label: best.t.add ? 'add a board here' : `move ${who} here`,
+      from: best.t.add ? null : best.t.n } };
+    accNote(`Best single change: ${best.t.add ? 'add a board' : `move ${who}`} to the dashed circle. Typical error ${fmtLen(base.mean)} → ${fmtLen(best.sc)}. ` +
+      'The colours show the map after that change. Tap Accuracy to hide it.');
+    dirty = true;
+  }
+
+  // ---------- a satellite picture, fetched once by this browser ----------
+  // Esri World Imagery tiles (free to view, with credit) around a point, joined
+  // into one 1024 px picture, sent to the Pi like any picture and placed
+  // north-up with that point at the hub. Nothing but the tiles' numbers goes
+  // out, from your own browser; the point itself is never stored.
+  const SAT_URL = (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+  async function addSatellite(lat, lon, across) {
+    const S = 1024, cl = Math.cos(lat * Math.PI / 180);
+    const z = Math.max(15, Math.min(19, Math.round(Math.log2(156543.034 * cl * S / across))));
+    const n = 2 ** z, mpp = 156543.034 * cl / n;
+    const px = (lon + 180) / 360 * n * 256;
+    const lr = lat * Math.PI / 180;
+    const py = (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n * 256;
+    const cv2 = document.createElement('canvas');
+    cv2.width = S; cv2.height = S;
+    const c2 = cv2.getContext('2d');
+    const x0 = px - S / 2, y0 = py - S / 2, jobs = [];
+    for (let ty = Math.floor(y0 / 256); ty <= Math.floor((y0 + S - 1) / 256); ty++)
+      for (let tx = Math.floor(x0 / 256); tx <= Math.floor((x0 + S - 1) / 256); tx++)
+        jobs.push(new Promise((ok) => {
+          const im = new Image();
+          im.crossOrigin = 'anonymous';
+          im.onload = () => { c2.drawImage(im, tx * 256 - x0, ty * 256 - y0); ok(true); };
+          im.onerror = () => ok(false);
+          im.src = SAT_URL(z, ((tx % n) + n) % n, ty);
+        }));
+    const got = await Promise.all(jobs);
+    if (!got.some(Boolean)) throw new Error('no tiles came back (offline, or blocked?)');
+    c2.font = '12px sans-serif'; c2.fillStyle = 'rgba(255,255,255,.8)';
+    c2.fillText('Imagery © Esri, Maxar, Earthstar Geographics', 8, S - 8);
+    const blob = await new Promise((ok) => cv2.toBlob(ok, 'image/jpeg', 0.85));
+    blob.name = 'Satellite.jpg';
+    const w = S * mpp;
+    await addPicture(blob, { x: -w / 2, y: -w / 2, w, bottom: true });
+  }
+  async function addPicture(file, place) {
     const id = PLAN_IDS.find((i) => !plan(i));
     if (!id) { alert('Four pictures at most: remove one first.'); return; }
     if (file.size > 12 * 1024 * 1024) { alert('That picture is over 12 MB: save it smaller (a screenshot is plenty).'); return; }
@@ -1614,13 +1871,15 @@ window.AckMap = (() => {
     const got = await r.json().catch(() => ({}));
     if (!r.ok) { alert(got.msg || 'The picture was refused.'); return; }
     // first placed to fill most of the current view, centred
-    const w = Math.max(1, 0.8 * W / M.view.s);
-    const p = { id, name: file.name.replace(/\.[^.]+$/, '').slice(0, 64) || id, x: 0, y: 0, w, rot: 0,
-      opacity: M.plans.length ? 0.8 : 1, hidden: false };
-    M.plans.push(p);
+    const w = place ? place.w : Math.max(1, 0.8 * W / M.view.s);
+    const p = { id, name: (file.name || id).replace(/\.[^.]+$/, '').slice(0, 64) || id, x: 0, y: 0, w, rot: 0,
+      opacity: M.plans.length && !place ? 0.8 : 1, hidden: false };
+    if (place && place.bottom) M.plans.unshift(p); else M.plans.push(p);
     await loadPicture(p);
-    if (p.img) { p.x = M.view.x - w / 2; p.y = M.view.y - (w * p.ih / p.iw) / 2; }
+    if (place) { p.x = place.x; p.y = place.y; }
+    else if (p.img) { p.x = M.view.x - w / 2; p.y = M.view.y - (w * p.ih / p.iw) / 2; }
     scheduleSave();
+    if (place) { dirty = true; renderLayers(); return; }   // already to scale, north up: drag it to line up
     setTool({ kind: M.plans.length === 1 ? 'scale' : 'align', id, pts: [] });
   }
   async function removePicture(p) {
@@ -1693,7 +1952,37 @@ window.AckMap = (() => {
     $('#map-env').onchange = (e) => { M.env = e.target.value; dirty = true; renderList(); scheduleSave(); };
     for (const b of $('#map-unit').children) b.onclick = () => { M.unit = b.dataset.u; syncControls(); dirty = true; renderList(); scheduleSave(); };
     $('#map-fit').onclick = () => { fit(); viewByUser = true; scheduleSave(); };
+    $('#map-acc').onclick = () => { toggleAcc(); $('#map-acc').classList.toggle('on', !!acc); };
+    $('#map-suggest').onclick = async () => { $('#map-suggest').disabled = true; try { await suggest(); } finally { $('#map-suggest').disabled = false; $('#map-acc').classList.toggle('on', !!acc); } };
     $('#map-file').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) addPicture(f); };
+    // the satellite picture form
+    const satMsg = $('#sat-msg'), satHint = satMsg.textContent;
+    $('#sat-open').onclick = () => { $('#sat-form').hidden = !$('#sat-form').hidden; satMsg.textContent = satHint; };
+    $('#sat-cancel').onclick = () => { $('#sat-form').hidden = true; };
+    $('#sat-here').onclick = () => {
+      if (!navigator.geolocation) { satMsg.textContent = 'This browser has no location: type the numbers instead.'; return; }
+      satMsg.textContent = 'Finding where this phone is…';
+      navigator.geolocation.getCurrentPosition(
+        (pos) => { $('#sat-ll').value = `${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)}`;
+          satMsg.textContent = `Got it (within about ${Math.round(pos.coords.accuracy)} m). Now "Get the picture".`; },
+        () => { satMsg.textContent = 'No location (blocked, or the page isn\'t on https): type the numbers instead.'; },
+        { enableHighAccuracy: true, timeout: 15000 });
+    };
+    $('#sat-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const m = $('#sat-ll').value.match(/(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/);
+      const lat = m && +m[1], lon = m && +m[2];
+      if (!m || Math.abs(lat) > 85 || Math.abs(lon) > 180) { satMsg.textContent = 'Give it as "latitude, longitude", for example 40.7128, -74.0060.'; return; }
+      $('#sat-go').disabled = true;
+      satMsg.textContent = 'Downloading the picture…';
+      try {
+        await addSatellite(lat, lon, +$('#sat-area').value);
+        $('#sat-ll').value = '';                     // not kept
+        $('#sat-form').hidden = true;
+      } catch (err) {
+        satMsg.textContent = `Couldn't get it: ${err.message}.`;
+      } finally { $('#sat-go').disabled = false; }
+    };
     $('#map-hint-done').onclick = () => setTool(null);
     $('#map-auto').onclick = () => {           // routers and devices back to their signals; boards stay
       if (!confirm('Let ackwave place every router and device from the signals your boards hear? (Boards stay where you put them.)')) return;
@@ -1777,6 +2066,7 @@ window.AckMap = (() => {
     },
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
+      if (slow && slow.tracked) zoneIn = slow.tracked.zones || {};
       if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPeople = slow.demo_people || []; if (slow.channel) channel = slow.channel; }
       if (header) {
         boardMotion = hubMoving(header);

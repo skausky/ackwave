@@ -44,6 +44,8 @@ from stats import Sessions, summarize
 from doppler import FREQS, LOW_HZ, Doppler
 from light import Light, http_call
 from notify import Notify, pushover_call
+from track import End, Tracker, in_zone
+from mlfeat import Shadow
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LED_MODES, LED_PATTERNS, LONG_C, MOTION_C,
                  SCAN_C, STILL_C, SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
 
@@ -218,6 +220,11 @@ class Dashboard:
         self.sats = {}                   # other boards heard through ours: MAC -> latest report
         self.sat_cmds = {}               # MAC -> the last command sent to it through the hub, and its state
         self.follow = None               # a network switch waiting for the other boards to confirm
+        # Where people are, all the time (track.py: the Map's tracker on the Pi); zones on the map
+        self.tracker = Tracker()
+        self.track_layout = (None, {})   # (map file mtime, layout)
+        self.zone_in = {}                # zone id -> people inside now
+        self.zone_said = {}              # zone id -> when it last notified
         self.house = House()             # every board's verdict combined (boards.py)
         self.travel = Travel()           # someone walking from board to board (boards.py)
         self.travel_ev = None            # its live-stream entry while the path grows
@@ -341,6 +348,11 @@ class Dashboard:
         # restarts): [wall0, wall1 or None, node, name]. Says where a motion was.
         self.link_events = []
         state.on_csi = self._on_csi
+        try:                                     # the learned detector, beside the board (experimental)
+            self.ml = Shadow()
+        except (OSError, ValueError, KeyError) as e:
+            print(f"learned detector off: {e}", file=sys.stderr)
+            self.ml = None
 
     def _on_csi(self, d, t):
         """Every CSI packet (called inside State.feed, lock held)."""
@@ -349,6 +361,10 @@ class Dashboard:
         # count at the placement they were recorded at.
         src = self.act.feat.src
         self.act.place = f"{self.s.nodes.get(src, src)}|{d['ch']}|{self.cfg['act_place']}"
+        if self.ml is not None:
+            ch = self.ml.feed(src, d, t)
+            if ch is not None:
+                self._ml_period(ch, self.s.wall(t) if self.s.wall_off is not None else time.time())
         r = self.act.feed(d, t)
         if r is not None:
             self._act_period(r['state'], self.s.wall(t) if self.s.wall_off is not None else time.time())
@@ -411,6 +427,16 @@ class Dashboard:
         if key.startswith('sat:'):
             return self.board_label(key[4:])
         return name or key
+
+    def _ml_period(self, on, wall):
+        """The learned detector's periods: the timeline only (a lane to compare
+        with the board's), never the live stream, the light or the alerts."""
+        if on:
+            self.ml_open = wall
+        elif getattr(self, 'ml_open', None) is not None:
+            if self.timeline:
+                self.timeline.add(self.ml_open, max(self.ml_open, wall), 'ml', 'Learned (experimental)')
+            self.ml_open = None
 
     def _period(self, key, on, wall, name=''):
         """A link's (or the board's) motion period opens or closes; a closed one
@@ -898,6 +924,12 @@ class Dashboard:
                     self._event('network', f"Router channel {self.s.channel[0]} → {p[2]}", 'hub', important=True)
             self.s.feed(line)
             self.version += 1
+            if time.monotonic() - getattr(self, '_track_at', 0.0) >= 0.5:   # twice a second, like the page
+                self._track_at = time.monotonic()
+                try:
+                    self._track_step()
+                except Exception as e:
+                    print(f"tracking: {e}", file=sys.stderr)
             self._board_period()
             self._light_rule()
             if not line.startswith('CSI,'):
@@ -911,6 +943,102 @@ class Dashboard:
         """The verdict the badge shows; no data or calibrating counts as still."""
         s = self.s
         return bool(s.det.motion) and s.det.floor > 0 and not s.source_status()
+
+    # ---------- people and zones, on the Pi ----------
+    def _layout(self):
+        p = self._map_path()
+        try:
+            mt = os.path.getmtime(p) if p else None
+        except OSError:
+            mt = None
+        if mt != self.track_layout[0]:
+            self.track_layout = (mt, self.map_load() if mt else {})
+        return self.track_layout[1]
+
+    def _track_links(self):
+        """The live links as the Map draws them, with their ends from the saved
+        layout: [dict(key, ends, end_keys, level)] for track.Tracker."""
+        m = self._layout()
+        fh = m.get('floor_h', 3.0)
+        hub_fl = m.get('hub_floor', 1)
+        nodes = {n['key']: n for n in m.get('nodes', [])}
+
+        def ends_of(key):
+            if key == 'hub':
+                return [End(0, 0, 0, m.get('hub_facing'))]
+            n = nodes.get(key)
+            if not n:
+                return None
+            z = ((n.get('floor') or hub_fl) - hub_fl) * fh
+            if n.get('placed') or key.startswith('sat:'):
+                return [End(n['x'], n['y'], z, n.get('facing'))]
+            au = n.get('auto')                   # the map's own estimate: its ellipse (map.js endSamples)
+            if au and not n.get('hint'):
+                if au[0] < 1:
+                    return [End(n['x'], n['y'], z)]
+                c, sn = math.cos(au[2]), math.sin(au[2])
+                return [End(n['x'], n['y'], z), End(n['x'] + au[0] * c, n['y'] + au[0] * sn, z),
+                        End(n['x'] - au[0] * c, n['y'] - au[0] * sn, z)]
+            h = n.get('hint')                    # a rough spot, else around where the map last put it
+            cx, cy, r = (h[0], h[1], h[2] * 0.6) if h else (n['x'], n['y'], 3.0)
+            return [End(cx, cy, z)] + [End(cx + r * math.cos(a), cy + r * math.sin(a), z)
+                                       for a in (0, math.pi / 2, math.pi, -math.pi / 2)]
+        q = lambda x: round(min(3.0, max(0.0, x)) * 20) / 20
+        out = []
+        act = self._activity()
+        for r in self._radio():
+            if r.get('rssi') is not None and r['rssi'] <= -80:
+                continue
+            node = r.get('node') or r['key']
+            if r['src'] == 0:
+                level = q(act['pct'] / 100) if act else (1.25 if self._motion_now() else 0.0)
+            elif r.get('activity') is not None:
+                level = q(r['activity'] / 2.8)
+            elif r.get('moving') is not None:            # a verdict without a level (map.js strength())
+                level = 1.25 if r['moving'] else 0.0 if r.get('state') == 'still' else None
+            else:
+                level = None
+            a, n = ends_of('hub'), ends_of(node)
+            if n:
+                out.append(dict(key=r['key'], ends=[(x, y) for x in a for y in n], end_keys=('hub', node), level=level))
+        for b in self._map_boards():
+            if b['state'] not in ('motion', 'still'):
+                continue
+            a = ends_of(b['key'])
+            if not a:
+                continue
+            for l in b['links']:
+                n = ends_of(l['key'])
+                if not n or l['key'] == b['key']:
+                    continue
+                out.append(dict(key=f"{b['key']}>{l['key']}", ends=[(x, y) for x in a for y in n],
+                                end_keys=(b['key'], l['key']), level=q(l['level'])))
+        return out, m
+
+    def _track_step(self):
+        if not (self.send or self.demo):
+            return
+        links, m = self._track_links()
+        now = time.time()
+        if not self.tracker.step(links, now):
+            return
+        zones = m.get('zones', [])
+        for z in zones:
+            inside = [p for p in self.tracker.people if p.est and in_zone(z, p.est['x'], p.est['y'])]
+            was = self.zone_in.get(z['id'], 0)
+            self.zone_in[z['id']] = len(inside)
+            if inside and not was:
+                n = len(self.tracker.people)
+                self._event('zone', f"Someone in {z['name']}", None, important=bool(z.get('notify')))
+                if z.get('notify') and self.send and now - self.zone_said.get(z['id'], 0) >= 60 * self.notify.cfg['quiet_min']:
+                    if self.notify.zone(f"Someone in {z['name']}" + (f" · {n} people home" if n > 1 else ''), z.get('night')):
+                        self.zone_said[z['id']] = now
+
+    def _people(self):
+        """For the page: the Pi's tracking (works with no page open) and the zones."""
+        nk = self.tracker.near['key'] if self.tracker.near else None
+        return dict(people=[p.view() for p in self.tracker.people if p.est], near=nk,
+                    zones={k: v for k, v in self.zone_in.items()})
 
     def _switch_network(self, line, what):
         """A new network for the hub: the other boards are told first (through
@@ -964,6 +1092,10 @@ class Dashboard:
         with self.lock:
             self._sats_gone()
             self._follow_step()
+            try:
+                self._track_step()
+            except Exception as e:           # tracking must never stop the dashboard
+                print(f"tracking: {e}", file=sys.stderr)
             self._light_rule()
             self._flush()
 
@@ -1495,7 +1627,7 @@ class Dashboard:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        routers=self._routers(), boards=self._boards(), house=self._house_slow(), tz=PC_TZ,
-                       map_boards=self._map_boards(), hearings=self._hearings(),
+                       map_boards=self._map_boards(), hearings=self._hearings(), tracked=self._people(),
                        demo_people=list(self.demo_people.values()) if self.demo else None, events=list(self.events)[-80:],
                        board_settings=self._board_settings(), primary=self.primary or self.s.me,
                        pairing=self.pair.status(self.pair.me == self.cfg['hub'], self._hub_boards()),
@@ -2074,7 +2206,22 @@ def clean_map(m):
             h = n.get('hint')                    # a rough spot: [x, y, radius in m]
             if isinstance(h, list) and len(h) == 3:
                 c['hint'] = [_num(h[0], -10000, 10000), _num(h[1], -10000, 10000), _num(h[2], 1, 100)]
+            au = n.get('auto')                   # the map's estimate of an unplaced end: [a, b, rot] (metres, radians)
+            if isinstance(au, list) and len(au) == 3:
+                c['auto'] = [_num(au[0], 0, 1000), _num(au[1], 0, 1000), _num(au[2], -7, 7)]
             out['nodes'].append(c)
+    if 'zones' in m:                            # areas on the map: who's in them, and what to do then
+        zs = m['zones']
+        if not isinstance(zs, list) or len(zs) > 16:
+            raise ValueError('bad zones')
+        out['zones'] = []
+        for z in zs:
+            if not isinstance(z, dict) or not isinstance(z.get('id'), str) or not re.fullmatch(r'[a-z0-9]{1,12}', z['id']):
+                raise ValueError('bad zone')
+            out['zones'].append(dict(id=z['id'], name=_text(z.get('name', 'Zone'), 32),
+                                     x=_num(z.get('x'), -10000, 10000), y=_num(z.get('y'), -10000, 10000),
+                                     w=_num(z.get('w'), 0.3, 1000), h=_num(z.get('h'), 0.3, 1000),
+                                     notify=bool(z.get('notify', False)), night=bool(z.get('night', False))))
     if 'plans' in m:                            # picture layers: where each sits, in metres
         plans = m['plans']
         if not isinstance(plans, list) or len(plans) > len(PLAN_IDS):

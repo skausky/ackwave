@@ -149,6 +149,21 @@ class Notify:
             self._send(text, now)
             return text
 
+    def zone(self, text, night_only=False):
+        """Someone walked into a zone that notifies. Within the hours (and only
+        22:00-7:00 when night_only), under the daily cap."""
+        if not self.cfg['enabled']:
+            return None
+        now = self.clock()
+        h = self.localtime(now).tm_hour
+        if not in_hours(self.cfg['hours'], h) or (night_only and not in_hours([22, 7], h)):
+            return None
+        with self.lock:
+            if not self._count_ok(now):
+                return None
+            self._send(text, now)
+        return text
+
     def board_offline(self, text):
         if not (self.cfg['enabled'] and self.cfg['offline']):
             return None

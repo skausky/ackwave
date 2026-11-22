@@ -647,3 +647,10 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 
 /* the status line on top says it now: the card keeps the meter, numbers and Recalibrate */
 #hero .hero-top, #hero .hero-head { display: none; }
+
+/* Map page: the satellite picture form */
+.sat-form { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 6px 0 12px; display: grid; gap: 8px; }
+.sat-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.sat-row input[type=text] { flex: 1 1 240px; min-width: 0; }
+
+.map-zone-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 6px 0; }

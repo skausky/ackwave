@@ -1,0 +1,45 @@
+{
+ "note": "Logistic model on mlfeat.FEATURES, trained only on this project's own labelled activity clips (2026-11-21). Experimental: shown beside the board verdict, never replaces it.",
+ "features": [
+  "jump",
+  "jump4",
+  "burst",
+  "sp_ac",
+  "sp_iqr",
+  "sp_zcr",
+  "tcv",
+  "rssi_sd"
+ ],
+ "mu": [
+  -2.85863,
+  -2.85406,
+  1.09646,
+  0.20521,
+  0.07422,
+  0.42898,
+  0.05869,
+  0.35351
+ ],
+ "sd": [
+  0.20348,
+  0.1842,
+  0.06923,
+  0.26063,
+  0.03435,
+  0.11547,
+  0.02176,
+  0.16903
+ ],
+ "w": [
+  -0.37494,
+  0.52192,
+  -0.00262,
+  0.91648,
+  -0.25597,
+  0.12388,
+  0.5529,
+  0.48504
+ ],
+ "b": -0.32294,
+ "threshold": 0.5
+}

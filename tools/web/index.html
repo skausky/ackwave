@@ -269,10 +269,13 @@
             <select id="map-env" title="How fast the signal fades with distance indoors"></select>
             <button type="button" id="map-fit">Fit</button>
             <button type="button" id="map-auto" title="Place routers and devices from the signals your boards hear">Auto-place</button>
+            <button type="button" id="map-acc" title="How precisely each spot can be located with the boards where they are">Accuracy</button>
+            <button type="button" id="map-suggest" title="Try every spot for a board and show where it helps most">Suggest a spot</button>
             <button type="button" id="map-reset" class="ghost">Reset</button>
           </div>
         </div>
         <p class="cap">Every board (squares), router and poked device (dots), and each link between them. The glow is where a person changes that link's signal, an estimate: strongest inside the thin outline (the 1st Fresnel zone, drawn to scale), fading outward as reflections carry the change around the room, and strong right next to either end. It pulses red while that link sees motion. Walls and furniture bend it. While there is motion, a red haze with a dashed ring shows where it most likely is: every link votes by how strongly it sees motion (yes here, or not here), and a link whose far end is only estimated votes more vaguely, so the ring widens rather than guess. Place the hub and your boards (drag the squares) and aim each one: drag the arrow by its square to the way it faces (its antenna hears best ahead, least through the wall behind). Routers are optional: place any you know; the others are guessed roughly, and the tracking leans on the boards. Pinch or scroll to zoom, drag empty space to pan: the view stays where you leave it.</p>
+        <p class="small acc-note" id="acc-note" hidden></p>
         <div class="map-stage"><canvas id="map-cv"></canvas><div class="overlay" id="map-msg"></div>
           <div class="map-hint" id="map-hint" hidden><span id="map-hint-text"></span><button type="button" id="map-hint-done">Done</button></div></div>
       </section>
@@ -299,7 +302,20 @@
       </section>
       <section class="card map-layers">
         <div class="card-head"><h2>Pictures under the map</h2>
-          <label class="btn-file"><input type="file" id="map-file" accept="image/png,image/jpeg,image/webp" hidden>Add a picture</label></div>
+          <div class="dlg-tools"><button type="button" id="sat-open">Satellite picture</button>
+          <label class="btn-file"><input type="file" id="map-file" accept="image/png,image/jpeg,image/webp" hidden>Add a picture</label></div></div>
+        <form class="sat-form" id="sat-form" hidden>
+          <p class="small">Fetches a satellite picture around your hub once, to scale and north up. Give the hub's spot:</p>
+          <div class="sat-row">
+            <input type="text" id="sat-ll" inputmode="decimal" autocomplete="off" placeholder="latitude, longitude  (e.g. 40.7128, -74.0060)" aria-label="Latitude, longitude">
+            <button type="button" id="sat-here">Use this phone's location</button>
+          </div>
+          <div class="sat-row">
+            <label>Area <select id="sat-area"><option value="60">60 m (200 ft) across</option><option value="120" selected>120 m (400 ft)</option><option value="250">250 m (800 ft)</option></select></label>
+            <button type="submit" class="primary" id="sat-go">Get the picture</button><button type="button" class="ghost" id="sat-cancel">Cancel</button>
+          </div>
+          <p class="muted small" id="sat-msg">In Google Maps, right-click (or long-press) your hub's spot: the first line is "latitude, longitude", tap it to copy. Or stand by the hub and use this phone's location. Your browser downloads the picture tiles from Esri (World Imagery) directly; the spot isn't saved anywhere. Afterwards, drag the picture with Move if it's a few feet off.</p>
+        </form>
         <p class="cap">Put your property under the links: first an outdoor picture (a satellite or drone screenshot, or the parcel outline), then floor plans on top (for example a LiDAR scan exported as a picture). <b>Scale</b> the first one: tap two points and type the real distance between them. <b>Align</b> each floor plan: tap two house corners on the plan, then the same two corners on the map. <b>Move</b> slides a picture; drag the board's square to put the board where it really is. Pictures stay on this PC.</p>
         <ol class="layer-list" id="map-layer-list"></ol>
       </section>
