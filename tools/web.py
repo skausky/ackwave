@@ -1278,6 +1278,7 @@ class Dashboard:
         mac, st = p[1].lower(), p[2]
         if st not in ('queued', 'done', 'failed', 'error'):
             return
+        print(f"{self.board_label(mac)}: command {st} {p[3] if len(p) > 3 else ''}", flush=True)   # the add-on's log
         c = self.sat_cmds.setdefault(mac, dict(line='', at=time.time()))
         c['state'], c['why'] = st, p[3] if len(p) > 3 else ''
         if ('sat:' + mac) in self.mlw_q and st in ('done', 'failed', 'error'):
