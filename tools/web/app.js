@@ -142,6 +142,61 @@ function setBadge(b) {
   $('#hero').dataset.state = b.word.toLowerCase();
   $('#home-head').textContent = b.head || b.sub || '';
   $('#home-since').textContent = b.head ? b.sub || '' : '';
+  lastBadge = b;
+  renderHomeStatus();
+}
+let lastBadge = null;
+
+// Home's one line: is anyone here, how many, where, walking or not; then the
+// boards as coloured chips. Words come from the map's tracking when it has
+// someone, else from the boards' verdicts.
+function renderHomeStatus() {
+  const b = lastBadge, h = slow && slow.house, ms = window.AckMap && window.AckMap.status ? window.AckMap.status() : null;
+  if (!b) return;
+  const word = (b.word || '').toLowerCase();
+  const motion = h && h.boards >= 2 ? h.motion : word === 'motion';
+  const nameOf = (n) => (/^\d+$/.test(n) ? `board ${n}` : n);
+  const lone = motion ? [] : ((slow && slow.boards) || []).filter((x) => x.state === 'motion').map((x) => nameOf(x.name));
+  let line, sub = '';
+  if (word === 'calibrating') { line = 'Getting ready'; sub = 'measuring the quiet level: keep still a moment'; }
+  else if (word === 'waiting' || word === 'no data') { line = 'Waiting for the boards'; sub = b.sub || ''; }
+  else if (lone.length) {                          // a board sees it; the house rule waits for another
+    line = ms && ms.people === 1 && ms.where.length ? `Maybe someone ${ms.where[0]}` : `Motion at ${lone.join(', ')}`;
+    sub = `only ${lone.join(', ')} ${lone.length > 1 ? 'see' : 'sees'} it so far: the house counts it once another board agrees`;
+  } else if (!motion && ms && (ms.people || ms.near)) {   // the tracker sees a little, the boards don't (yet)
+    line = ms.people ? `Maybe someone ${ms.where[0] || 'nearby'}` : `Maybe something near ${ms.near}`;
+    sub = 'faint movement, under the motion threshold';
+  } else if (motion) {
+    const n = ms ? ms.people : 0, where = ms && ms.where.length ? ms.where : [];
+    if (n > 1) line = `${n} people moving`;
+    else if (n === 1) line = `Someone ${where[0] || 'is moving'}`;
+    else if (ms && ms.near) line = `Motion near ${ms.near}`;
+    else line = 'Motion';
+    if (n > 1 && where.length) sub = where.map((w, i) => `${i + 1}: ${w}`).join(' · ');
+    else if (n === 1 && ms.moving) sub = 'walking';
+    const by = h && h.by && h.by.length ? `seen by ${h.by.join(', ')}` : '';
+    sub = [sub, by].filter(Boolean).join(' · ');
+  } else {
+    line = 'All quiet';
+    sub = b.sub || b.head || '';
+  }
+  const box = $('#home-status');
+  const faint = !motion && ((ms && (ms.people || ms.near)) || lone.length);
+  box.dataset.state = motion ? 'motion' : word === 'calibrating' ? 'calibrating' : 'still';
+  $('#hs-dot').style.setProperty('--c', motion ? C.motion : word === 'calibrating' ? C.cal || b.color : faint ? C.brief : C.still);
+  $('#hs-line').textContent = line;
+  $('#hs-sub').textContent = sub;
+  const bs = (slow && slow.boards) || [];
+  const hubWord = word === 'motion' ? 'motion' : word === 'calibrating' ? 'calibrating' : 'still';
+  const chips = [['Hub', hubWord], ...bs.map((x) => [x.name, x.state])];
+  const sig = JSON.stringify(chips);
+  const hb = $('#hs-boards');
+  if (hb.dataset.sig !== sig) {
+    hb.dataset.sig = sig;
+    const WORD = { motion: 'motion', still: 'quiet', calibrating: 'getting ready', gone: 'not heard', unpaired: 'needs its key', quiet: 'no reports' };
+    hb.replaceChildren(...chips.map(([name, st]) => el('span', { className: `hs-board ${st}`, title: WORD[st] || st },
+      el('i'), el('span', { textContent: /^\d+$/.test(name) ? `Board ${name}` : name }))));
+  }
 }
 
 // Activity now, against the motion threshold: the bar's middle is the threshold
@@ -466,6 +521,7 @@ function renderStream() {
 
 function renderHome() {
   renderBoards();
+  renderHomeStatus();
   renderStream();
   const h = slow && slow.house, hh = $('#home-house');
   hh.hidden = !h || h.boards < 2;
@@ -1973,3 +2029,10 @@ if (params.has('shot')) {
     setTimeout(() => s.remove(), 600);
   }, { passive: true });
 })();
+
+// Home's folded details: its charts measure themselves when it opens
+$('#home-more').addEventListener('toggle', () => {
+  try { localStorage.setItem('ackwave.more', $('#home-more').open ? '1' : ''); } catch (e) { /* private mode */ }
+  if ($('#home-more').open) { window.dispatchEvent(new Event('resize')); if (typeof renderPage === 'function') renderPage(); }
+});
+try { if (localStorage.getItem('ackwave.more')) $('#home-more').open = true; } catch (e) { /* private mode */ }

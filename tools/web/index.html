@@ -41,6 +41,17 @@
 <main>
   <!-- ======================= HOME ======================= -->
   <section class="page" data-page="home" hidden>
+    <!-- the status in one line, then the map: what most people come for -->
+    <div class="card home-status" id="home-status">
+      <span class="state-dot" id="hs-dot"></span>
+      <div class="hs-text"><div class="hs-line" id="hs-line">Waiting for the boards…</div><div class="hs-sub muted" id="hs-sub"></div></div>
+      <div class="hs-boards" id="hs-boards"></div>
+    </div>
+    <article class="card home-map-card" id="home-map-card">
+      <div class="card-head"><h2>Live map <span class="muted small">people, and where the motion is</span></h2><a href="#/map" class="muted small">Set up the map</a></div>
+      <div class="home-map-slot" id="home-map-slot"></div>
+      <div class="map-legend muted small"><span><i class="lg-person"></i>a person (ring: how sure)</span><span><i class="lg-board"></i>a board (red while it sees motion)</span><span><i class="lg-link"></i>a link lights up when it sees motion</span></div>
+    </article>
     <div class="home-grid">
       <article class="card hero" id="hero">
         <div class="hero-top"><span class="state-dot" id="home-dot"></span><span class="hero-word" id="home-word">WAITING</span></div>
@@ -68,20 +79,18 @@
           <button id="btn-cal" class="primary" title="Measure the quiet level again (step away for 5 s)">Recalibrate</button>
         </div>
       </article>
-      <article class="card home-map-card" id="home-map-card">
-        <div class="card-head"><h2>Live map <span class="muted small">lights up where the motion is</span></h2><a href="#/map" class="muted small">Edit on the Map page</a></div>
-        <div class="home-map-slot" id="home-map-slot"></div>
-      </article>
-    </div>
-    <article class="card stream-card">
+        <article class="card stream-card">
       <div class="card-head"><h2>Live <span class="muted small" id="stream-state"></span></h2></div>
       <ol class="stream" id="stream"><li class="stream-empty muted small">Waiting for something to happen…</li></ol>
-    </article>
+      </article>
+    </div>
     <article class="card boards-card" id="boards-card" hidden>
       <div class="card-head"><h2>Other boards <span class="muted small" id="boards-state"></span></h2></div>
       <p class="cap">Each board's own verdict on its router link, sent sealed to the hub. Name them after their room.</p>
       <div class="boards" id="boards"></div>
     </article>
+    <details class="home-more" id="home-more">
+      <summary>More details <span class="muted small">signal, timeline, activities, today's numbers</span></summary>
     <article class="card where-card">
       <div class="card-head"><h2>Where and when <span class="muted small" id="where-state"></span></h2>
         <div class="seg" id="where-range"><button type="button" data-h="0.008333">30 s</button><button type="button" data-h="0.083333">5 min</button><button type="button" data-h="0.5">30 min</button><button type="button" data-h="1">1 h</button><button type="button" data-h="6">6 h</button><button type="button" data-h="24">24 h</button><button type="button" data-h="168">7 days</button></div></div>
@@ -112,6 +121,7 @@
         <div class="chart strip" id="home-tl"><canvas></canvas></div>
       </article>
     </div>
+    </details>
   </section>
 
   <!-- ======================= GRAPHS ======================= -->

@@ -218,7 +218,8 @@ main { align-content: start; }
 }
 
 /* ---------- home ---------- */
-.home-grid { display: grid; grid-template-columns: minmax(320px, 0.9fr) 1.4fr; gap: var(--gap); }
+.home-grid { display: grid; grid-template-columns: minmax(320px, 0.9fr) 1.4fr; gap: var(--gap); margin-top: var(--gap); }
+.home-grid .stream-card { margin: 0; }
 .hero { display: grid; gap: 16px; padding: 22px 22px 18px; align-content: start; position: relative; overflow: hidden; }
 .hero::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--c, var(--line)); opacity: .9; }
 .hero[data-state="motion"] { --c: var(--motion); border-color: rgba(255,90,79,.45); }
@@ -469,11 +470,11 @@ body.simple .nav a[data-adv] { display: none; }
 
 /* Home: the Map page's map, view only, beside the status */
 .home-map-card { display: flex; flex-direction: column; }
-.home-map-slot { flex: 1; min-height: 340px; position: relative; }
+.home-map-slot { flex: none; min-height: 340px; height: 62vh; position: relative; }
 .home-map-slot .map-stage { height: 100%; min-height: 340px; }
 .home-row { margin-top: var(--gap); }
 .home-row + .card { margin-top: var(--gap); }
-@media (max-width: 1000px) { .home-map-slot, .home-map-slot .map-stage { min-height: 300px; height: 52vh; } }
+@media (max-width: 1000px) { .home-map-slot, .home-map-slot .map-stage { min-height: 320px; height: 60vh; } }
 
 .hero-breath { margin: 10px 0 2px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
 .hero-breath b { font-size: 18px; }
@@ -615,3 +616,34 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .wiring .w-red { stroke: #e5484d; }
 .wiring .w-black { stroke: #8a8f98; stroke-dasharray: 1 0; }
 .wiring .w-sig { stroke: #f5a524; }
+
+/* Home: one status line on top, the map below it */
+.home-status { display: flex; align-items: center; gap: 14px 18px; flex-wrap: wrap; padding: 16px 20px; margin-bottom: var(--gap); }
+.home-status .state-dot { flex: none; }
+.home-status[data-state="motion"] .state-dot { animation: beacon 1.4s ease-out infinite; }
+.hs-text { flex: 1 1 260px; min-width: 0; }
+.hs-line { font-size: clamp(20px, 3.2vw, 28px); font-weight: 750; line-height: 1.2; color: var(--fg); }
+.hs-sub { font-size: 14px; margin-top: 2px; }
+.hs-boards { display: flex; flex-wrap: wrap; gap: 6px; }
+.hs-board { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--line); font-size: 13px; background: var(--card2); }
+.hs-board i { width: 9px; height: 9px; border-radius: 50%; background: var(--still); }
+.hs-board.motion { border-color: var(--motion); color: var(--fg); }
+.hs-board.motion i { background: var(--motion); box-shadow: 0 0 8px var(--motion); }
+.hs-board.gone i, .hs-board.quiet i, .hs-board.unpaired i { background: var(--muted); }
+.hs-board.calibrating i { background: var(--cal); }
+.map-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 8px 2px 0; }
+.map-legend i { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; }
+.map-legend .lg-person { border-radius: 50%; background: var(--motion); box-shadow: 0 0 0 3px rgba(255, 90, 79, .25); }
+.map-legend .lg-board { border-radius: 2px; border: 2px solid var(--accent); }
+.map-legend .lg-link { height: 3px; border-radius: 2px; background: var(--warn, #f5a524); vertical-align: 2px; }
+.home-more { margin-top: var(--gap); }
+.home-more > summary { cursor: pointer; padding: 14px 4px; font-weight: 650; list-style: revert; }
+.home-more > summary .muted { font-weight: 400; margin-left: 6px; }
+@media (max-width: 700px) {
+  .home-status { padding: 12px 14px; }
+  .hs-boards { width: 100%; }
+}
+
+/* the status line on top says it now: the card keeps the meter, numbers and Recalibrate */
+#hero .hero-top, #hero .hero-head { display: none; }

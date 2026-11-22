@@ -36,7 +36,7 @@ window.AckMap = (() => {
   let tool = null;                          // {kind: 'move'|'scale'|'align', id, pts: [], step}
   let readOnly = false;                     // on Home: look, pan and zoom; nothing is moved or saved
   let stageMark = null;                     // where the map lives on the Map page (it visits Home)
-  let pageView = null, homeFit = false;     // the Map page's view, kept while Home shows its own
+  let pageView = null, homeFit = false, homeTouched = false;   // homeTouched: you moved Home's view     // the Map page's view, kept while Home shows its own
   let homeView = null;                      // Home's view: fitted once, then yours (this visit)
   let radio = [], channel = 6, boardMotion = false, hubAct = null;   // hubAct: the hub's activity, 1 = its threshold
   let others = [];                          // the other boards (slow.map_boards): each a point with its router
@@ -226,7 +226,8 @@ window.AckMap = (() => {
       const a = anchorOf(by);
       if (a && a !== n) obs.push([a, heardAvg.get(key + '|' + by), zOf(a), floorOf(a)]);
     }
-    if (!obs.length) return null;
+    const hint = n.hint;                         // a rough spot: only inside it
+    if (!obs.length) return hint ? { x: hint.x, y: hint.y, a: hint.r * 0.7, b: hint.r * 0.7, rot: 0, heardBy: 0, floor: n.floor || M.hubFloor } : null;
     // its floor: the one you chose, else every floor the anchors are on (and the ground), best fit wins
     const floors = n.floor ? [n.floor] : [...new Set([1, M.hubFloor, ...obs.map(([a]) => floorOf(a))])];
     const kind = key.startsWith('sat:') ? BOARD.txDbm : (key.startsWith('ap:') || key.startsWith('r:')) ? EIRP.ap : EIRP.device;
@@ -237,6 +238,7 @@ window.AckMap = (() => {
     for (const [a] of obs) { x0 = Math.min(x0, a.x); x1 = Math.max(x1, a.x); y0 = Math.min(y0, a.y); y1 = Math.max(y1, a.y); }
     const pad = 15, G = 90;
     x0 -= pad; x1 += pad; y0 -= pad; y1 += pad;
+    if (hint) { x0 = hint.x - hint.r; x1 = hint.x + hint.r; y0 = hint.y - hint.r; y1 = hint.y + hint.r; }
     const step = Math.max(x1 - x0, y1 - y0) / G;
     let cells = [], best = null;
     for (const fl of floors) {
@@ -244,6 +246,7 @@ window.AckMap = (() => {
       let fb = null;
       for (let gy = y0; gy <= y1; gy += step)
         for (let gx = x0; gx <= x1; gx += step) {
+          if (hint && Math.hypot(gx - hint.x, gy - hint.y) > hint.r) continue;
           let sp = 0;
           const ls = obs.map(([a, r, az, af]) => {
             const l = nn * Math.log10(Math.max(0.5, Math.hypot(gx - a.x, gy - a.y, gz - az))) + lf * Math.abs(fl - af)
@@ -256,8 +259,9 @@ window.AckMap = (() => {
           fc.push([gx, gy, J]);
           if (!fb || J < fb[2]) fb = [gx, gy, J];
         }
-      if (!best || fb[2] < best[2]) { best = fb; best.floor = fl; cells = fc; }
+      if (fb && (!best || fb[2] < best[2])) { best = fb; best.floor = fl; cells = fc; }
     }
+    if (!best) return null;
     // how sure: the spread of the likely cells around the best one
     let sw = 0, sxx = 0, syy = 0, sxy = 0;
     for (const [gx, gy, J] of cells) {
@@ -378,8 +382,9 @@ window.AckMap = (() => {
   function endSamples(a, n) {
     const spread = (m) => {
       if (!m || m === HUB || m.placed || m.board || (m.key || '').startsWith('sat:')) return [m];
-      if (!m.auto) {                             // nothing known but a rough distance: anywhere around 3 m
-        const at = (ang) => ({ x: m.x + 3 * Math.cos(ang), y: m.y + 3 * Math.sin(ang), floor: m.floor, autoFloor: m.autoFloor });
+      if (!m.auto) {                             // nothing known but a rough distance: anywhere around 3 m (or its rough spot)
+        const c = m.hint || m, rr = m.hint ? m.hint.r * 0.6 : 3;
+        const at = (ang) => ({ x: c.x + rr * Math.cos(ang), y: c.y + rr * Math.sin(ang), floor: m.floor, autoFloor: m.autoFloor });
         return [m, at(0), at(Math.PI / 2), at(Math.PI), at(-Math.PI / 2)];
       }
       if (m.auto.a < 1) return [m];
@@ -511,6 +516,7 @@ window.AckMap = (() => {
     dirty = true;
   }
   function zoomAt(px, py, k) {
+    if (readOnly) homeTouched = true;
     if (!M.view) return;
     autoFit = false; viewByUser = true;
     const [wx, wy] = toWorld(px, py);
@@ -525,8 +531,11 @@ window.AckMap = (() => {
   function resize() {
     dpr = window.devicePixelRatio || 1;
     const box = cv.parentElement;
+    const was = [W, H];
     W = box.clientWidth; H = box.clientHeight;
     cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    // Home's view follows its box until you pan or zoom it yourself
+    if (readOnly && !homeTouched && loaded && (was[0] !== W || was[1] !== H) && W > 0) fit();
     dirty = true;
   }
   function drawPlans() {
@@ -741,13 +750,14 @@ window.AckMap = (() => {
     ctx.clearRect(0, 0, W, H);
     if (!loaded) return;                           // the saved layout first: guesses would set the view
     const cnt = links().length;                    // something new appeared: show it (a saved view stays at load)
-    if (!M.view || (cnt > nodeCount && autoFit && !viewByUser)) fit();   // never over a view you set
+    if (!M.view || (cnt > nodeCount && (readOnly ? !homeTouched : autoFit && !viewByUser))) fit();   // never over a view you set
     nodeCount = cnt;
     locate(t);
     stepTrack(t);
     drawPlans();
     grid();
     drawLikely();
+    drawHints();
     const L = links(), lam = lambda(), motionC = css('--motion');
     const pulse = 0.5 + 0.5 * Math.sin(t / 260);
     const hv = heat(L, t);                         // where each link is sensitive (estimate)
@@ -780,11 +790,12 @@ window.AckMap = (() => {
       let ang = rot; if (ang > Math.PI / 2 || ang < -Math.PI / 2) ang += Math.PI;
       ctx.rotate(ang);
       ctx.font = '11.5px ui-sans-serif, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-      ctx.fillStyle = css('--fg'); ctx.fillText(fmtLen(d), 0, -4);
+      if (!readOnly) { ctx.fillStyle = css('--fg'); ctx.fillText(fmtLen(d), 0, -4); }   // Home: no lengths
       ctx.restore();
     }
     particles(L, t, motionC);
     drawTrack(t);
+    drawNear(t);
     for (const dp of demoPeople) {                 // demo: the truth, to see how close the estimates are
       const x = X(dp.x), y = Y(dp.y);
       ctx.save(); ctx.strokeStyle = css('--fg'); ctx.globalAlpha = 0.8; ctx.lineWidth = 1.5;
@@ -829,7 +840,7 @@ window.AckMap = (() => {
         ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2);
         ctx.strokeStyle = alpha(color, 0.8); ctx.lineWidth = 1.2; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
       }
-      const sub = [r.rssi !== null && r.rssi !== undefined ? `${r.rssi} dBm` : '',
+      const sub = readOnly ? '' : [r.rssi !== null && r.rssi !== undefined ? `${r.rssi} dBm` : '',
         r.breathing ? `breathing ${Math.round(r.breathing.rate)}/min` : ''].filter(Boolean).join(' · ');
       label(x, y + 15, (r.board ? n.name : r.label) + ft(n), r.board ? null : sub || null, css('--fg'));
     }
@@ -840,6 +851,40 @@ window.AckMap = (() => {
     for (const { n } of L) if (n !== HUB) keys.push([n.key, X(n.x), Y(n.y)]);
     ripples(t, keys);
     $('#map-msg').textContent = L.length ? '' : 'Waiting for live links: the router appears once the board hears it.';
+  }
+  // A router: how sure you are of where it is. Exactly (placed), roughly
+  // (a circle you drag: auto-placement and the tracking stay inside it), or
+  // not at all (auto, anywhere its signals fit).
+  const SURE = [['auto', 0], ['r10', 3], ['r30', 9], ['r60', 18], ['exact', -1]];
+  function whereSure(n) {
+    const sel = el('select', { className: 'small', title: 'How sure you are of where this router is' });
+    for (const [v, r] of SURE)
+      sel.append(el('option', { value: v, textContent: v === 'auto' ? 'Where: automatic (anywhere its signal fits)'
+        : v === 'exact' ? 'Where: exactly here' : `Where: roughly here (within ${fmtLen(r)})` }));
+    sel.value = n.placed ? 'exact' : n.hint ? (SURE.find(([, r]) => Math.abs(r - n.hint.r) < 0.5) || ['r30'])[0] : 'auto';
+    sel.onchange = () => {
+      const r = SURE.find(([v]) => v === sel.value)[1];
+      if (r === -1) { n.placed = true; n.hint = null; }
+      else if (r === 0) { n.placed = false; n.hint = null; }
+      else { n.hint = { x: n.x, y: n.y, r }; n.placed = false; }
+      n.auto = null; locAt = 0; heatKey = ''; dirty = true; renderList(); scheduleSave();
+    };
+    return el('label', { className: 'map-floor-row' }, sel,
+      el('span', { className: 'muted small', textContent: n.hint ? 'drag it to move the circle' : '' }));
+  }
+  function drawHints() {
+    ctx.save();
+    ctx.setLineDash([6, 5]);
+    const done = new Set();
+    for (const { n } of links()) {
+      if (!n.hint || n === HUB || done.has(n)) continue;
+      done.add(n);
+      ctx.beginPath();
+      ctx.arc(X(n.hint.x), Y(n.hint.y), Math.max(n.hint.r * M.view.s, 8), 0, Math.PI * 2);
+      ctx.strokeStyle = alpha(css('--accent'), 0.55); ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.fillStyle = alpha(css('--accent'), 0.04); ctx.fill();
+    }
+    ctx.restore();
   }
   // Where an auto-placed node probably is: a soft ellipse (about 1 sigma)
   function drawLikely() {
@@ -875,13 +920,38 @@ window.AckMap = (() => {
   //     estimate spread by how far a person walks meanwhile, times now), or starts one
   const MAX_PEOPLE = 3, MULTI_GAIN = 4, MULTI_LEFT = 1.5, MULTI_SEP = 2.5, KEEP_MS = 2500;
   const PERSON_C = ['--motion', '--warn', '#b48cff'];
+  // Which end is the motion at? Links that share an end all react to motion
+  // there; the others don't. So: the end whose links react much more than the
+  // rest. No position needed for it: a router is just the end its links share.
+  function nearEnd(obs, t) {
+    const ends = new Map();
+    for (const o of obs)
+      for (const m of [o.A, o.N]) {
+        const e = ends.get(m) || { m, sum: 0, n: 0, hot: 0, router: m !== HUB && !m.board && o.ap && m === o.N };
+        e.sum += o.a; e.n++; if (o.a >= 0.6) e.hot++;
+        ends.set(m, e);
+      }
+    const total = obs.reduce((s2, o) => s2 + o.a, 0);
+    let best = null;
+    for (const e of ends.values()) {
+      if (e.n < 2) continue;
+      const inside = e.sum / e.n, rest = obs.length > e.n ? (total - e.sum) / (obs.length - e.n) : 0;
+      if (inside < 0.8 || e.hot / e.n < 0.67 || rest > 0.5 * inside) continue;
+      const score = inside - rest;
+      if (!best || score > best.score) best = { ...e, score };
+    }
+    if (best) track.near = { m: best.m, router: best.router, at: t,
+      name: best.m === HUB ? 'the hub' : best.router ? (best.m.name || 'the router') : boardWord(best.m.name || '') };
+    else if (track.near && t - track.near.at > 2500) track.near = null;
+  }
   function stepTrack(t) {
     if (t - track.at < 500) return;
     const dt = Math.min(5, (t - track.at) / 1000);
     track.at = t;
     const L = links().filter(({ d, r }) => d >= 0.3 && !weak(r) && judged(r));
-    const obs = L.map(({ a, n, r }) => ({ a: excess(r, t), ends: endSamples(a, n) })).filter((o) => o.a !== null);
+    const obs = L.map(({ a, n, r }) => ({ a: excess(r, t), ends: endSamples(a, n), A: a, N: n, ap: !!r.ap })).filter((o) => o.a !== null);
     track.baseAt = t;
+    nearEnd(obs, t);
     const active = obs.length >= 2 && obs.some((o) => o.a >= 0.6);
     // tracks not seen lately end
     track.people = track.people.filter((p) => t - p.seen < KEEP_MS);
@@ -1041,6 +1111,37 @@ window.AckMap = (() => {
   // Each person: their probability haze, a fading trail, a dot with a ring
   // (68% + the model's error) and, once they move, an arrow for their heading;
   // labelled with their speed. Several people: each in their own colour.
+  const boardWord = (label) => (/^\d+$/.test(String(label)) ? `board ${label}` : String(label));
+  // A person's spot in words: near a board, or between the two nearest
+  function nearestBoard(est) {
+    if (!est) return null;
+    const bs = [[HUB, 'the hub'], ...others.map((b) => [M.nodes.get(b.key), boardWord(b.label)])].filter(([m]) => m);
+    bs.sort((p, q) => Math.hypot(p[0].x - est.x, p[0].y - est.y) - Math.hypot(q[0].x - est.x, q[0].y - est.y));
+    if (!bs.length) return null;
+    const d0 = Math.hypot(bs[0][0].x - est.x, bs[0][0].y - est.y);
+    if (bs.length > 1) {
+      const d1 = Math.hypot(bs[1][0].x - est.x, bs[1][0].y - est.y);
+      if (d1 < 1.4 * d0 && d0 > 1) return `between ${bs[0][1]} and ${bs[1][1]}`;
+    }
+    return d0 < 4 ? `near ${bs[0][1]}` : `${fmtLen(d0)} from ${bs[0][1]}`;
+  }
+  function drawNear(t) {
+    const nr = track.near;
+    if (!nr || !nr.m) return;
+    const px = X(nr.m.x), py = Y(nr.m.y), ph = (t % 1600) / 1600;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(px, py, 16 + 26 * ph, 0, Math.PI * 2);
+    ctx.strokeStyle = alpha(css('--motion'), 0.7 * (1 - ph)); ctx.lineWidth = 3; ctx.stroke();
+    ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'center';
+    const txt = `motion near ${nr.name}`;
+    const w = ctx.measureText(txt).width + 12;
+    ctx.fillStyle = alpha(css('--bg') || '#000', 0.75);
+    ctx.fillRect(px - w / 2, py - 44, w, 18);
+    ctx.fillStyle = css('--motion'); ctx.fillText(txt, px, py - 31);
+    ctx.restore();
+    dirty = true;
+  }
   function drawTrack(t) {
     const g = track.grid;
     if (!g || !track.people.length) return;
@@ -1214,13 +1315,14 @@ window.AckMap = (() => {
           : diff < 0 ? `${-diff} dB weaker than open air would give here (${Math.round(exp)} dBm): walls, furniture or people in between`
             : `${diff} dB stronger than expected here (${Math.round(exp)} dBm): it may be closer than placed, or a strong device`);
       }
-      if (n !== HUB && !n.placed) {
+      if (n !== HUB && r.ap && !n.board) rows.push(whereSure(n));
+      if (n !== HUB && !n.placed && !n.hint) {
         const au = n.auto;
         rows.push(au ? `Placed automatically from ${au.heardBy} board${au.heardBy > 1 ? 's' : ''} that hear it, within about ${fmtLen(au.a)}`
           + (au.heardBy === 1 ? ' (one board gives only a distance: place more boards to pin it down)' : au.heardBy === 2 ? ' (two boards: it could be the mirror spot)' : '')
           + '. Drag it if you know better.'
           : 'Placed from its signal (rough): drag it to where it really is, or place the boards that hear it.');
-      } else if (n !== HUB && n.placed && !n.board) {
+      } else if (n !== HUB && n.placed && !n.board && !r.ap) {
         const b = el('button', { type: 'button', className: 'ghost small', textContent: 'Place automatically' });
         b.onclick = () => unplace(n.key);
         rows.push(b);
@@ -1336,7 +1438,7 @@ window.AckMap = (() => {
       return;
     }
     if (readOnly) {                                // Home: pan only
-      autoFit = false;
+      autoFit = false; homeTouched = true;
       drag = { pan: true, x0: x, y0: y, vx: M.view.x, vy: M.view.y };
       return;
     }
@@ -1356,6 +1458,7 @@ window.AckMap = (() => {
     }
     drag = n ? { key: n.key } : { pan: true, x0: x, y0: y, vx: M.view.x, vy: M.view.y, tap: true };
     autoFit = false; viewByUser = true;
+    if (readOnly) homeTouched = true;
   }
   function move(e) {
     if (!ptrs.has(e.pointerId)) return;
@@ -1373,7 +1476,9 @@ window.AckMap = (() => {
       heatKey = ''; locAt = 0; dirty = true;
     } else if (drag.key) {
       const n = M.nodes.get(drag.key), [wx, wy] = toWorld(x, y);
-      n.x = wx; n.y = wy; n.placed = true;
+      n.x = wx; n.y = wy;
+      if (n.hint) { n.hint.x = wx; n.hint.y = wy; n.auto = null; locAt = 0; }   // the rough spot moves with it
+      else n.placed = true;
       dirty = true;
       renderList();
     } else if (drag.board) {
@@ -1408,7 +1513,8 @@ window.AckMap = (() => {
   async function save() {
     const body = { unit: M.unit, env: M.env, nodes: [...M.nodes.values()].slice(0, 64).map((n) =>
       Object.assign({ key: n.key, name: String(n.name).slice(0, 64), x: n.x, y: n.y, placed: !!n.placed },
-        n.floor ? { floor: n.floor } : {}, typeof n.facing === 'number' ? { facing: n.facing } : {})),
+        n.floor ? { floor: n.floor } : {}, typeof n.facing === 'number' ? { facing: n.facing } : {},
+        n.hint ? { hint: [n.hint.x, n.hint.y, n.hint.r] } : {})),
       hub_floor: M.hubFloor, floor_h: M.floorH };
     if (typeof M.hubFacing === 'number') body.hub_facing = M.hubFacing;
     if (M.view && viewByUser) body.view = M.view;
@@ -1426,7 +1532,8 @@ window.AckMap = (() => {
     if (m.floor_h) M.floorH = m.floor_h;
     if (typeof m.hub_facing === 'number') M.hubFacing = m.hub_facing;
     for (const n of m.nodes || []) M.nodes.set(n.key, { key: n.key, name: n.name || n.key, x: n.x, y: n.y, placed: !!n.placed, floor: n.floor || 0,
-      facing: typeof n.facing === 'number' ? n.facing : undefined });
+      facing: typeof n.facing === 'number' ? n.facing : undefined,
+      hint: Array.isArray(n.hint) && n.hint.length === 3 ? { x: n.hint[0], y: n.hint[1], r: n.hint[2] } : null });
     if (m.plans) {
       M.plans = m.plans.map((p) => Object.assign({ name: p.id, rot: 0, opacity: 1, hidden: false }, p));
       for (const p of M.plans) loadPicture(p);
@@ -1566,6 +1673,9 @@ window.AckMap = (() => {
       apply(saved);
     } catch (e) { /* start fresh */ }
     if (!saved.view) { M.view = null; autoFit = true; viewByUser = false; }   // fit to the real layout, not first guesses
+    else if (readOnly && !homeTouched) {        // Home: its own fit; the saved view is the Map page's
+      pageView = { ...M.view }; M.view = null; autoFit = true; homeFit = false;
+    }
     loaded = true;
     syncControls();
     dirty = true;
@@ -1703,6 +1813,10 @@ window.AckMap = (() => {
     showPath,
     _likely: () => track.est,
     _people: () => track.people.map((p) => ({ id: p.id, est: p.est, speed: p.speed })),
+    // For Home's status line: how many people, and where the motion is
+    status: () => ({ people: track.people.length, near: track.near ? track.near.name : null,
+      moving: track.people.some((p) => (p.speed || 0) > 0.3),
+      where: track.people.map((p) => nearestBoard(p.est)).filter(Boolean) }),
     _screenOfWorld: (x, y) => [X(x), Y(y)],
     _view: () => ({ view: M.view, nodes: [...M.nodes.values()].map((n) => [n.key.slice(-5), +n.x.toFixed(1), +n.y.toFixed(1), !!n.placed, n.auto ? +n.auto.a.toFixed(1) : null]) }),
     _truth: () => demoPeople[0] || null,

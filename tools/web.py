@@ -2071,6 +2071,9 @@ def clean_map(m):
                 c['floor'] = int(_num(n['floor'], 1, 9))
             if 'facing' in n:                    # radians: where its antenna looks
                 c['facing'] = _num(n['facing'], -7, 7)
+            h = n.get('hint')                    # a rough spot: [x, y, radius in m]
+            if isinstance(h, list) and len(h) == 3:
+                c['hint'] = [_num(h[0], -10000, 10000), _num(h[1], -10000, 10000), _num(h[2], 1, 100)]
             out['nodes'].append(c)
     if 'plans' in m:                            # picture layers: where each sits, in metres
         plans = m['plans']
