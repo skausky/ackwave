@@ -444,6 +444,7 @@ window.AckMap = (() => {
   // ~1 m/s), so the estimate tracks and doesn't flicker.
   const track = { grid: null, people: [], nextId: 0, est: null, base: new Map(), at: 0 };
   let zoneIn = {};                                  // zone id -> people inside, from the Pi's tracking
+  let breathing = {};                               // 'hub' / 'sat:<mac>' -> breathing near that board
   const CELL = 0.25;
   const SIG0 = 0.45, SIG1 = 0.25, MODEL_ERR = 1.2;          // a link's scatter: idle noise, plus more the stronger it reacts
   let heatKey = '', heatView = null, viewSeen = '', viewMovedAt = 0;
@@ -798,6 +799,7 @@ window.AckMap = (() => {
     }
     particles(L, t, motionC);
     drawTrack(t);
+    drawBreathing(t);
     drawNear(t);
     drawWalkCheck();
     for (const dp of demoPeople) {                 // demo: the truth, to see how close the estimates are
@@ -1128,6 +1130,22 @@ window.AckMap = (() => {
       if (d1 < 1.4 * d0 && d0 > 1) return `between ${bs[0][1]} and ${bs[1][1]}`;
     }
     return d0 < 4 ? `near ${bs[0][1]}` : `${fmtLen(d0)} from ${bs[0][1]}`;
+  }
+  // Someone still, breathing near a board: a slow blue swell around it (4 s, a breath)
+  function drawBreathing(t) {
+    for (const [k, b] of Object.entries(breathing)) {
+      const m = k === 'hub' ? HUB : M.nodes.get(k);
+      if (!m) continue;
+      const ph = 0.5 - 0.5 * Math.cos((t % 4000) / 4000 * 2 * Math.PI), r = 16 + 14 * ph;
+      ctx.save();
+      ctx.beginPath(); ctx.arc(X(m.x), Y(m.y), r, 0, Math.PI * 2);
+      ctx.fillStyle = alpha('#6aa8ff', (b.level === 'clear' ? 0.22 : 0.12) * (0.6 + 0.4 * ph)); ctx.fill();
+      ctx.strokeStyle = alpha('#6aa8ff', 0.7); ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.font = '600 11px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#9cc4ff';
+      ctx.fillText(`${b.level === 'clear' ? 'someone still' : 'maybe someone still'} · ${Math.round(b.rate)}/min`, X(m.x), Y(m.y) - 34);
+      ctx.restore();
+      dirty = true;
+    }
   }
   function drawZones() {
     for (const z of M.zones || []) {
@@ -2237,7 +2255,7 @@ window.AckMap = (() => {
     },
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
-      if (slow && slow.tracked) zoneIn = slow.tracked.zones || {};
+      if (slow && slow.tracked) { zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; }
       if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPeople = slow.demo_people || []; if (slow.channel) channel = slow.channel; }
       if (header) {
         boardMotion = hubMoving(header);

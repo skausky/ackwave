@@ -234,6 +234,7 @@ class Dashboard:
         self.sat_cmds = {}               # MAC -> the last command sent to it through the hub, and its state
         self.follow = None               # a network switch waiting for the other boards to confirm
         self.out = None                  # the hub's light output as it last said (OUT lines)
+        self.breath = {}                 # 'hub' / 'sat:<mac>' -> its latest breathing reading (BREATH lines)
         self.out_pin = None
         # Where people are, all the time (track.py: the Map's tracker on the Pi); zones on the map
         self.tracker = Tracker()
@@ -930,6 +931,16 @@ class Dashboard:
                 return
             if line.startswith('SATCMD,'):
                 self._satcmd_line(line.strip())
+            elif line.startswith('BREATH,'):             # a board's breathing reading (its router link)
+                p = line.strip().split(',')
+                if len(p) == 6 and MAC_RE.fullmatch(p[1]) and p[2] in ('none', 'possible', 'clear'):
+                    try:
+                        mac = p[1].lower()
+                        key = 'hub' if mac == (self.s.me or '').lower() else 'sat:' + mac
+                        self.breath[key] = dict(level=p[2], rate=round(float(p[3]), 1), prom=float(p[4]),
+                                                agree=int(p[5]), at=time.time())
+                    except ValueError:
+                        pass
             elif line.startswith('OUT,'):                # the hub's light output: OUT,<mode>,<s>,<on|off|none>
                 p = line.strip().split(',')
                 if len(p) == 4 and p[1] in OUT_MODES and p[2].isdigit():
@@ -1089,10 +1100,14 @@ class Dashboard:
         return dict(walks=out[-500:])
 
     def _people(self):
-        """For the page: the Pi's tracking (works with no page open) and the zones."""
+        """For the page: the Pi's tracking (works with no page open), the zones, and
+        who's still but breathing near a board (presence)."""
         nk = self.tracker.near['key'] if self.tracker.near else None
+        now = time.time()
+        still = {k: dict(level=b['level'], rate=b['rate'], name='Hub' if k == 'hub' else self.board_label(k[4:]))
+                 for k, b in self.breath.items() if now - b['at'] <= 10 and b['level'] != 'none'}
         return dict(people=[p.view() for p in self.tracker.people if p.est], near=nk,
-                    zones={k: v for k, v in self.zone_in.items()})
+                    zones={k: v for k, v in self.zone_in.items()}, breathing=still)
 
     def _switch_network(self, line, what):
         """A new network for the hub: the other boards are told first (through

@@ -186,8 +186,17 @@ function renderHomeStatus() {
     const by = h && h.by && h.by.length ? `seen by ${h.by.join(', ')}` : '';
     sub = [sub, by].filter(Boolean).join(' · ');
   } else {
-    line = 'All quiet';
-    sub = b.sub || b.head || '';
+    // nobody moving: someone still may be breathing near a board (presence)
+    const br = Object.values((slow && slow.tracked && slow.tracked.breathing) || {});
+    const sure = br.filter((x) => x.level === 'clear'), maybe = br.filter((x) => x.level === 'possible');
+    if (sure.length || maybe.length) {
+      const x = (sure[0] || maybe[0]);
+      line = `${sure.length ? 'Someone still' : 'Maybe someone still'} near ${nameOf(x.name)}`;
+      sub = `breathing about ${Math.round(x.rate)} a minute` + (br.length > 1 ? ` · also near ${br.filter((y) => y !== x).map((y) => nameOf(y.name)).join(', ')}` : '');
+    } else {
+      line = 'All quiet';
+      sub = b.sub || b.head || '';
+    }
   }
   const box = $('#home-status');
   const faint = !motion && ((ms && (ms.people || ms.near)) || lone.length);
@@ -197,14 +206,16 @@ function renderHomeStatus() {
   $('#hs-sub').textContent = sub;
   const bs = (slow && slow.boards) || [];
   const hubWord = word === 'motion' ? 'motion' : word === 'calibrating' ? 'calibrating' : 'still';
-  const chips = [['Hub', hubWord], ...bs.map((x) => [x.name, x.state])];
+  const brk = (slow && slow.tracked && slow.tracked.breathing) || {};
+  const chips = [['Hub', hubWord, !!brk.hub], ...bs.map((x) => [x.name, x.state, !!brk['sat:' + x.mac]])];
   const sig = JSON.stringify(chips);
   const hb = $('#hs-boards');
   if (hb.dataset.sig !== sig) {
     hb.dataset.sig = sig;
     const WORD = { motion: 'motion', still: 'quiet', calibrating: 'getting ready', gone: 'not heard', unpaired: 'needs its key', quiet: 'no reports' };
-    hb.replaceChildren(...chips.map(([name, st]) => el('span', { className: `hs-board ${st}`, title: WORD[st] || st },
-      el('i'), el('span', { textContent: /^\d+$/.test(name) ? `Board ${name}` : name }))));
+    hb.replaceChildren(...chips.map(([name, st, br]) => el('span', { className: `hs-board ${st}${br ? ' breath' : ''}`,
+      title: (WORD[st] || st) + (br ? ', someone breathing near it' : '') },
+      el('i'), el('span', { textContent: (/^\d+$/.test(name) ? `Board ${name}` : name) + (br ? ' · breathing' : '') }))));
   }
 }
 

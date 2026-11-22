@@ -44,6 +44,8 @@ int main(void) {
         return 2;
     }
     md_init(&det, &cfg, 0);
+    static br_state_t br;                    // breathing on node 0's ACKs (BREATH lines)
+    br_init(&br);
     md_take_cal_event(&det);                 // the boot event is implied
     while (fgets(line, sizeof line, stdin)) {
         long long ts;
@@ -59,6 +61,11 @@ int main(void) {
         len = parse_csi_data(line + off, len, buf);      // either line format
         if (len < 128) continue;
         if (kind < 0 || kind > 1) continue;  // the Python parser rejects these too
+        if (src == 0 && kind == 1) {
+            float am[N_SC];
+            if (lltf_amplitudes(buf, len, am) && br_feed(&br, ts, am))
+                printf("BREATH %lld %d %.2f %.4f %.4f\n", ts, br.level, br.rate, br.prom, br.agree);
+        }
         float s = md_update(&det, src, kind, ts, rssi, buf, len);
         if (s >= 0)
             printf("SCORE %lld %d %d %.6f %.6f\n", ts, src, kind, s,

@@ -1286,6 +1286,46 @@ int main(void) {
             CHECK(hello_open(fr, 53 + REPORT_LEN + 2 + CCM_TAG, aes128_block, &ak, &got, &y) && y.n_links == 0);
             CHECK(rep_k20(1.0f, 1.0f) == 20 && rep_k20(20.0f, 1.0f) == 255 && rep_k20(1.0f, 0.0f) == 0);
         }
+        {   // breathing in the report, and the fullest report still fits
+            rep_extra_t x = {0}, y;
+            x.n_links = REP_LINKS_MAX;
+            for (int i = 0; i < REP_LINKS_MAX; i++) { memcpy(x.link[i].mac, PLUG, 6); x.link[i].mac[5] = (uint8_t)i; }
+            x.n_seen = REP_SEEN_MAX;
+            for (int i = 0; i < REP_SEEN_MAX; i++) { memcpy(x.seen[i].mac, AP1, 6); x.seen[i].mac[5] = (uint8_t)i; }
+            x.has_order = true; x.ord_boot = 3; x.ord_n = 9;
+            x.has_breath = true; x.br_level = BR_CLEAR; x.br_rate2 = 28; x.br_prom = 200; x.br_agree = 75;
+            int n = build_report(h, B1, HUBM, AP1, 6, &rp, &x, 46, aes128_block, &ak);
+            CHECK(n == 438 && n <= REPORT_MAX_LEN);
+            CHECK(hello_open(h, n, aes128_block, &ak, &got, &y) && y.has_breath && y.br_level == BR_CLEAR &&
+                  y.br_rate2 == 28 && y.br_prom == 200 && y.br_agree == 75 && y.has_order && y.n_seen == REP_SEEN_MAX);
+        }
+        {   // breathing on the board: a 12 /min ripple is found, plain noise isn't
+            static br_state_t br;
+            float am[N_SC];
+            uint32_t rs = 12345;
+            for (int pass = 0; pass < 2; pass++) {
+                br_init(&br);
+                bool got = false;
+                for (int i = 0; i < 50 * 60; i++) {            // 60 s at 50 packets/s
+                    double t = i / 50.0;
+                    for (int k = 0; k < N_SC; k++) {
+                        rs = rs * 1103515245u + 12345u;
+                        float noise = ((float)((rs >> 8) & 0xFFFF) / 65535.0f - 0.5f) * 0.8f;
+                        float ripple = pass == 0 ? 0.01f * (float)sin(2 * M_PI * 0.2 * t) * (k < 26 ? 1.0f : -0.5f) : 0.0f;
+                        am[k] = (20.0f + 6.0f * (float)sin(k / 10.0)) * (1.0f + ripple) + noise;
+                    }
+                    got |= br_feed(&br, (int64_t)(t * 1e6), am);
+                }
+                CHECK(got && br.have);
+                if (pass == 0) CHECK(br.level == BR_CLEAR && fabsf(br.rate - 12.0f) <= 1.0f);
+                else CHECK(br.level == BR_NONE);
+            }
+            br_init(&br);
+            for (int k = 0; k < N_SC; k++) am[k] = 20.0f;
+            bool early = false;
+            for (int i = 0; i < 50 * 20; i++) early |= br_feed(&br, (int64_t)i * 20000, am);
+            CHECK(!early);                                    // under 40 s: no reading
+        }
         {   // the hub's orders: one command line, sealed for one board, to its reports' sender
             static uint8_t of[ORDER_MAX_LEN];
             order_t o;

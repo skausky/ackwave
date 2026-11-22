@@ -131,6 +131,7 @@ static peer_list_t peers;         // other ackwave boards heard (under seen_mux 
 static sat_report_t my_rep;       // what our hellos say (under seen_mux; print_task fills it)
 typedef struct { uint8_t f[REPORT_MAX_LEN]; int16_t len; int8_t rssi; } sat_rx_t;
 static rep_extra_t my_links;      // our links' scores (print_task fills, under seen_mux)
+static rep_extra_t my_breath;     // our breathing reading (print_task fills, under seen_mux)
 static QueueHandle_t sat_q;       // other boards' sealed hellos: opened and printed by the control task
 
 // Keys (from the PC over USB, saved): our own seals our reports; the hub
@@ -234,6 +235,10 @@ static void print_peerkeys(void) {
 // 10 s, who it hears (SURV,<board>,<mac>:<kind>:<rssi>,...); hub only
 static void print_extra(const uint8_t *who, const rep_extra_t *x) {
     static char line[24 + REP_SEEN_MAX * 28];
+    if (x->has_breath)                   // its latest breathing reading (BREATH lines, as a board prints its own)
+        printf("BREATH," MACF ",%s,%.1f,%u,%u\n", MACA(who),
+               x->br_level == BR_CLEAR ? "clear" : x->br_level == BR_POSSIBLE ? "possible" : "none",
+               x->br_rate2 / 2.0, x->br_prom, x->br_agree);
     if (x->n_links) {
         int k = snprintf(line, sizeof line, "SATL," MACF, MACA(who));
         for (int i = 0; i < x->n_links && k < (int)sizeof line - 32; i++)
@@ -959,6 +964,9 @@ static void poke_task(void *arg) {
             memcpy(ext.link, my_links.link, sizeof ext.link);
             ext.n_seen = 0;
             ext.has_order = have_ord;
+            ext.has_breath = my_breath.has_breath;
+            ext.br_level = my_breath.br_level; ext.br_rate2 = my_breath.br_rate2;
+            ext.br_prom = my_breath.br_prom; ext.br_agree = my_breath.br_agree;
             ext.ord_boot = ord_mk[0];
             ext.ord_n = ord_mk[1];
             bool listen = n_reports % 4 == 0 || !deadline_passed(tn, ord_listen_ms);
@@ -1740,6 +1748,26 @@ static void print_task(void *arg) {
             link_acks = link_rssi_sum = 0;
         }
         md_update(&det, p.src, p.kind, p.ts, p.rssi, p.buf, p.len);
+        if (p.src == 0 && p.kind == 1) {     // breathing on the router link: every 2 s
+            static br_state_t br;
+            static bool br_ready;
+            if (!br_ready) { br_init(&br); br_ready = true; }
+            float am[N_SC];
+            if (lltf_amplitudes(p.buf, p.len, am) && br_feed(&br, p.ts, am)) {
+                float pr = br.prom > 255.0f ? 255.0f : br.prom;
+                taskENTER_CRITICAL(&seen_mux);
+                my_breath.has_breath = true;
+                my_breath.br_level = (uint8_t)br.level;
+                my_breath.br_rate2 = (uint8_t)(br.rate * 2.0f);
+                my_breath.br_prom = (uint8_t)pr;
+                my_breath.br_agree = (uint8_t)(br.agree * 100.0f);
+                taskEXIT_CRITICAL(&seen_mux);
+                // BREATH,<board>,<none|possible|clear>,<rate /min>,<prominence>,<agree %>
+                printf("BREATH," MACF ",%s,%.1f,%.0f,%d\n", MACA(my_mac),
+                       br.level == BR_CLEAR ? "clear" : br.level == BR_POSSIBLE ? "possible" : "none",
+                       br.rate, br.prom, (int)(br.agree * 100.0f));
+            }
+        }
         int change = md_eval(&det, p.ts);
         {                                    // LED inputs: strength, faint blips
             float ms, ml, f = det.floor;

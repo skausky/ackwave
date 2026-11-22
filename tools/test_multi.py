@@ -285,6 +285,12 @@ def follow_network():
     ok, _ = d.command(dict(cmd='out', mode='on', secs=0))
     assert ok and sent[-1] == 'OUT,on,0', "the hub's own pin"
     assert not d.command(dict(cmd='out', mode='disco', secs=1))[0] and not d.command(dict(cmd='out', mode='on', secs=-1))[0]
+    d.feed(f'BREATH,{S2},clear,14.5,180,75\n')        # someone still near board S2 (presence)
+    d.feed(f'BREATH,{FIRST},none,0.0,0,0\n')
+    br = d._people()['breathing']
+    assert set(br) == {'sat:' + S2} and br['sat:' + S2]['rate'] == 14.5 and br['sat:' + S2]['level'] == 'clear', br
+    d.feed(f'BREATH,{S2},maybe,1,1,1\n')              # garbage: ignored
+    assert d.breath['sat:' + S2]['level'] == 'clear'
     d.feed('OUT,motion,60,off\n')
     assert d.out == dict(mode='motion', secs=60, state='off'), d.out
     d.feed(f'SATCMD,{S2},failed,9\n')

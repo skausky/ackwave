@@ -7,6 +7,9 @@
 #include <string.h>
 #include <inttypes.h>
 #include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include "seal.h"
 
 #define CSI_MAX_LEN 384
@@ -784,7 +787,7 @@ static inline int poke_ta_node(const uint8_t me[6], const uint8_t *dmac) {
 // The hello carries no network name, but it is not encrypted: anyone nearby
 // with a sniffer could read whether a board sees motion.
 #define HELLO_LEN    71         // a report with no extra sections (version 4's size)
-#define REPORT_MAX_LEN 432      // a report with every section (version 5)
+#define REPORT_MAX_LEN 448      // a report with every section (version 5): 53 + 10 + links 110 + order 9 + breathing 6 + survey 242 + tag 8 = 438
 #define HELLO_V1_LEN 40         // a hello: who and where (broadcast, every board)
 #define HELLO_EVERY_MS 500      // hellos and reports each at a fixed rate: timing says nothing
 #define MAX_PEERS    8          // boards one board lists, and keys a hub holds
@@ -826,7 +829,7 @@ typedef struct {
 //  - links (every report): each link's target, and its short and long scores
 //    relative to the board's quiet level (x20, so 20 = at the quiet level)
 //  - survey (every 10 s): who the board hears and how strongly (the map lays itself out)
-enum { TLV_LINKS = 1, TLV_SURVEY = 2, TLV_ORDER = 3 };
+enum { TLV_LINKS = 1, TLV_SURVEY = 2, TLV_ORDER = 3, TLV_BREATH = 4 };
 enum { RL_ACK = 1, RL_AP = 2, RL_DEVICE = 4 };           // link flags
 enum { RS_ROUTER = 0, RS_BOARD = 1, RS_DEVICE = 2 };     // survey kinds
 #define REP_LINKS_MAX 12
@@ -839,6 +842,8 @@ typedef struct {
     rep_seen_t seen[REP_SEEN_MAX];
     bool has_order;             // the newest order from the hub this board carried out (TLV_ORDER)
     uint32_t ord_boot, ord_n;
+    bool has_breath;            // breathing on its router link (TLV_BREATH): BR_* level,
+    uint8_t br_level, br_rate2, br_prom, br_agree;   // rate x2 (/min), prominence (capped), agree %
 } rep_extra_t;
 
 static inline uint8_t rep_k20(float score, float floor) {
@@ -909,6 +914,10 @@ static inline int build_report(uint8_t out[REPORT_MAX_LEN], const uint8_t me[6],
             m[n++] = x->link[i].flags; m[n++] = x->link[i].ks; m[n++] = x->link[i].kl;
         }
     }
+    if (x && x->has_breath) {
+        m[n++] = TLV_BREATH; m[n++] = 4;
+        m[n++] = x->br_level; m[n++] = x->br_rate2; m[n++] = x->br_prom; m[n++] = x->br_agree;
+    }
     if (x && x->has_order) {
         m[n++] = TLV_ORDER; m[n++] = 7;
         for (int i = 0; i < 4; i++) m[n++] = (uint8_t)(x->ord_boot >> (8 * i));
@@ -968,6 +977,7 @@ static inline bool hello_open(const uint8_t *f, int len, aes_block_fn enc, void 
     if (x) {
         x->n_links = x->n_seen = 0;
         x->has_order = false;
+        x->has_breath = false;
         for (int i = REPORT_LEN; i + 2 <= mlen;) {
             int tag = m[i], tl = m[i + 1];
             const uint8_t *v = m + i + 2;
@@ -977,6 +987,10 @@ static inline bool hello_open(const uint8_t *f, int len, aes_block_fn enc, void 
                     rep_link_t *e = &x->link[x->n_links++];
                     memcpy(e->mac, v + k, 6); e->flags = v[k + 6]; e->ks = v[k + 7]; e->kl = v[k + 8];
                 }
+            else if (tag == TLV_BREATH && tl >= 4) {
+                x->has_breath = true;
+                x->br_level = v[0]; x->br_rate2 = v[1]; x->br_prom = v[2]; x->br_agree = v[3];
+            }
             else if (tag == TLV_ORDER && tl >= 7) {
                 x->has_order = true;
                 x->ord_boot = (uint32_t)v[0] | (uint32_t)v[1] << 8 | (uint32_t)v[2] << 16 | (uint32_t)v[3] << 24;
@@ -1629,6 +1643,175 @@ static inline bool lltf_amplitudes(const int8_t *buf, int len, float out[N_SC]) 
         out[j++] = sqrtf(re * re + im * im);
     }
     return true;
+}
+
+
+// ---------- Breathing on the board (twin: tools/breath_lite.py) ----------
+// A still person's chest moves a few mm 8-36 times a minute; near a link that
+// ripples the CSI amplitude at that rate. The 52 amplitudes (over their mean:
+// gain gone) are averaged into 8 groups and binned at 10 Hz; every 2 s the
+// last 40 s are detrended (mean, slope, curvature), windowed (Hann) and tested
+// at 8-36 /min in half steps (Goertzel), summed over the groups. Verdict: the
+// peak's prominence over the 0.8-3 Hz background and how many groups agree.
+// 13 KB of RAM: run on one link (the one the board decides with).
+#define BR_N      400                // 40 s at 10 Hz
+#define BR_G      8
+#define BR_RATES  57                 // 8.0 .. 36.0 /min in 0.5 steps
+#define BR_REFS   12                 // 0.8 .. 3.0 Hz
+#define BR_EVERY_US 2000000
+enum { BR_NONE = 0, BR_POSSIBLE = 1, BR_CLEAR = 2 };
+typedef struct {
+    float   bin[BR_N][BR_G];
+    int32_t idx[BR_N];               // which 100 ms bin each slot holds (-1: none)
+    int32_t cur;                     // the bin being filled (-1: none)
+    float   acc[BR_G];
+    int     cnt;
+    int64_t next_us;
+    float   basis[3][BR_N];          // orthonormal mean / slope / curvature
+    float   hann[BR_N];
+    // the latest reading
+    bool    have;
+    float   rate, prom, agree;       // /min, x, 0..1
+    int     level;                   // BR_*
+} br_state_t;
+
+static inline void br_init(br_state_t *b) {
+    memset(b, 0, sizeof *b);
+    for (int i = 0; i < BR_N; i++) b->idx[i] = -1;
+    b->cur = -1;
+    b->next_us = -1;
+    for (int k = 0; k < 3; k++) {    // Gram-Schmidt on 1, s, s^2 (s from -1 to 1)
+        for (int i = 0; i < BR_N; i++) {
+            float sv = -1.0f + 2.0f * (float)i / (float)(BR_N - 1);
+            b->basis[k][i] = k == 0 ? 1.0f : k == 1 ? sv : sv * sv;
+        }
+        for (int j = 0; j < k; j++) {
+            double d = 0;
+            for (int i = 0; i < BR_N; i++) d += (double)b->basis[k][i] * b->basis[j][i];
+            for (int i = 0; i < BR_N; i++) b->basis[k][i] -= (float)d * b->basis[j][i];
+        }
+        double nn = 0;
+        for (int i = 0; i < BR_N; i++) nn += (double)b->basis[k][i] * b->basis[k][i];
+        float inv = (float)(1.0 / sqrt(nn));
+        for (int i = 0; i < BR_N; i++) b->basis[k][i] *= inv;
+    }
+    for (int i = 0; i < BR_N; i++)
+        b->hann[i] = 0.5f - 0.5f * cosf(2.0f * (float)M_PI * (float)i / (float)(BR_N - 1));
+}
+
+static inline float br_goertzel(const float *x, float f_hz) {
+    float w = 2.0f * cosf(2.0f * (float)M_PI * f_hz / 10.0f), s1 = 0, s2 = 0;
+    for (int i = 0; i < BR_N; i++) { float s0 = x[i] + w * s1 - s2; s2 = s1; s1 = s0; }
+    return s1 * s1 + s2 * s2 - w * s1 * s2;
+}
+
+static inline void br_estimate(br_state_t *b, int32_t last) {
+    static float G[BR_G][BR_N];      // one estimate at a time (one task)
+    int n = 0;
+    float prev[BR_G];
+    bool got = false;
+    for (int j = 0; j < BR_N; j++) {              // oldest present bin: the start value
+        int32_t k = last - BR_N + 1 + j;
+        int s = (int)(((k % BR_N) + BR_N) % BR_N);
+        if (b->idx[s] == k) { memcpy(prev, b->bin[s], sizeof prev); got = true; break; }
+    }
+    if (!got) { b->have = false; return; }
+    for (int j = 0; j < BR_N; j++) {              // missing bins: the last value held
+        int32_t k = last - BR_N + 1 + j;
+        int s = (int)(((k % BR_N) + BR_N) % BR_N);
+        if (b->idx[s] == k) { memcpy(prev, b->bin[s], sizeof prev); n++; }
+        for (int g = 0; g < BR_G; g++) G[g][j] = prev[g];
+    }
+    if (n < (int)(0.7f * BR_N)) { b->have = false; return; }
+    static float P[BR_RATES][BR_G], R[BR_REFS][BR_G];
+    float tot[BR_RATES] = {0}, ref[BR_REFS] = {0}, pg[BR_G];
+    int peak_g[BR_G];
+    for (int g = 0; g < BR_G; g++) {
+        float *x = G[g];
+        for (int k = 0; k < 3; k++) {             // detrend: remove the basis projections
+            double d = 0;
+            for (int i = 0; i < BR_N; i++) d += (double)x[i] * b->basis[k][i];
+            for (int i = 0; i < BR_N; i++) x[i] -= (float)d * b->basis[k][i];
+        }
+        for (int i = 0; i < BR_N; i++) x[i] *= b->hann[i];
+        float best = -1;
+        peak_g[g] = 0;
+        for (int r = 0; r < BR_RATES; r++) {
+            float p = br_goertzel(x, (8.0f + 0.5f * (float)r) / 60.0f);
+            P[r][g] = p;
+            if (p > best) { best = p; peak_g[g] = r; }
+        }
+        float rs[BR_REFS];
+        for (int r = 0; r < BR_REFS; r++) rs[r] = R[r][g] = br_goertzel(x, 0.8f + 2.2f * (float)r / (float)(BR_REFS - 1));
+        for (int a = 1; a < BR_REFS; a++)
+            for (int c = a; c > 0 && rs[c] < rs[c - 1]; c--) { float t = rs[c]; rs[c] = rs[c - 1]; rs[c - 1] = t; }
+        float md = 0.5f * (rs[BR_REFS / 2 - 1] + rs[BR_REFS / 2]);
+        pg[g] = best / (md > 1e-18f ? md : 1e-18f);
+    }
+    // the 3 groups where the breathing stands out most (ties: the lower group first)
+    bool use[BR_G] = {false};
+    for (int k = 0; k < 3; k++) {
+        int bi = -1;
+        for (int g = 0; g < BR_G; g++) if (!use[g] && (bi < 0 || pg[g] > pg[bi])) bi = g;
+        use[bi] = true;
+    }
+    for (int g = 0; g < BR_G; g++) {
+        if (!use[g]) continue;
+        for (int r = 0; r < BR_RATES; r++) tot[r] += P[r][g];
+        for (int r = 0; r < BR_REFS; r++) ref[r] += R[r][g];
+    }
+    int i = 0;
+    for (int r = 1; r < BR_RATES; r++) if (tot[r] > tot[i]) i = r;
+    b->have = true;
+    if (i == 0 || i == BR_RATES - 1 || !(tot[i] > tot[i - 1] && tot[i] > tot[i + 1])) {
+        b->rate = b->prom = b->agree = 0; b->level = BR_NONE;
+        return;
+    }
+    for (int a = 1; a < BR_REFS; a++)             // median of the background (sort 12)
+        for (int c = a; c > 0 && ref[c] < ref[c - 1]; c--) { float t = ref[c]; ref[c] = ref[c - 1]; ref[c - 1] = t; }
+    float med = 0.5f * (ref[BR_REFS / 2 - 1] + ref[BR_REFS / 2]);
+    b->prom = tot[i] / (med > 1e-18f ? med : 1e-18f);
+    int ag = 0;
+    for (int g = 0; g < BR_G; g++) if (fabsf((float)(peak_g[g] - i)) * 0.5f <= 1.5f) ag++;
+    b->agree = (float)ag / BR_G;
+    b->rate = 8.0f + 0.5f * (float)i;
+    b->level = b->prom >= 50.0f && b->agree >= 0.30f ? BR_CLEAR : b->prom >= 30.0f ? BR_POSSIBLE : BR_NONE;
+}
+
+// One packet's amplitudes (lltf_amplitudes); true when a new reading is ready
+static inline bool br_feed(br_state_t *b, int64_t ts_us, const float a[N_SC]) {
+    float m = 0;
+    for (int i = 0; i < N_SC; i++) m += a[i];
+    m /= N_SC;
+    if (m <= 0) return false;
+    float g[BR_G];
+    static const int SZ[BR_G] = {7, 7, 7, 7, 6, 6, 6, 6};   // numpy array_split(52, 8)
+    for (int k = 0, at = 0; k < BR_G; at += SZ[k], k++) {
+        float s = 0;
+        for (int i = 0; i < SZ[k]; i++) s += a[at + i] / m;
+        g[k] = s / (float)SZ[k];
+    }
+    int32_t bi = (int32_t)(ts_us / 100000);
+    if (b->cur >= 0 && bi < b->cur - 50) {       // the clock went back: start over
+        for (int i = 0; i < BR_N; i++) b->idx[i] = -1;
+        b->cur = -1; b->next_us = -1; b->cnt = 0;
+    }
+    if (b->cur < 0 || bi != b->cur) {
+        if (b->cur >= 0 && b->cnt) {
+            int s = (int)(((b->cur % BR_N) + BR_N) % BR_N);
+            for (int k = 0; k < BR_G; k++) b->bin[s][k] = b->acc[k] / (float)b->cnt;
+            b->idx[s] = b->cur;
+        }
+        b->cur = bi; b->cnt = 0;
+        memset(b->acc, 0, sizeof b->acc);
+    }
+    for (int k = 0; k < BR_G; k++) b->acc[k] += g[k];
+    b->cnt++;
+    if (b->next_us < 0) b->next_us = ts_us + BR_EVERY_US;
+    if (ts_us < b->next_us) return false;
+    b->next_us = ts_us + BR_EVERY_US;
+    br_estimate(b, b->cur - 1);
+    return b->have;
 }
 
 

@@ -654,3 +654,6 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .sat-row input[type=text] { flex: 1 1 240px; min-width: 0; }
 
 .map-zone-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 6px 0; }
+
+.hs-board.breath i { background: var(--blue, #6aa8ff); animation: breathe 4s ease-in-out infinite; }
+@keyframes breathe { 0%, 100% { transform: scale(.8); opacity: .6; } 50% { transform: scale(1.25); opacity: 1; } }
