@@ -80,6 +80,19 @@ ROUTER_NAME_MAX, ROUTER_NAMES_MAX = 24, 32    # nicknames you give routers (by B
 BOARD_NAMES_MAX = 16                           # ...and other ackwave boards (by MAC), same length
 SAT_GONE_S = 10                                # another board not heard this long: gone
 SAT_MAX = 16
+OUT_MODES = ('off', 'motion', 'on')
+
+
+def out_line(c):
+    """('OUT,<mode>,<s>', words) from a page command, or None."""
+    mode, secs = c.get('mode'), c.get('secs', 60)
+    if mode == 'default':
+        return 'OUT,default', "light output back to the firmware's (with motion, off after 1 min)"
+    if mode not in OUT_MODES or isinstance(secs, bool) or not isinstance(secs, int) or not 0 <= secs <= 86400:
+        return None
+    words = {'off': 'light output off', 'on': 'light output always on',
+             'motion': f'light on with motion, off after {fmt_age(secs) if secs else "the motion ends"}'}[mode]
+    return f'OUT,{mode},{secs}', words
 FOLLOW_WAIT_S = 25                             # a network switch waits this long for the boards to confirm
 OTHERS_HOLD_S = 15.0
 EVENTS_MAX = 300                               # events kept for the live stream
@@ -220,6 +233,8 @@ class Dashboard:
         self.sats = {}                   # other boards heard through ours: MAC -> latest report
         self.sat_cmds = {}               # MAC -> the last command sent to it through the hub, and its state
         self.follow = None               # a network switch waiting for the other boards to confirm
+        self.out = None                  # the hub's light output as it last said (OUT lines)
+        self.out_pin = None
         # Where people are, all the time (track.py: the Map's tracker on the Pi); zones on the map
         self.tracker = Tracker()
         self.track_layout = (None, {})   # (map file mtime, layout)
@@ -243,6 +258,7 @@ class Dashboard:
         self.src_send = {}               # port index -> send() to that board
         self.primary = None              # the primary board's MAC, once chosen
         self.n_src = 1
+        self.sessions_dir = sessions_dir
         self.sessions = Sessions(sessions_dir) if sessions_dir else None
         # Where and when motion happened, on disk (timeline.py): the periods
         # still open are kept here until they end
@@ -336,6 +352,8 @@ class Dashboard:
             state.outbox.append('SOUND')         # ask the board for its buzzer settings
         if send and state.sens_want is None:
             state.outbox.append('SENS')
+        if send:
+            state.outbox.append('OUT')           # its light output (older firmware: REFUSED, harmless)
         # Per-link analysis (experimental, off unless switched on): node -> analysers
         self.links = {}                          # src -> dict(br=Breathing, dop=Doppler, hist=deque, md)
         # Activity recognition by example (activity.py): clips in sessions/activities.json
@@ -620,7 +638,7 @@ class Dashboard:
             if line.startswith(('STATE,', 'STATS,', 'CALIB,')) or mac not in self.sats:
                 self.sats[mac] = ob.report()
 
-    BOARD_CMDS = ('cal', 'sound', 'sens', 'led')
+    BOARD_CMDS = ('cal', 'sound', 'sens', 'led', 'out')
 
     def _board_command(self, mac, c):
         """A command for another board: recalibrate, buzzer, sensitivity, LED.
@@ -638,6 +656,11 @@ class Dashboard:
             name = self.board_label(mac)
             if what == 'cal':
                 line, msg = 'CAL', f'{name}: recalibrating, step away'
+            elif what == 'out':
+                got = out_line(c)
+                if not got:
+                    return False, 'bad light output setting'
+                line, msg = got[0], f'{name}: {got[1]}'
             elif what == 'sound':
                 if c.get('test'):
                     line, msg = 'SOUND,test', f'{name}: playing the motion sound'
@@ -907,6 +930,12 @@ class Dashboard:
                 return
             if line.startswith('SATCMD,'):
                 self._satcmd_line(line.strip())
+            elif line.startswith('OUT,'):                # the hub's light output: OUT,<mode>,<s>,<on|off|none>
+                p = line.strip().split(',')
+                if len(p) == 4 and p[1] in OUT_MODES and p[2].isdigit():
+                    self.out = dict(mode=p[1], secs=int(p[2]), state=p[3])
+                elif len(p) == 2:                        # OUT,gpio5 / OUT,nopin at boot
+                    self.out_pin = p[1]
             if line.startswith('SAT,'):
                 self._sat(line)
             elif line.startswith(('SATL,', 'SURV,')):
@@ -946,6 +975,9 @@ class Dashboard:
 
     # ---------- people and zones, on the Pi ----------
     def _layout(self):
+        if time.monotonic() - getattr(self, '_layout_at', -9.0) < 1.0:    # checked at most once a second
+            return self.track_layout[1]
+        self._layout_at = time.monotonic()
         p = self._map_path()
         try:
             mt = os.path.getmtime(p) if p else None
@@ -1023,16 +1055,38 @@ class Dashboard:
         if not self.tracker.step(links, now):
             return
         zones = m.get('zones', [])
+        near = self.tracker.near['key'] if self.tracker.near else None
         for z in zones:
-            inside = [p for p in self.tracker.people if p.est and in_zone(z, p.est['x'], p.est['y'])]
+            if 'near' in z:
+                inside = [1] if near == z['near'] else []
+            else:
+                inside = [p for p in self.tracker.people if p.est and in_zone(z, p.est['x'], p.est['y'])]
             was = self.zone_in.get(z['id'], 0)
             self.zone_in[z['id']] = len(inside)
             if inside and not was:
                 n = len(self.tracker.people)
-                self._event('zone', f"Someone in {z['name']}", None, important=bool(z.get('notify')))
+                self._event('zone', f"Motion at {z['name']}" if 'near' in z else f"Someone in {z['name']}", None,
+                            important=bool(z.get('notify') or z.get('light')))
                 if z.get('notify') and self.send and now - self.zone_said.get(z['id'], 0) >= 60 * self.notify.cfg['quiet_min']:
                     if self.notify.zone(f"Someone in {z['name']}" + (f" · {n} people home" if n > 1 else ''), z.get('night')):
                         self.zone_said[z['id']] = now
+
+    def walks(self, hours=24.0):
+        """The walk check's taps (sessions/walks.jsonl) from the last hours, newest 500."""
+        out = []
+        if self.sessions_dir:
+            try:
+                with open(os.path.join(self.sessions_dir, 'walks.jsonl')) as f:
+                    for line in f:
+                        try:
+                            r = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(r, dict) and time.time() - r.get('t', 0) <= hours * 3600:
+                            out.append(r)
+            except OSError:
+                pass
+        return dict(walks=out[-500:])
 
     def _people(self):
         """For the page: the Pi's tracking (works with no page open) and the zones."""
@@ -1142,13 +1196,23 @@ class Dashboard:
             self.others_until = now_m + OTHERS_HOLD_S  # burst of movement is one alert, not ten
         ext = bool(self._alerting()) or now_m < getattr(self, 'others_until', 0.0)
         was = self.light.on
-        self.light.update(motion or ext)
-        names = [('Hub' if b == 'board' else 'board ' + self.board_label(b)) for b in by]
+        board_words = [('Hub' if b == 'board' else 'board ' + self.board_label(b)) for b in by]
+        # Zones that switch the light (Map page): then only motion in them counts for
+        # the light (the alerts and the boards' LED and buzzer keep the house verdict)
+        lz = [z for z in self._layout().get('zones', []) if z.get('light')]
+        if lz:
+            light_by = [z['name'] for z in lz if self.zone_in.get(z['id'])]
+            self.light.update(bool(light_by))
+        else:
+            light_by = board_words or (['a device link'] if ext else [])
+            self.light.update(motion or ext)
+        names = board_words
         if self.notify.update(motion or ext, ', '.join(names) or ('a device link' if ext else '')):
             self._event('automation', 'Phone notified · motion', 'notify')
         if self.light.on != was and self.light.on is not None and self.light.cfg.get('enabled'):
-            src = ', '.join('Hub' if b == 'board' else self.board_label(b) for b in by) or 'a device link'
-            self._event('automation', f"Light on · motion at {src}" if self.light.on else 'Light off · the house is still',
+            src = ', '.join(light_by) or 'a device link'
+            self._event('automation', f"Light on · motion at {src}" if self.light.on else
+                        ('Light off · the zones are still' if lz else 'Light off · the house is still'),
                         'light', important=True)
         now = time.monotonic()
         if ext and (not self.ext_sent or now - self.ext_at >= EXT_EVERY_S):
@@ -1447,6 +1511,34 @@ class Dashboard:
                 msg = ('Light on motion: off' if not cf['enabled'] else
                        'Light on motion: on, off as soon as the room is still' if not cf['off_after'] else
                        f"Light on motion: on, off after {fmt_age(cf['off_after'])} of stillness")
+            elif what == 'walk_mark':                    # the walk check: where you really are now
+                try:
+                    x, y = _num(c.get('x'), -10000, 10000), _num(c.get('y'), -10000, 10000)
+                except ValueError:
+                    return False, 'bad spot'
+                ppl = [p for p in self.tracker.people if p.est]
+                near = min(ppl, key=lambda p: math.hypot(p.est['x'] - x, p.est['y'] - y)) if ppl else None
+                err = math.hypot(near.est['x'] - x, near.est['y'] - y) if near else None
+                links, _m = self._track_links()
+                rec = dict(t=round(time.time(), 2), x=round(x, 2), y=round(y, 2),
+                           est=[round(near.est['x'], 2), round(near.est['y'], 2)] if near else None,
+                           links={l['key']: l['level'] for l in links if l['level'] is not None})
+                if self.sessions_dir:
+                    try:
+                        with open(os.path.join(self.sessions_dir, 'walks.jsonl'), 'a') as f:
+                            f.write(json.dumps(rec) + '\n')
+                    except OSError:
+                        pass
+                msg = (f"Marked · the Pi's tracking was {err:.1f} m off [pi {err:.2f}]" if err is not None
+                       else 'Marked · the Pi tracks nobody right now')
+            elif what == 'out':                          # the hub's own light output pin
+                got = out_line(c)
+                if not got:
+                    return False, 'bad light output setting'
+                if not self.send:
+                    return False, 'that needs the board'
+                self.s.outbox.append(got[0])
+                msg = f'Hub: {got[1]}'
             elif what == 'notify':
                 try:
                     always = c.get('hours') == 'always'
@@ -1974,7 +2066,8 @@ class Dashboard:
                     log=self.log_name, board_connected=bool(self.send),
                     alerting=[s.devices.link_label(x) for x in self._alerting()] if self.send else [],
                     light=dict(self.light.view(), live=bool(self.send) or self.demo),
-                    notify=dict(self.notify.view(), live=bool(self.send) or self.demo))
+                    notify=dict(self.notify.view(), live=bool(self.send) or self.demo),
+                    out=dict(self.out or {}, pin=self.out_pin, known=self.out is not None))
 
     def _score(self, t0, t1, win):
         s, det = self.s, self.s.det
@@ -2218,10 +2311,15 @@ def clean_map(m):
         for z in zs:
             if not isinstance(z, dict) or not isinstance(z.get('id'), str) or not re.fullmatch(r'[a-z0-9]{1,12}', z['id']):
                 raise ValueError('bad zone')
-            out['zones'].append(dict(id=z['id'], name=_text(z.get('name', 'Zone'), 32),
-                                     x=_num(z.get('x'), -10000, 10000), y=_num(z.get('y'), -10000, 10000),
-                                     w=_num(z.get('w'), 0.3, 1000), h=_num(z.get('h'), 0.3, 1000),
-                                     notify=bool(z.get('notify', False)), night=bool(z.get('night', False))))
+            c = dict(id=z['id'], name=_text(z.get('name', 'Zone'), 32),
+                     notify=bool(z.get('notify', False)), night=bool(z.get('night', False)),
+                     light=bool(z.get('light', False)))
+            if z.get('near') is not None:            # "near <router or board>": the motion's end, no area
+                c['near'] = _text(z['near'], 64)
+            else:
+                c.update(x=_num(z.get('x'), -10000, 10000), y=_num(z.get('y'), -10000, 10000),
+                         w=_num(z.get('w'), 0.3, 1000), h=_num(z.get('h'), 0.3, 1000))
+            out['zones'].append(c)
     if 'plans' in m:                            # picture layers: where each sits, in metres
         plans = m['plans']
         if not isinstance(plans, list) or len(plans) > len(PLAN_IDS):
@@ -2278,6 +2376,8 @@ def make_handler(dash, allowed_hosts):
                     return self._reply(200, dash.stats())
                 if u.path == '/api/map':
                     return self._reply(200, dash.map_load())
+                if u.path == '/api/walks':
+                    return self._reply(200, dash.walks())
                 if u.path == '/api/plan':
                     got = dash.plan_load(parse_qs(u.query).get('id', [''])[0])
                     if not got:

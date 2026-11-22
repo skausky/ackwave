@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 OUT=build/addon/ackwave
 rm -rf "$OUT" && mkdir -p "$OUT/tools"
 cp addon/ackwave/config.yaml addon/ackwave/Dockerfile addon/ackwave/run.sh addon/ackwave/DOCS.md "$OUT/"
-cp tools/*.py "$OUT/tools/"
+cp tools/*.py tools/ml_motion.json "$OUT/tools/"
 rm -f "$OUT"/tools/test_*.py "$OUT"/tools/fake_csi.py
 cp -r tools/web "$OUT/tools/web"
 echo "$OUT"

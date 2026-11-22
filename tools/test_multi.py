@@ -280,6 +280,13 @@ def follow_network():
     assert ok and 'through the hub' in msg and sent == [f'SATCMD,{S2},CAL'], (msg, sent)
     ok, _ = d.command(dict(cmd='sens', board=S2, x100=150))
     assert ok and sent[-1] == f'SATCMD,{S2},SENS,150'
+    ok, _ = d.command(dict(cmd='out', board=S2, mode='motion', secs=120))
+    assert ok and sent[-1] == f'SATCMD,{S2},OUT,motion,120', sent[-1]
+    ok, _ = d.command(dict(cmd='out', mode='on', secs=0))
+    assert ok and sent[-1] == 'OUT,on,0', "the hub's own pin"
+    assert not d.command(dict(cmd='out', mode='disco', secs=1))[0] and not d.command(dict(cmd='out', mode='on', secs=-1))[0]
+    d.feed('OUT,motion,60,off\n')
+    assert d.out == dict(mode='motion', secs=60, state='off'), d.out
     d.feed(f'SATCMD,{S2},failed,9\n')
     assert any('older firmware' in e['text'] for e in d.events if e['type'] == 'health')
     assert not d.command(dict(cmd='cal', board=mac(1, 2, 3, 4, 5, 6)))[0], "a board nobody hears"

@@ -83,6 +83,15 @@ function connect() {
 }
 
 window.ackCmd = (body) => cmd(body);      // the Map page names routers through it
+// the same, giving back the reply's text too (the walk check reads the Pi's error from it)
+window.ackCmdText = async (body) => {
+  try {
+    const r = await fetch('cmd', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ackwave': '1' }, body: JSON.stringify(body) });
+    const j = await r.json();
+    toast(j.msg || (j.ok ? 'done' : 'failed'), !j.ok);
+    return j;
+  } catch (e) { return null; }
+};
 async function cmd(body) {
   try {
     const r = await fetch('cmd', {
@@ -250,6 +259,7 @@ function renderHeader(h) {
   for (const id of ['#btn-cal', '#net-scan', '#net-default']) $(id).disabled = !h.board_connected;
   renderLight(h.light);
   renderNotify(h.notify);
+  renderOut(h);
 }
 
 // ---------------------------------------------------------------- light on motion
@@ -312,6 +322,33 @@ $('#light-clear').onclick = async () => {
   if (await cmd({ cmd: 'light', enabled: false, on_url: '', off_url: '' }))
     for (const id of ['#light-on-url', '#light-off-url']) { $(id).dataset.saved = ''; $(id).placeholder = $(id).dataset.hint; }
 };
+
+// ---------------------------------------------------------------- light output (GPIO 5)
+let outBoard = '';                                 // '' = the hub, else a board's MAC
+function renderOut(h) {
+  if (page !== 'settings') return;
+  const o = h && h.out, bs = (slow && slow.boards) || [];
+  const seg = $('#out-board'), sig = JSON.stringify(bs.map((b) => [b.mac, b.name]));
+  if (seg.dataset.sig !== sig) {
+    seg.dataset.sig = sig;
+    seg.replaceChildren(...[['', 'Hub'], ...bs.map((b) => [b.mac, /^\d+$/.test(b.name) ? `Board ${b.name}` : b.name])].map(([k, n]) => {
+      const b = el('button', { type: 'button', textContent: n });
+      b.dataset.k = k;
+      b.onclick = () => { outBoard = k; renderOut(h); };
+      return b;
+    }));
+  }
+  for (const b of seg.children) b.classList.toggle('on', b.dataset.k === outBoard);
+  const hub = !outBoard;
+  for (const b of $('#out-mode').children) b.classList.toggle('on', hub && o && o.known && b.dataset.m === o.mode);
+  if (hub && o && o.known && document.activeElement !== $('#out-secs')) $('#out-secs').value = String(o.secs);
+  $('#out-state').textContent = !hub ? 'sent through the hub; that board answers at its next report'
+    : !o || (!o.known && !o.pin) ? 'waiting for the hub (new firmware needed)'
+    : o.pin === 'nopin' ? 'this build has no light pin' : o.known ? `light is ${o.state}` : '';
+}
+const outCmd = (mode) => cmd(Object.assign({ cmd: 'out', mode, secs: +$('#out-secs').value }, outBoard ? { board: outBoard } : {}));
+for (const b of $('#out-mode').children) b.onclick = () => outCmd(b.dataset.m);
+$('#out-secs').onchange = () => { const on = [...$('#out-mode').children].find((b) => b.classList.contains('on')); if (on) outCmd(on.dataset.m); };
 
 // ---------------------------------------------------------------- phone notifications
 function renderNotify(n) {

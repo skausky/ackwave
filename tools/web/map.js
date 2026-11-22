@@ -799,6 +799,7 @@ window.AckMap = (() => {
     particles(L, t, motionC);
     drawTrack(t);
     drawNear(t);
+    drawWalkCheck();
     for (const dp of demoPeople) {                 // demo: the truth, to see how close the estimates are
       const x = X(dp.x), y = Y(dp.y);
       ctx.save(); ctx.strokeStyle = css('--fg'); ctx.globalAlpha = 0.8; ctx.lineWidth = 1.5;
@@ -1130,6 +1131,21 @@ window.AckMap = (() => {
   }
   function drawZones() {
     for (const z of M.zones || []) {
+      if (z.near) {                                  // around its router or board
+        const m = z.near === 'hub' ? HUB : M.nodes.get(z.near);
+        if (!m) continue;
+        const occ = zoneIn[z.id] > 0, r = Math.max(22, 1.5 * M.view.s);
+        ctx.save();
+        ctx.beginPath(); ctx.arc(X(m.x), Y(m.y), r, 0, Math.PI * 2);
+        ctx.setLineDash(occ ? [] : [6, 4]);
+        ctx.strokeStyle = occ ? css('--motion') : alpha(css('--accent'), 0.7); ctx.lineWidth = occ ? 2.5 : 1.5; ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'center';
+        ctx.fillStyle = occ ? css('--motion') : css('--accent');
+        ctx.fillText(z.name + (occ ? ' · motion' : '') + (z.light ? ' 💡' : '') + (z.notify ? ' 🔔' : ''), X(m.x), Y(m.y) + r + 14);
+        ctx.restore();
+        continue;
+      }
       const occ = zoneIn[z.id] > 0, x = X(z.x), y = Y(z.y), w = z.w * M.view.s, h = z.h * M.view.s;
       ctx.save();
       ctx.fillStyle = occ ? alpha(css('--motion'), 0.16) : alpha(css('--accent'), 0.06);
@@ -1140,7 +1156,7 @@ window.AckMap = (() => {
       ctx.setLineDash([]);
       ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
       ctx.fillStyle = occ ? css('--motion') : css('--accent');
-      ctx.fillText(z.name + (occ ? ' · someone here' : '') + (z.notify ? ' 🔔' : ''), x + 6, y + 5);
+      ctx.fillText(z.name + (occ ? ' · someone here' : '') + (z.light ? ' 💡' : '') + (z.notify ? ' 🔔' : ''), x + 6, y + 5);
       if (!readOnly) {                               // the corner to resize it
         ctx.beginPath(); ctx.arc(x + w, y + h, 6, 0, Math.PI * 2);
         ctx.fillStyle = css('--accent'); ctx.fill();
@@ -1451,7 +1467,15 @@ window.AckMap = (() => {
   // someone walks into one (the live stream), and can send a notification.
   let zonesOpen = false, zonesEl = null, zonesSig = '';
   function zonesPanel() {
-    const sig = JSON.stringify((M.zones || []).map((z) => [z.id, z.name, z.notify, z.night]));
+    const ends = [];                                 // what a "near" zone can follow: routers and boards
+    const seenE = new Set();
+    for (const { a, n, r } of links())
+      for (const [m, nm] of [[a, a === HUB ? 'the hub' : a.name], [n, r.link ? r.link.name || n.name : n === HUB ? 'the hub' : n.name]]) {
+        const k = m === HUB ? 'hub' : m.key;
+        if (!k || seenE.has(k) || !(k === 'hub' || k.startsWith('sat:') || k.startsWith('r:'))) continue;
+        seenE.add(k); ends.push([k, nm]);
+      }
+    const sig = JSON.stringify([(M.zones || []).map((z) => [z.id, z.name, z.notify, z.night, z.light, z.near]), ends]);
     if (zonesEl && sig === zonesSig) return zonesEl;
     zonesSig = sig;
     const det = el('details', { className: 'map-floors', open: zonesOpen });
@@ -1467,7 +1491,8 @@ window.AckMap = (() => {
       };
       const del = el('button', { type: 'button', className: 'ghost small', textContent: 'Remove' });
       del.onclick = () => { M.zones = M.zones.filter((q) => q !== z); dirty = true; zonesEl = null; renderList(); scheduleSave(); };
-      det.append(el('div', { className: 'map-zone-row' }, name, box('notify me', 'notify'), box('only at night', 'night'), del));
+      det.append(el('div', { className: 'map-zone-row' }, name, z.near ? el('span', { className: 'muted small', textContent: 'near it' }) : null,
+        box('turns on the light', 'light'), box('notify me', 'notify'), box('only at night', 'night'), del));
     }
     const add = el('button', { type: 'button', textContent: 'Add a zone' });
     add.onclick = () => {
@@ -1475,7 +1500,19 @@ window.AckMap = (() => {
       M.zones.push({ id, name: `Zone ${M.zones.length + 1}`, x: v.x - 1.5, y: v.y - 1.5, w: 3, h: 3, notify: false, night: false });
       zonesOpen = true; dirty = true; zonesEl = null; renderList(); scheduleSave();
     };
-    det.append(add, el('p', { className: 'muted small', textContent:
+    const nearSel = el('select', { className: 'small' });
+    nearSel.append(el('option', { value: '', textContent: 'Add a zone near…' }));
+    for (const [k, nm] of ends) nearSel.append(el('option', { value: k, textContent: nm }));
+    nearSel.onchange = () => {
+      const k = nearSel.value;
+      if (!k) return;
+      const nm = (ends.find((e) => e[0] === k) || [k, k])[1];
+      M.zones.push({ id: Math.random().toString(36).slice(2, 10), name: `Near ${nm}`, near: k, notify: false, night: false, light: false });
+      zonesOpen = true; dirty = true; zonesEl = null; renderList(); scheduleSave();
+    };
+    det.append(add, nearSel, el('p', { className: 'muted small', textContent:
+      'A zone near a router or board lights up when the links that meet there react together: motion at that end, from any board, even if you never placed the router. ' +
+      'If any zone "turns on the light", the light follows only those zones (alerts keep the whole house).' }), el('p', { className: 'muted small', textContent:
       'Drag a zone to move it, its corner dot to resize it. When someone walks in, the live stream says so; with "notify me", your phone too (Settings, Phone notifications: same wait and daily cap). Tracking is about 2 m accurate, so make zones room-sized.' }));
     zonesEl = det;
     return det;
@@ -1529,6 +1566,7 @@ window.AckMap = (() => {
   }
   function zoneHit(x, y) {
     for (const z of [...(M.zones || [])].reverse()) {
+      if (z.near) continue;                          // a "near" zone follows its router or board
       const cx = X(z.x + z.w), cy = Y(z.y + z.h);
       if (Math.hypot(cx - x, cy - y) <= 14) return { z, corner: true };
       if (x >= X(z.x) && x <= X(z.x + z.w) && y >= Y(z.y) && y <= Y(z.y + z.h)) return { z, corner: false };
@@ -1581,6 +1619,7 @@ window.AckMap = (() => {
   function up(e) {
     ptrs.delete(e.pointerId);
     if (drag && drag.pan && drag.tap && tool && e.type === 'pointerup') toolTap(...toWorld(...pos(e)));
+    else if (drag && drag.pan && drag.tap && walk && e.type === 'pointerup') walkMark(...toWorld(...pos(e)));
     if (!readOnly && drag && (drag.key || drag.pan || drag.layer || drag.board || drag.facing || drag.zone)) { scheduleSave(); if (drag.facing) renderList(); }
     drag = ptrs.size === 1 ? { pan: true, x0: [...ptrs.values()][0].x, y0: [...ptrs.values()][0].y, vx: M.view.x, vy: M.view.y } : null;
   }
@@ -1598,8 +1637,8 @@ window.AckMap = (() => {
         !n.placed && n.auto ? { auto: [Math.min(1000, n.auto.a), Math.min(1000, n.auto.b), n.auto.rot] } : {})),
       hub_floor: M.hubFloor, floor_h: M.floorH };
     if (typeof M.hubFacing === 'number') body.hub_facing = M.hubFacing;
-    body.zones = (M.zones || []).map((z) => ({ id: z.id, name: String(z.name).slice(0, 32), x: z.x, y: z.y, w: z.w, h: z.h,
-      notify: !!z.notify, night: !!z.night }));
+    body.zones = (M.zones || []).map((z) => Object.assign({ id: z.id, name: String(z.name).slice(0, 32),
+      notify: !!z.notify, night: !!z.night, light: !!z.light }, z.near ? { near: z.near } : { x: z.x, y: z.y, w: z.w, h: z.h }));
     if (M.view && viewByUser) body.view = M.view;
     body.plans = M.plans.map((p) => ({ id: p.id, name: String(p.name).slice(0, 64), x: p.x, y: p.y, w: p.w,
       rot: p.rot, opacity: p.opacity, hidden: !!p.hidden }));
@@ -1825,6 +1864,136 @@ window.AckMap = (() => {
     dirty = true;
   }
 
+  // ---------- walk check: you tap where you really are ----------
+  // Walk (or stand) around and tap your real spot now and then: each tap is
+  // compared with where the tracking puts you (here, and on the Pi), and saved
+  // on the Pi as a labelled example (sessions/walks.jsonl) for learning later.
+  let walk = null;                                  // { marks: [{x, y, ex, ey, err}] } while checking
+  function walkToggle() {
+    walk = walk ? null : { marks: [] };
+    $('#map-walk').classList.toggle('on', !!walk);
+    $('#map-walk').textContent = walk ? 'Done checking' : 'Walk check';
+    accNote(walk ? 'Walk around; every few steps, tap where you really are on the map. Each tap is compared with the tracking.' : '');
+    dirty = true;
+  }
+  async function walkMark(x, y) {
+    const near = track.people.filter((p) => p.est).sort((a, b) => Math.hypot(a.est.x - x, a.est.y - y) - Math.hypot(b.est.x - x, b.est.y - y))[0];
+    const m = { x, y, ex: near ? near.est.x : null, ey: near ? near.est.y : null };
+    m.err = near ? Math.hypot(m.ex - x, m.ey - y) : null;
+    walk.marks.push(m);
+    let pi = '';
+    try {
+      const r = await window.ackCmdText({ cmd: 'walk_mark', x, y });
+      const g = r && r.ok && /\[pi ([\d.]+)\]/.exec(r.msg || '');
+      if (g) m.pi = +g[1];
+    } catch (e) { /* the page's own check still counts */ }
+    const errs = walk.marks.map((q) => q.err).filter((v) => v !== null).sort((a, b) => a - b);
+    const pis = walk.marks.map((q) => q.pi).filter((v) => v !== undefined && v !== null).sort((a, b) => a - b);
+    const med = (v) => v[Math.floor(v.length / 2)];
+    if (pis.length) pi = ` · on the Pi: ${fmtLen(med(pis))}`;
+    accNote(`Walk check: ${walk.marks.length} tap${walk.marks.length > 1 ? 's' : ''}` +
+      (errs.length ? `, typical error ${fmtLen(med(errs))}${pi}` : ', nobody tracked at those moments (move a little first)') +
+      `${walk.marks.length - errs.length ? ` · ${walk.marks.length - errs.length} with nobody tracked` : ''}. Keep tapping, or Done checking.`);
+    dirty = true;
+  }
+  // Fit routers to the walk check's taps: each router in turn, tried over a
+  // grid inside its rough spot (or 12 m around it); the spot where the taps'
+  // replayed estimates (the tracker's model, no filter) land closest to where
+  // you really were wins. Links that don't touch the router being moved are
+  // computed once per tap; each tap is searched within 8 m of where you were
+  // (farther counts as 6 m off anyway).
+  async function fitWalk() {
+    let recs = [];
+    try { const r = await fetch('api/walks', { headers: { 'X-Ackwave': '1' } }); recs = (await r.json()).walks || []; } catch (e) { /* none */ }
+    recs = recs.filter((q) => q.links && Object.keys(q.links).length >= 2);
+    if (recs.length < 4) { accNote(`Fit needs at least 4 walk-check taps from today (have ${recs.length}): use Walk check first.`); return; }
+    const L = links(), lam = lambda(), CS = 0.75, RAD = 8, G0 = 1.2, WG = 1 / 1.5 ** 2;
+    const grids = recs.map((q) => {
+      const px = [], py = [];
+      for (let dy = -RAD; dy <= RAD; dy += CS) for (let dx = -RAD; dx <= RAD; dx += CS) { px.push(q.x + dx); py.push(q.y + dy); }
+      return { px, py };
+    });
+    const cache = new Map();
+    const sens = (qi, link, moving) => {
+      const k = qi + '|' + link.r.key;
+      if (!moving && cache.has(k)) return cache.get(k);
+      const { px, py } = grids[qi], ends = endSamples(link.a, link.n), out = new Float32Array(px.length);
+      for (let c = 0; c < px.length; c++) {
+        let v = 0;
+        for (const [ea, en] of ends) v += sensitivity(px[c], py[c], ea, en, dist3(ea, en), lam);
+        out[c] = v / ends.length;
+      }
+      if (!moving) cache.set(k, out);
+      return out;
+    };
+    const err = (mover) => {
+      let total = 0;
+      recs.forEach((q, qi) => {
+        const use = L.filter(({ r }) => q.links[r.key] !== undefined);
+        const act = use.map(({ r }) => q.links[r.key]);
+        if (use.length < 2 || Math.max(...act) < 0.3) { total += 6; return; }
+        const S = use.map((l) => sens(qi, l, l.a === mover || l.n === mover));
+        const w = act.map((a) => 1 / (SIG0 + SIG1 * a) ** 2), { px, py } = grids[qi];
+        let best = -1, bR = Infinity;
+        for (let c = 0; c < px.length; c++) {
+          let num = G0 * WG, den = WG;
+          for (let k = 0; k < S.length; k++) { num += w[k] * act[k] * S[k][c]; den += w[k] * S[k][c] * S[k][c]; }
+          const g = Math.max(0, num / den);
+          let R = (g - G0) ** 2 * WG;
+          for (let k = 0; k < S.length; k++) R += w[k] * (act[k] - g * S[k][c]) ** 2;
+          if (R < bR) { bR = R; best = c; }
+        }
+        total += Math.min(6, Math.hypot(px[best] - q.x, py[best] - q.y));
+      });
+      return total / recs.length;
+    };
+    const routers = [...new Set(L.map(({ n }) => n).filter((n) => n !== HUB && (n.key || '').startsWith('r:')))];
+    if (!routers.length) { accNote('No routers on the map to fit.'); return; }
+    const before = err(null), saved = routers.map((n) => [n, n.x, n.y, n.placed]);
+    for (let pass = 0; pass < 2; pass++)
+      for (const [ri, n] of routers.entries()) {
+        accNote(`Fitting router ${ri + 1} of ${routers.length} to ${recs.length} taps (pass ${pass + 1} of 2)…`);
+        await new Promise((ok) => setTimeout(ok, 0));
+        const c = n.hint || { x: n.x, y: n.y, r: 12 }, step = Math.max(0.75, c.r / 8);
+        let best = [n.x, n.y, Infinity];
+        n.placed = true;
+        for (let dy = -c.r; dy <= c.r; dy += step)
+          for (let dx = -c.r; dx <= c.r; dx += step) {
+            if (Math.hypot(dx, dy) > c.r) continue;
+            n.x = c.x + dx; n.y = c.y + dy;
+            const e = err(n);
+            if (e < best[2]) best = [n.x, n.y, e];
+          }
+        n.x = best[0]; n.y = best[1];
+        for (const k of [...cache.keys()]) cache.delete(k);   // its links changed for the next router
+      }
+    const after = err(null);
+    if (after > before - 0.2) {                       // not worth it: back as they were
+      for (const [n, x, y, pl] of saved) { n.x = x; n.y = y; n.placed = pl; }
+      accNote(`Your routers already fit the walk well (typical error about ${fmtLen(before)}): nothing moved.`);
+    } else {
+      for (const n of routers) { n.auto = null; n.hint = null; }
+      accNote(`Routers fitted to your walk: typical error ${fmtLen(before)} → ${fmtLen(after)} on ${recs.length} taps. ` +
+        'They are now placed exactly; drag one or set it to automatic if it looks wrong.');
+      scheduleSave();
+    }
+    locAt = 0; heatKey = ''; dirty = true; renderList();
+  }
+  function drawWalkCheck() {
+    if (!walk) return;
+    ctx.save();
+    for (const m of walk.marks) {
+      const x = X(m.x), y = Y(m.y);
+      if (m.ex !== null) {
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(X(m.ex), Y(m.ey));
+        ctx.strokeStyle = alpha(css('--warn'), 0.8); ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]); ctx.stroke(); ctx.setLineDash([]);
+      }
+      ctx.beginPath(); ctx.moveTo(x - 6, y - 6); ctx.lineTo(x + 6, y + 6); ctx.moveTo(x + 6, y - 6); ctx.lineTo(x - 6, y + 6);
+      ctx.strokeStyle = css('--warn'); ctx.lineWidth = 2.5; ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   // ---------- a satellite picture, fetched once by this browser ----------
   // Esri World Imagery tiles (free to view, with credit) around a point, joined
   // into one 1024 px picture, sent to the Pi like any picture and placed
@@ -1952,6 +2121,8 @@ window.AckMap = (() => {
     $('#map-env').onchange = (e) => { M.env = e.target.value; dirty = true; renderList(); scheduleSave(); };
     for (const b of $('#map-unit').children) b.onclick = () => { M.unit = b.dataset.u; syncControls(); dirty = true; renderList(); scheduleSave(); };
     $('#map-fit').onclick = () => { fit(); viewByUser = true; scheduleSave(); };
+    $('#map-walk').onclick = walkToggle;
+    $('#map-walkfit').onclick = async () => { $('#map-walkfit').disabled = true; try { await fitWalk(); } finally { $('#map-walkfit').disabled = false; } };
     $('#map-acc').onclick = () => { toggleAcc(); $('#map-acc').classList.toggle('on', !!acc); };
     $('#map-suggest').onclick = async () => { $('#map-suggest').disabled = true; try { await suggest(); } finally { $('#map-suggest').disabled = false; $('#map-acc').classList.toggle('on', !!acc); } };
     $('#map-file').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) addPicture(f); };
@@ -2113,6 +2284,7 @@ window.AckMap = (() => {
     _truths: () => demoPeople,
     fmtLen,                                    // for tests in the browser
     _env: () => ({ fit: envFit, hearings, nodes: [...M.nodes.values()].map(({ key, x, y, placed, board }) => ({ key, x, y, placed, board })) }),
+    _nodeRef: (k) => M.nodes.get(k),             // tests: one node itself
     _layers: () => M.plans.map(({ img, ...p }) => p),
     _screenOf(id, u, v) {                      // where picture pixel (u, v) is on the canvas
       const p = plan(id), k = p.w / p.iw, c = Math.cos(p.rot), s = Math.sin(p.rot);

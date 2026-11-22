@@ -192,7 +192,7 @@ def main():
     assert dash.command({'cmd': 'sound', 'test': True})[0] and sent[-1] == 'SOUND,test'
     sent2 = []
     d2 = Dashboard(State(60), send=sent2.append, settings=path)
-    assert d2.cfg['sound'] == ['off', 15, 3500] and d2.s.outbox == ['SOUND,off,15,3500', 'SENS'], d2.s.outbox
+    assert d2.cfg['sound'] == ['off', 15, 3500] and d2.s.outbox == ['SOUND,off,15,3500', 'SENS', 'OUT'], d2.s.outbox
     assert dash.command({'cmd': 'sound', 'mode': 'default'})[0] and sent[-1] == 'SOUND,default'
     assert json.load(open(path))['sound'] is None
     dash.feed('SOUND,beep,15,3500,no-buzzer\n')

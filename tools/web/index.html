@@ -271,6 +271,8 @@
             <button type="button" id="map-auto" title="Place routers and devices from the signals your boards hear">Auto-place</button>
             <button type="button" id="map-acc" title="How precisely each spot can be located with the boards where they are">Accuracy</button>
             <button type="button" id="map-suggest" title="Try every spot for a board and show where it helps most">Suggest a spot</button>
+            <button type="button" id="map-walk" title="Walk around and tap where you really are: shows the real error">Walk check</button>
+            <button type="button" id="map-walkfit" title="Move the routers to where your walk-check taps say they fit best">Fit routers to my walk</button>
             <button type="button" id="map-reset" class="ghost">Reset</button>
           </div>
         </div>
@@ -494,6 +496,16 @@
       <p class="small"><b>Buzzer:</b> red (+) to <b>GPIO 4</b>, black (−) to <b>GND</b>. A passive piezo works either way round; an active buzzer needs + on GPIO 4. Then pick Beeps or Alarm above, and <b>Test sounds</b>.</p>
       <p class="small"><b>Button:</b> the board's own <b>BOOT</b> button recalibrates (hold it 5 s to reset the settings). <b>LED:</b> the one on the board (GPIO 48), nothing to wire.</p>
       <p class="small"><b>A light (next firmware):</b> never wire a light straight to a pin: a pin gives 3.3 V and a few milliamps. Put a switch module in between: <b>IN</b> to <b>GPIO 5</b>, <b>VCC</b> to <b>5V</b>, <b>GND</b> to <b>GND</b>, and the light's own red and black wires through the module's output. For a USB or 5–24 V DC light (LED strip, lamp with a DC plug), a <b>logic-level MOSFET module</b> (e.g. one built on an IRLZ44N or AO3400). For anything plugged into the wall, <b>don't wire mains yourself</b>: use a smart plug and the "Light or smart device on motion" card below.</p>
+    </section>
+
+    <section class="card" id="out-card">
+      <div class="card-head"><h2>Light output <span class="muted small">GPIO 5, through a switch module</span></h2><span id="out-state" class="muted small"></span></div>
+      <div class="led-row"><span>Board</span><div class="seg" id="out-board"></div></div>
+      <div class="led-row"><span>Light</span><div class="seg" id="out-mode">
+        <button type="button" data-m="off">Off</button><button type="button" data-m="motion">With motion</button><button type="button" data-m="on">Always on</button></div></div>
+      <label class="led-row"><span>Off after the room is still for</span>
+        <select id="out-secs"><option value="0">right away</option><option value="15">15 s</option><option value="30">30 s</option><option value="60" selected>1 min</option><option value="120">2 min</option><option value="300">5 min</option><option value="900">15 min</option><option value="1800">30 min</option></select></label>
+      <p class="muted small">Switches a light wired to the board through a MOSFET or relay module (see Wiring a board). Each board decides from its own motion, so it works with no PC or Pi running. Saved on the board; another board's setting goes through the hub. Needs the firmware from 2026-11-21 or later.</p>
     </section>
 
     <section class="card" id="notify-card">

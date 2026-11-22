@@ -245,3 +245,29 @@ class Tracker:
 def in_zone(z, x, y):
     """A zone: a rectangle {x, y, w, h} (metres, the Map's layout)."""
     return z['x'] <= x <= z['x'] + z['w'] and z['y'] <= y <= z['y'] + z['h']
+
+
+def locate_once(links, lam=0.125, cs=0.5):
+    """One person's most likely spot from the links' levels at one moment (no
+    filter, no idle levels): links = [(ends, level)], ends = [(End, End), ...].
+    Returns (x, y) or None. Used to replay the walk check's taps."""
+    links = [(e, a) for e, a in links if a is not None and e]
+    if len(links) < 2 or max(a for _, a in links) < 0.3:
+        return None
+    xs = [p.x for e, _ in links for pair in e for p in pair] + [0.0]
+    ys = [p.y for e, _ in links for pair in e for p in pair] + [0.0]
+    x0, y0 = math.floor(min(xs) - 2), math.floor(min(ys) - 2)
+    gw, gh = math.ceil((max(xs) + 2 - x0) / cs), math.ceil((max(ys) + 2 - y0) / cs)
+    while gw * gh > MAX_CELLS:
+        cs *= 1.5
+        gw, gh = math.ceil((max(xs) + 2 - x0) / cs), math.ceil((max(ys) + 2 - y0) / cs)
+    PX, PY = np.meshgrid(x0 + (np.arange(gw) + 0.5) * cs, y0 + (np.arange(gh) + 0.5) * cs)
+    S = np.stack([np.mean([sensitivity(PX, PY, a, n, lam) for a, n in e], axis=0).ravel() for e, _ in links])
+    act = np.array([a for _, a in links])
+    w = 1 / (SIG0 + SIG1 * act) ** 2
+    num = G0 * WG + (w * act) @ S
+    den = WG + (w[:, None] * S * S).sum(0)
+    gg = np.maximum(0, num / den)
+    R = (gg - G0) ** 2 * WG + (w[:, None] * (act[:, None] - gg[None, :] * S) ** 2).sum(0)
+    c = int(np.argmin(R))
+    return x0 + (c % gw + 0.5) * cs, y0 + (c // gw + 0.5) * cs
