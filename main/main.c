@@ -133,6 +133,28 @@ static hub_link_t hubl;            // the hub's channel as last found (poke task
 static uint8_t rep_ta[6];          // our reports' made-up sender: the hub's ACK comes to it
 static volatile uint32_t rep_acked; // set by the Wi-Fi callback when that ACK arrives
 static uint32_t n_rep, n_rep_ack;  // reports sent / answered (poke task)
+// Orders (csi_core.h). As a board: the hub's orders to us wait in ord_q for
+// the control task; the newest one carried out is saved ("ordmk") and told in
+// every report. As a hub: one order waiting per board, sent after each of its
+// reports until a report says it was carried out.
+typedef struct { uint8_t f[ORDER_MAX_LEN]; int16_t len; } ord_rx_t;
+static QueueHandle_t ord_q;
+static bool have_ord;              // ord_mk holds an order we carried out
+static uint32_t ord_mk[2];         // its hub boot, its number
+static volatile uint32_t ord_listen_ms; // after an order: wait for the next one on every report until then
+#define ORDER_GIVE_UP_MS 120000    // a board that never confirms (older firmware): stop and say so
+#define ORDER_EVERY_MS   200       // at most one copy per board this often
+typedef struct {
+    bool used;
+    uint8_t mac[6], ta[6];         // the board, its reports' made-up sender
+    uint32_t n, since_ms, sent_ms;
+    int16_t len;
+    uint8_t f[ORDER_MAX_LEN];
+} ord_wait_t;
+static ord_wait_t ord_wait[MAX_PEERS];        // under ord_mux
+static portMUX_TYPE ord_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t ord_count;         // orders made this boot (with boot_id: the nonce)
+static QueueHandle_t ord_tx_q;     // which ord_wait entry to send now (the Wi-Fi callback asks)
 static void nvs_put(const char *key, const void *v, size_t n);
 static bool nvs_take(const char *key, void *v, size_t n);
 #define MACF "%02x:%02x:%02x:%02x:%02x:%02x"
@@ -704,6 +726,15 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
         return;
     }
     if (type != WIFI_PKT_MGMT) return;
+    {
+        int fl = (int)pkt->rx_ctrl.sig_len - 4;
+        if (ord_q && have_hub && is_order_to(pkt->payload, fl, rep_ta)) {   // the hub's order to us
+            ord_rx_t o = { .len = (int16_t)fl };
+            memcpy(o.f, pkt->payload, (size_t)fl);
+            xQueueSend(ord_q, &o, 0);
+            return;
+        }
+    }
     hello_t hl;
     if (parse_hello(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, &hl)) {
         const uint8_t *pmac = hl.mac;
@@ -714,10 +745,24 @@ static void promisc_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                 sat_rx_t r = { .rssi = (int8_t)pkt->rx_ctrl.rssi, .len = (int16_t)(fl < REPORT_MAX_LEN ? fl : REPORT_MAX_LEN) };
                 memcpy(r.f, pkt->payload, r.len);
                 xQueueSend(sat_q, &r, 0);          // full: skipped, the next comes in 0.5 s
+                // an order waiting for this board: sent now, while it listens on our channel
+                uint32_t t = now_ms();
+                int due = -1;
+                taskENTER_CRITICAL(&ord_mux);
+                for (int i = 0; i < MAX_PEERS && due < 0; i++)
+                    if (ord_wait[i].used && memcmp(ord_wait[i].ta, pkt->payload + 10, 6) == 0 &&
+                        (int32_t)(t - ord_wait[i].sent_ms) >= ORDER_EVERY_MS) {
+                        ord_wait[i].sent_ms = t;
+                        due = i;
+                    }
+                taskEXIT_CRITICAL(&ord_mux);
+                if (due >= 0 && ord_tx_q) xQueueSend(ord_tx_q, &due, 0);
             }
             return;
         }
         int rssi = pkt->rx_ctrl.rssi;
+        if (have_hub && memcmp(pmac, hub_mac, 6) == 0 && hl.ch >= 1 && hl.ch <= MAX_CH)
+            hub_heard(&hubl, hl.ch);               // the hub's own hello: that's its channel
         taskENTER_CRITICAL(&seen_mux);
         bool fresh = peer_find(&peers, pmac, now_ms()) < 0;
         peer_note(&peers, pmac, hl.bssid, pkt->rx_ctrl.channel, rssi, now_ms());
@@ -845,6 +890,10 @@ static void poke_task(void *arg) {
             ext.n_links = my_links.n_links;
             memcpy(ext.link, my_links.link, sizeof ext.link);
             ext.n_seen = 0;
+            ext.has_order = have_ord;
+            ext.ord_boot = ord_mk[0];
+            ext.ord_n = ord_mk[1];
+            bool listen = n_reports % 4 == 0 || !deadline_passed(tn, ord_listen_ms);
             if (n_reports++ % 20 == 0) {
                 for (int i = 0; i < node_count(&nodes) && ext.n_seen < REP_SEEN_MAX; i++)
                     if (gate.rssi_x16[i]) {
@@ -875,6 +924,9 @@ static void poke_task(void *arg) {
             esp_wifi_80211_tx(WIFI_IF_STA, hello, hn, true);
             vTaskDelay(pdMS_TO_TICKS(5));                  // the ACK comes within µs; the frame may wait to go out
             bool acked = rep_acked;
+            // Every 4th report (and for a while after an order) we stay a moment
+            // on the hub's channel: an order for us comes right after the ACK
+            if (acked && listen && ch != home) vTaskDelay(pdMS_TO_TICKS(15));
             if (ch != home) esp_wifi_set_channel(home, WIFI_SECOND_CHAN_NONE);
             xSemaphoreGive(ch_lock);
             n_rep++;
@@ -1005,7 +1057,9 @@ static __attribute__((unused)) void print_poking(void) {   // unused when POKE_H
 }
 
 // POKE / UNPOKE from the PC. Only devices already heard on our network.
+static void sat_cmd(const char *line);
 static void run_cmd(const char *line) {
+    if (strncmp(line, "SATCMD,", 7) == 0) { sat_cmd(line); return; }
     uint8_t mac[6];
     int cmd = parse_cmd(line, mac);
     char name[33];
@@ -1292,6 +1346,106 @@ static void settings_reset(void) {
 }
 
 // The only task that changes channels
+// Hub: sends an order the Wi-Fi callback found due (right after that board's report)
+static void ord_tx_task(void *arg) {
+    static uint8_t f[ORDER_MAX_LEN];
+    int i;
+    for (;;) {
+        if (xQueueReceive(ord_tx_q, &i, portMAX_DELAY) != pdTRUE || i < 0 || i >= MAX_PEERS) continue;
+        int len = 0;
+        taskENTER_CRITICAL(&ord_mux);
+        if (ord_wait[i].used) { len = ord_wait[i].len; memcpy(f, ord_wait[i].f, (size_t)len); }
+        taskEXIT_CRITICAL(&ord_mux);
+        if (len) esp_wifi_80211_tx(WIFI_IF_STA, f, len, true);
+    }
+}
+
+// SATCMD,<board>,<command>: the hub sends <command> to that board (its key
+// must be held). One order waits per board; a newer one replaces it.
+// Answers SATCMD,<board>,queued,<n> / done,<n> / failed,<n> / error,<why>.
+static void sat_cmd(const char *line) {
+    uint8_t mac[6];
+    if (strlen(line) < 7 + 17 + 2 || !parse_mac(line + 7, mac) || line[7 + 17] != ',') {
+        printf("SATCMD,error,bad-command\n");
+        return;
+    }
+    const char *cmd = line + 7 + 18;
+    static uint8_t f[ORDER_MAX_LEN];
+    xSemaphoreTake(key_lock, portMAX_DELAY);
+    int ki = peer_key_find(&pkeys, mac);
+    uint32_t n = (ord_count + 1) & HELLO_SEQ_MAX;
+    int len = ki >= 0 ? build_order(f, my_mac, mac, cur_ch, boot_id, n, cmd, aes_block, &peer_ctx[ki]) : 0;
+    xSemaphoreGive(key_lock);
+    if (ki < 0) { printf("SATCMD," MACF ",error,no-key\n", MACA(mac)); return; }
+    if (!len || !order_allowed(cmd)) { printf("SATCMD," MACF ",error,not-allowed\n", MACA(mac)); return; }
+    ord_count = n;
+    uint32_t t = now_ms();
+    int slot = -1;
+    taskENTER_CRITICAL(&ord_mux);
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (ord_wait[i].used && memcmp(ord_wait[i].mac, mac, 6) == 0) slot = i;
+    for (int i = 0; i < MAX_PEERS && slot < 0; i++)
+        if (!ord_wait[i].used) slot = i;
+    if (slot >= 0) {
+        ord_wait_t *w = &ord_wait[slot];
+        w->used = true;
+        memcpy(w->mac, mac, 6);
+        poke_ta(mac, REPORT_NODE, w->ta);
+        w->n = n; w->since_ms = t; w->sent_ms = t - ORDER_EVERY_MS;
+        w->len = (int16_t)len;
+        memcpy(w->f, f, (size_t)len);
+    }
+    taskEXIT_CRITICAL(&ord_mux);
+    if (slot < 0) printf("SATCMD," MACF ",error,full\n", MACA(mac));
+    else printf("SATCMD," MACF ",queued,%" PRIu32 "\n", MACA(mac), n);
+}
+
+// Hub: a board's report says which order it did last; old orders give up
+static void sat_cmd_check(const uint8_t *mac, const rep_extra_t *x) {
+    uint32_t t = now_ms();
+    for (int i = 0; i < MAX_PEERS; i++) {
+        bool done = false, gone = false;
+        uint32_t n = 0;
+        uint8_t m[6];
+        taskENTER_CRITICAL(&ord_mux);
+        ord_wait_t *w = &ord_wait[i];
+        if (w->used) {
+            memcpy(m, w->mac, 6);
+            n = w->n;
+            done = mac && x && x->has_order && memcmp(w->mac, mac, 6) == 0 &&
+                   x->ord_boot == boot_id && x->ord_n >= w->n;
+            gone = !done && older_than(t, w->since_ms, ORDER_GIVE_UP_MS);
+            if (done || gone) w->used = false;
+        }
+        taskEXIT_CRITICAL(&ord_mux);
+        if (done) printf("SATCMD," MACF ",done,%" PRIu32 "\n", MACA(m), n);
+        if (gone) printf("SATCMD," MACF ",failed,%" PRIu32 "\n", MACA(m), n);
+    }
+}
+
+// Board: an order from our hub. Carried out once, if newer than the last one
+// (saved first: a restarting command like USE comes back to a board that
+// already says "done"), and only if it's a command allowed from the air.
+static void order_take(const ord_rx_t *rx) {
+    order_t o;
+    xSemaphoreTake(key_lock, portMAX_DELAY);
+    bool ok = have_key && order_open(rx->f, rx->len, my_mac, aes_block, &key_ctx, &o);
+    xSemaphoreGive(key_lock);
+    if (!ok || !have_hub || memcmp(o.hub, hub_mac, 6) != 0) { n_badseal++; return; }
+    if (have_ord && !replay_newer(o.boot, o.n, ord_mk[0], ord_mk[1])) return;   // done already, or a recording
+    ord_mk[0] = o.boot; ord_mk[1] = o.n;
+    have_ord = true;
+    nvs_put("ordmk", ord_mk, sizeof ord_mk);
+    ord_listen_ms = now_ms() + 30000;
+    if (!order_allowed(o.line)) {
+        printf("ORDER,refused,%s\n", o.line);
+        return;
+    }
+    printf("ORDER,%s\n", o.line);
+    fflush(stdout);
+    run_cmd(o.line);
+}
+
 static void control_task(void *arg) {
     int printed = 0;
     bool need_scan = true;                 // find the AP immediately at boot
@@ -1330,7 +1484,11 @@ static void control_task(void *arg) {
                    sr.rssi, rp.seq, rp.flags, rp.k_short, rp.k_long, rp.acks, rp.rssi, rp.n_dev, rp.up_s,
                    MACA(hh.bssid), hh.ch);          // + its router and its own channel
             print_extra(hh.mac, &rx);
+            sat_cmd_check(hh.mac, &rx);
         }
+        sat_cmd_check(NULL, NULL);             // orders nobody confirmed: given up
+        ord_rx_t orx;
+        while (ord_q && xQueueReceive(ord_q, &orx, 0) == pdTRUE) order_take(&orx);
         led_update(!my_ssid[0] && !aps.n); // no network chosen yet: yellow
 
         for (int n = node_count(&nodes); printed < n; printed++) {
@@ -1640,6 +1798,7 @@ void app_main(void) {
     ch_lock = xSemaphoreCreateMutex();
     configASSERT(ch_lock);
     have_hub = nvs_take("hub", hub_mac, 6);
+    have_ord = nvs_take("ordmk", ord_mk, sizeof ord_mk);
     int32_t hch;
     if (nvs_take("hubch", &hch, sizeof hch)) hubl.ch = hch;
     uint8_t k[16];
@@ -1664,6 +1823,8 @@ void app_main(void) {
     q = xQueueCreate(64, sizeof(csi_pkt_t));         // 64 x ~150 B: deeper, less RAM than 32 x 400
     configASSERT(q);
     sat_q = xQueueCreate(16, sizeof(sat_rx_t));      // NULL: no SAT lines, sensing goes on
+    ord_q = xQueueCreate(2, sizeof(ord_rx_t));       // NULL: no orders taken, sensing goes on
+    ord_tx_q = xQueueCreate(8, sizeof(int));
     xTaskCreate(print_task, "csi_print", 4096, NULL, 5, NULL);
 #if CSI_PROBE
     probe_q = xQueueCreate(64, sizeof(probe_rec_t));
@@ -1706,6 +1867,7 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
 
     xTaskCreatePinnedToCore(control_task, "ch_ctrl", 4096, NULL, 6, NULL, WIFI_CORE);
+    if (ord_tx_q) xTaskCreatePinnedToCore(ord_tx_task, "ord_tx", 2048, NULL, 7, NULL, WIFI_CORE);
 #if POKE_HZ > 0
     xTaskCreatePinnedToCore(poke_task, "poke", 3072, NULL, 5, NULL, WIFI_CORE);
 #endif

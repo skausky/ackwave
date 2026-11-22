@@ -1107,10 +1107,26 @@ function renderHouse() {
   $('#house-state').textContent = `${h.boards} boards`;
   // which boards count (their motion still shows on their tiles and the timeline)
   const box = $('#house-use');
+  // rebuilt only when something in it changed: a tap on a button being replaced is lost (phones)
+  const sig = JSON.stringify((h.sources || []).map((x) => [x.key, x.name, x.use, x.cmd && [x.cmd.what, x.cmd.state]]));
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
   box.replaceChildren(...(h.sources || []).map((src) => {
     const cb = el('input', { type: 'checkbox', checked: src.use });
     cb.onchange = () => cmd({ cmd: 'house_use', key: src.key, use: cb.checked });
-    return el('label', { className: 'house-use' }, cb, el('span', { textContent: src.name }));
+    const lab = el('label', { className: 'house-use' }, cb, el('span', { textContent: src.name }));
+    if (src.key === 'board') return lab;
+    // the board's own controls, sent from the air through the hub
+    const act = (text, body) => {
+      const b = el('button', { type: 'button', className: 'ghost small', textContent: text });
+      b.onclick = () => cmd(Object.assign({ board: src.key }, body));
+      return b;
+    };
+    const c = src.cmd, st = !c ? '' : c.state === 'done' ? `${c.what}: done` : c.state === 'failed'
+      ? `${c.what}: no answer (needs the new firmware)` : c.state === 'error' ? `${c.what}: refused` : `${c.what}: sending…`;
+    return el('div', { className: 'house-board' }, lab,
+      act('Recalibrate', { cmd: 'cal' }), act('Beep', { cmd: 'sound', test: true }),
+      el('span', { className: 'muted small' + (c && c.state !== 'done' && c.state !== 'queued' && c.state !== 'sent' ? ' err' : ''), textContent: st }));
   }));
   const none = (h.sources || []).length && !(h.sources || []).some((x) => x.use);
   $('#house-none').hidden = !none;

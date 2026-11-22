@@ -733,6 +733,7 @@ static inline int poke_ta_node(const uint8_t me[6], const uint8_t *dmac) {
 #define PEER_GONE_MS 10000      // not heard this long: forgotten
 static const uint8_t HELLO_MAGIC[8] = { 127, 0x02, 0xAC, 0x57, 'A', 'C', 'K', 'W' };  // vendor action, made-up local OUI
 #define HELLO_VERSION 5
+#define ORDER_VERSION 0x41      // byte 32 of the hub's orders (below): never a hello's version
 #define HELLO_SEQ_MAX 0xFFFFFFu // 24 bits; then the boot counter goes up, so a nonce is never reused
 #define REPORT_LEN   10         // sealed: flags, k_short, k_long, acks, rssi, n_dev, up_s
 #define HELLO_AAD_LEN 29        // bytes 24..52 (magic .. seq, with the sender's MAC), checked by the tag
@@ -767,7 +768,7 @@ typedef struct {
 //  - links (every report): each link's target, and its short and long scores
 //    relative to the board's quiet level (x20, so 20 = at the quiet level)
 //  - survey (every 10 s): who the board hears and how strongly (the map lays itself out)
-enum { TLV_LINKS = 1, TLV_SURVEY = 2 };
+enum { TLV_LINKS = 1, TLV_SURVEY = 2, TLV_ORDER = 3 };
 enum { RL_ACK = 1, RL_AP = 2, RL_DEVICE = 4 };           // link flags
 enum { RS_ROUTER = 0, RS_BOARD = 1, RS_DEVICE = 2 };     // survey kinds
 #define REP_LINKS_MAX 12
@@ -778,6 +779,8 @@ typedef struct {
     int n_links, n_seen;
     rep_link_t link[REP_LINKS_MAX];
     rep_seen_t seen[REP_SEEN_MAX];
+    bool has_order;             // the newest order from the hub this board carried out (TLV_ORDER)
+    uint32_t ord_boot, ord_n;
 } rep_extra_t;
 
 static inline uint8_t rep_k20(float score, float floor) {
@@ -848,6 +851,11 @@ static inline int build_report(uint8_t out[REPORT_MAX_LEN], const uint8_t me[6],
             m[n++] = x->link[i].flags; m[n++] = x->link[i].ks; m[n++] = x->link[i].kl;
         }
     }
+    if (x && x->has_order) {
+        m[n++] = TLV_ORDER; m[n++] = 7;
+        for (int i = 0; i < 4; i++) m[n++] = (uint8_t)(x->ord_boot >> (8 * i));
+        for (int i = 0; i < 3; i++) m[n++] = (uint8_t)(x->ord_n >> (8 * i));
+    }
     if (x && x->n_seen > 0) {
         int k = x->n_seen < REP_SEEN_MAX ? x->n_seen : REP_SEEN_MAX;
         m[n++] = TLV_SURVEY; m[n++] = (uint8_t)(8 * k);
@@ -867,7 +875,8 @@ static inline int build_report(uint8_t out[REPORT_MAX_LEN], const uint8_t me[6],
 // Reports of older versions (2 sent them in the clear, 3 broadcast them) are not used.
 static inline bool parse_hello(const uint8_t *f, int len, hello_t *h) {
     if (!f || len < HELLO_V1_LEN || f[0] != 0xD0 ||
-        memcmp(f + 24, HELLO_MAGIC, sizeof HELLO_MAGIC) != 0 || f[32] < 1 || (f[10] & 0x01))
+        memcmp(f + 24, HELLO_MAGIC, sizeof HELLO_MAGIC) != 0 || f[32] < 1 || (f[10] & 0x01) ||
+        f[32] == ORDER_VERSION)                          // the hub's order to a board: not a hello
         return false;
     memset(h, 0, sizeof *h);
     memcpy(h->mac, f + 10, 6);
@@ -900,6 +909,7 @@ static inline bool hello_open(const uint8_t *f, int len, aes_block_fn enc, void 
     r->up_s = (uint32_t)m[6] | (uint32_t)m[7] << 8 | (uint32_t)m[8] << 16 | (uint32_t)m[9] << 24;
     if (x) {
         x->n_links = x->n_seen = 0;
+        x->has_order = false;
         for (int i = REPORT_LEN; i + 2 <= mlen;) {
             int tag = m[i], tl = m[i + 1];
             const uint8_t *v = m + i + 2;
@@ -909,6 +919,11 @@ static inline bool hello_open(const uint8_t *f, int len, aes_block_fn enc, void 
                     rep_link_t *e = &x->link[x->n_links++];
                     memcpy(e->mac, v + k, 6); e->flags = v[k + 6]; e->ks = v[k + 7]; e->kl = v[k + 8];
                 }
+            else if (tag == TLV_ORDER && tl >= 7) {
+                x->has_order = true;
+                x->ord_boot = (uint32_t)v[0] | (uint32_t)v[1] << 8 | (uint32_t)v[2] << 16 | (uint32_t)v[3] << 24;
+                x->ord_n = (uint32_t)v[4] | (uint32_t)v[5] << 8 | (uint32_t)v[6] << 16;
+            }
             else if (tag == TLV_SURVEY)
                 for (int k = 0; k + 8 <= tl && x->n_seen < REP_SEEN_MAX; k += 8) {
                     rep_seen_t *e = &x->seen[x->n_seen++];
@@ -918,6 +933,92 @@ static inline bool hello_open(const uint8_t *f, int len, aes_block_fn enc, void 
         }
     }
     return true;
+}
+
+// ---------- Orders: the hub's commands to a board ----------
+// The PC can't reach a board on its own (no USB): it asks the hub
+// (SATCMD,<board>,<command>), and the hub answers that board's next report
+// with an order, on the hub's channel, to the report's made-up sender (so
+// only that board takes it). The order is one command line, exactly as typed
+// over USB, sealed with that board's key: the hub holds it (PEERKEY), nobody
+// else does. Layout as a report's: bytes 40..52 are the hub's MAC, the hub's
+// boot counter and the order's number, so its nonce never repeats a report's
+// (those start with the board's own MAC). A board carries out an order only
+// if it is newer than the last one it carried out (saved, so a recording
+// replayed later does nothing), and only commands that are safe to take from
+// the air: never keys, never where its reports go. Its reports then say which
+// order it did last (TLV_ORDER), and the hub stops sending it.
+#define ORDER_LINE_MAX 120
+#define ORDER_MAX_LEN  (53 + 6 + ORDER_LINE_MAX + CCM_TAG)
+typedef struct {
+    uint8_t hub[6];             // the sender (the hub's real MAC)
+    uint32_t boot, n;           // the hub's boot counter, the order's number (24 bits)
+    char line[ORDER_LINE_MAX + 1];
+} order_t;
+
+// The order for `board` (its reports' made-up sender is the receiver). Returns
+// its length, or 0 when the line is too long or holds a character that
+// doesn't belong in a command.
+static inline int build_order(uint8_t out[ORDER_MAX_LEN], const uint8_t hub[6], const uint8_t board[6], int ch,
+                              uint32_t boot, uint32_t n, const char *line, aes_block_fn enc, void *key) {
+    int ll = (int)strlen(line);
+    if (ll < 1 || ll > ORDER_LINE_MAX) return 0;
+    for (int i = 0; i < ll; i++) if ((unsigned char)line[i] < 0x20 || line[i] == 0x7f) return 0;
+    uint8_t ta[6];
+    memset(out, 0, ORDER_MAX_LEN);
+    poke_ta(board, REPORT_NODE, ta);
+    hello_head(out, ta, hub, NULL, ch);
+    memcpy(out + 16, hub, 6);                            // BSSID field: the hub (not the board's address)
+    out[32] = ORDER_VERSION;
+    memcpy(out + 40, hub, 6);
+    for (int i = 0; i < 4; i++) out[46 + i] = (uint8_t)(boot >> (8 * i));
+    for (int i = 0; i < 3; i++) out[50 + i] = (uint8_t)(n >> (8 * i));
+    uint8_t m[6 + ORDER_LINE_MAX];
+    memcpy(m, board, 6);                                 // who it is for, inside the seal too
+    memcpy(m + 6, line, (size_t)ll);
+    uint8_t nn[CCM_NONCE], a[HELLO_AAD_LEN];
+    hello_nonce(out, nn);
+    hello_aad(out, a);
+    ccm_seal(enc, key, nn, a, HELLO_AAD_LEN, m, 6 + ll, out + 53);
+    return 53 + 6 + ll + CCM_TAG;
+}
+
+// True if f is an order frame to `rep_ta` (a quick look, no key): the Wi-Fi callback's test
+static inline bool is_order_to(const uint8_t *f, int len, const uint8_t rep_ta[6]) {
+    return f && len >= 53 + 6 + 1 + CCM_TAG && len <= ORDER_MAX_LEN && f[0] == 0xD0 && f[32] == ORDER_VERSION &&
+           memcmp(f + 24, HELLO_MAGIC, sizeof HELLO_MAGIC) == 0 && memcmp(f + 4, rep_ta, 6) == 0;
+}
+
+// Opens an order for `me` with our key. False if the key differs, anything
+// was changed, or it was sealed for another board.
+static inline bool order_open(const uint8_t *f, int len, const uint8_t me[6], aes_block_fn enc, void *key,
+                              order_t *o) {
+    int mlen = len - 53 - CCM_TAG;
+    if (len > ORDER_MAX_LEN || mlen < 7 || f[32] != ORDER_VERSION) return false;
+    uint8_t n[CCM_NONCE], a[HELLO_AAD_LEN], m[6 + ORDER_LINE_MAX];
+    hello_nonce(f, n);
+    hello_aad(f, a);
+    if (!ccm_open(enc, key, n, a, HELLO_AAD_LEN, f + 53, mlen, m)) return false;
+    if (memcmp(m, me, 6) != 0) return false;
+    memcpy(o->hub, f + 40, 6);
+    o->boot = (uint32_t)f[46] | (uint32_t)f[47] << 8 | (uint32_t)f[48] << 16 | (uint32_t)f[49] << 24;
+    o->n = (uint32_t)f[50] | (uint32_t)f[51] << 8 | (uint32_t)f[52] << 16;
+    memcpy(o->line, m + 6, (size_t)(mlen - 6));
+    o->line[mlen - 6] = '\0';
+    for (int i = 0; i < mlen - 6; i++) if ((unsigned char)o->line[i] < 0x20) return false;
+    return true;
+}
+
+// The commands a board takes from the air: which network to watch,
+// recalibrate, sensitivity, sounds and the LED. Never keys, the hub, pokes or
+// a settings reset: those need its USB cable.
+static inline bool order_allowed(const char *line) {
+    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE" };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++) {
+        size_t k = strlen(ok[i]);
+        if (strncmp(line, ok[i], k) == 0 && (ok[i][k - 1] == ',' || line[k] == '\0' || line[k] == ',')) return true;
+    }
+    return false;
 }
 
 // ---------- Finding the hub's channel ----------
@@ -948,6 +1049,18 @@ static inline bool hub_result(hub_link_t *h, bool acked, int max_ch) {
         h->ch = h->ch % max_ch + 1;
     }
     return false;
+}
+
+// The hub's own hello was heard on channel ch (we only hear it there): when
+// our reports are going unanswered, the next one goes straight to it instead
+// of searching channel by channel. Hellos aren't sealed, so this is taken only
+// then: a fake hello can't move reports that the hub is answering.
+static inline void hub_heard(hub_link_t *h, int ch) {
+    if (!h->search && h->miss == 0) return;
+    if (h->ch == ch) return;
+    h->ch = ch;
+    h->miss = 0;
+    h->search = true;                              // its first ACK there saves the channel
 }
 
 // Replays: a recorded hello sent again must not count. The boot counter is

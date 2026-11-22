@@ -237,6 +237,61 @@ def sat_links():
     assert d.surveys[S][FIRST]['rssi'] == -58
 
 
+def follow_network():
+    """A new network for the hub: the other boards are told first through the
+    hub (SATCMD), the hub switches once they confirmed or after the wait; a
+    board's own command goes through the hub when it isn't on USB here."""
+    import tempfile
+    import web
+    from web import Dashboard
+    S1, S2 = mac(0xc4, 0x9e, 0x7e, 1, 1, 1), mac(0x68, 0x9d, 0xd2, 2, 2, 2)
+    sent = []
+    d = Dashboard(State(60), send=sent.append, settings=os.path.join(tempfile.mkdtemp(), 'dashboard.json'))
+    d.feed(f'ME,{FIRST}\n')
+    for S in (S1, S2):
+        d.feed(f'SAT,{S},-40,1,2,20,15,96,-57,2,60,{mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf1)},6\n')
+    sent.clear()
+    ok, msg = d.command(dict(cmd='use', name='Other net'))
+    assert ok and 'telling' in msg, msg
+    assert sorted(sent) == sorted([f'SATCMD,{S1},USE,Other net', f'SATCMD,{S2},USE,Other net']), sent
+    d.tick()
+    assert 'USE,Other net' not in sent, "the hub waits for the boards"
+    d.feed(f'SATCMD,{S1},queued,5\n')
+    d.feed(f'SATCMD,{S1},done,5\n')
+    d.tick()
+    assert 'USE,Other net' not in sent, "one board still to confirm"
+    d.feed(f'SATCMD,{S2},done,6\n')
+    d.tick()
+    assert sent[-1] == 'USE,Other net' and d.follow is None, sent
+    ev = [e['text'] for e in d.events if e['type'] == 'network']
+    assert ev and 'switched too' in ev[-1] and 'not confirmed' not in ev[-1], ev
+    # a board with older firmware never confirms: the hub goes after the wait
+    sent.clear()
+    d.command(dict(cmd='use_default'))
+    d.feed(f'SATCMD,{S1},done,7\n')
+    d.follow['at'] -= web.FOLLOW_WAIT_S + 1
+    d.tick()
+    assert sent[-1] == 'USE_DEFAULT', sent
+    ev = [e['text'] for e in d.events if e['type'] == 'network']
+    assert 'not confirmed' in ev[-1], ev
+    # one board's own command, from the air
+    sent.clear()
+    ok, msg = d.command(dict(cmd='cal', board=S2))
+    assert ok and 'through the hub' in msg and sent == [f'SATCMD,{S2},CAL'], (msg, sent)
+    ok, _ = d.command(dict(cmd='sens', board=S2, x100=150))
+    assert ok and sent[-1] == f'SATCMD,{S2},SENS,150'
+    d.feed(f'SATCMD,{S2},failed,9\n')
+    assert any('older firmware' in e['text'] for e in d.events if e['type'] == 'health')
+    assert not d.command(dict(cmd='cal', board=mac(1, 2, 3, 4, 5, 6)))[0], "a board nobody hears"
+    # alone (no other boards): the hub switches at once
+    sent2 = []
+    d2 = Dashboard(State(60), send=sent2.append)
+    d2.feed(f'ME,{FIRST}\n')
+    sent2.clear()
+    d2.command(dict(cmd='use', name='Net'))
+    assert sent2 == ['USE,Net'], sent2
+
+
 def live_stream_and_demo():
     """The demo house: three boards (one joining late), a person walking, a
     device joining, the simulated light; and the live stream it produces."""
@@ -330,6 +385,7 @@ if __name__ == '__main__':
     comparing()
     house()
     sat_links()
+    follow_network()
     live_stream_and_demo()
     tagged_stream()
     ports()

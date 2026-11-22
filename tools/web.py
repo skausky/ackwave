@@ -78,6 +78,7 @@ ROUTER_NAME_MAX, ROUTER_NAMES_MAX = 24, 32    # nicknames you give routers (by B
 BOARD_NAMES_MAX = 16                           # ...and other ackwave boards (by MAC), same length
 SAT_GONE_S = 10                                # another board not heard this long: gone
 SAT_MAX = 16
+FOLLOW_WAIT_S = 25                             # a network switch waits this long for the boards to confirm
 OTHERS_HOLD_S = 15.0
 EVENTS_MAX = 300                               # events kept for the live stream
 EVENT_TYPES = ('motion', 'automation', 'health', 'calib', 'device', 'network')                           # another board's motion keeps the alert on this long after
@@ -215,6 +216,8 @@ class Dashboard:
         state.devices.router_name = self._router_name   # nicknames on every page
         state.devices.board_name = lambda m: self.cfg['board_names'].get(m)
         self.sats = {}                   # other boards heard through ours: MAC -> latest report
+        self.sat_cmds = {}               # MAC -> the last command sent to it through the hub, and its state
+        self.follow = None               # a network switch waiting for the other boards to confirm
         self.house = House()             # every board's verdict combined (boards.py)
         self.travel = Travel()           # someone walking from board to board (boards.py)
         self.travel_ev = None            # its live-stream entry while the path grows
@@ -594,13 +597,16 @@ class Dashboard:
     BOARD_CMDS = ('cal', 'sound', 'sens', 'led')
 
     def _board_command(self, mac, c):
-        """A command for another board on USB (step B): recalibrate, buzzer,
-        sensitivity, LED. The board saves each one itself."""
+        """A command for another board: recalibrate, buzzer, sensitivity, LED.
+        On USB here: sent straight to it. Otherwise through the hub, from the
+        air (SATCMD; firmware with orders). The board saves each one itself."""
         what = c.get('cmd')
         with self.lock:
+            mac = mac.lower() if isinstance(mac, str) else mac
             ob = self.others.get(mac) if isinstance(mac, str) else None
-            if ob is None or not ob.send:
-                return False, 'that board is not on USB here'
+            air = (ob is None or not ob.send) and isinstance(mac, str) and mac in self.sats and bool(self.send)
+            if not air and (ob is None or not ob.send):
+                return False, 'that board is not on USB here, nor heard through the hub'
             if what not in self.BOARD_CMDS:
                 return False, 'only the hub takes that command'
             name = self.board_label(mac)
@@ -638,6 +644,11 @@ class Dashboard:
                         return False, 'bad LED setting'
                     line = f"LEDSET,{c['mode']},{bright},{c['pattern']},{color.lstrip('#').lower()}"
                     msg = f"{name}: LED {c['mode']}"
+            if air:
+                self.s.outbox.append(f'SATCMD,{mac},{line}')
+                self.sat_cmds[mac] = dict(line=line, state='sent', at=time.time())
+                self._flush()
+                return True, msg + ' (through the hub: it takes it at its next report, a few seconds)'
             try:
                 ob.send(line)
             except Exception as e:
@@ -868,6 +879,8 @@ class Dashboard:
                     except ValueError:
                         pass
                 return
+            if line.startswith('SATCMD,'):
+                self._satcmd_line(line.strip())
             if line.startswith('SAT,'):
                 self._sat(line)
             elif line.startswith(('SATL,', 'SURV,')):
@@ -899,11 +912,58 @@ class Dashboard:
         s = self.s
         return bool(s.det.motion) and s.det.floor > 0 and not s.source_status()
 
+    def _switch_network(self, line, what):
+        """A new network for the hub: the other boards are told first (through
+        the hub, from the air) and the hub switches once they confirmed, or
+        after FOLLOW_WAIT_S (a board with older firmware never confirms)."""
+        now = time.time()
+        boards = [m for m, d in self.sats.items() if now - d['at'] <= SAT_GONE_S and d.get('via') != 'usb']
+        if not boards:
+            self.s.outbox.append(line)
+            return f'{what}: the board restarts (about 15 s)'
+        for m in boards:
+            self.s.outbox.append(f'SATCMD,{m},{line}')
+            self.sat_cmds[m] = dict(line=line, state='sent', at=now)
+        self.follow = dict(line=line, boards=boards, at=now)
+        names = ', '.join(self.board_label(m) for m in boards)
+        return f'{what}: telling {names} first, then the hub restarts (up to {FOLLOW_WAIT_S} s)'
+
+    def _follow_step(self):
+        f = self.follow
+        if not f:
+            return
+        states = {m: self.sat_cmds.get(m, {}).get('state') for m in f['boards']}
+        if all(st in ('done', 'failed', 'error') for st in states.values()) or time.time() - f['at'] > FOLLOW_WAIT_S:
+            self.follow = None
+            self.s.outbox.append(f['line'])
+            ok = [self.board_label(m) for m, st in states.items() if st == 'done']
+            bad = [self.board_label(m) for m, st in states.items() if st != 'done']
+            self._event('network', ('Boards switched too: ' + ', '.join(ok) if ok else 'No board confirmed') +
+                        (f" · not confirmed: {', '.join(bad)} (older firmware? reflash it)" if bad else '') +
+                        ' · the hub switches now', 'hub', important=True)
+
+    def _satcmd_line(self, line):
+        """SATCMD,<board>,queued|done|failed|error,<n or why> from the hub."""
+        p = line.split(',')
+        if len(p) < 3 or not MAC_RE.fullmatch(p[1]):
+            return
+        mac, st = p[1].lower(), p[2]
+        if st not in ('queued', 'done', 'failed', 'error'):
+            return
+        c = self.sat_cmds.setdefault(mac, dict(line='', at=time.time()))
+        c['state'], c['why'] = st, p[3] if len(p) > 3 else ''
+        if st in ('done', 'failed', 'error') and not self.follow:
+            self._event('health', f"{self.board_label(mac)}: " + {
+                'done': f"done ({c.get('line', '').split(',')[0].lower() or 'command'})",
+                'failed': 'never confirmed the command (older firmware? reflash it)',
+                'error': f"command refused by the hub ({c['why']})"}[st], 'sat:' + mac, important=st != 'done')
+
     def tick(self):
         """Once a second from a timer, so the light still goes off when no data
         comes, and the board keeps hearing that a device link sees motion."""
         with self.lock:
             self._sats_gone()
+            self._follow_step()
             self._light_rule()
             self._flush()
 
@@ -1031,11 +1091,18 @@ class Dashboard:
                 add(key, 'sat:' + mac, e['rssi'])
         return out
 
+    def _sat_cmd_view(self, mac):
+        """The last command sent to a board through the hub, for the page."""
+        c = self.sat_cmds.get(mac)
+        if not c:
+            return None
+        return dict(what=c.get('line', '').split(',')[0].lower(), state=c.get('state'), age=round(time.time() - c['at']))
+
     def _house_slow(self):
         motion, by = self.house_now
         off = set(self.cfg['house_off'])
         sources = [dict(key='board', name='Hub', use='board' not in off)] + \
-            [dict(key=m, name=self.board_label(m), use=m not in off) for m in sorted(self.sats)]
+            [dict(key=m, name=self.board_label(m), use=m not in off, cmd=self._sat_cmd_view(m)) for m in sorted(self.sats)]
         return dict(motion=motion, by=['Hub' if b == 'board' else self.board_label(b) for b in by],
                     sources=sources, rule=self.cfg['house_rule'], rules={k: HOUSE_TEXT[k] for k in HOUSE_RULES},
                     boards=1 + sum(1 for d in self.sats.values() if time.time() - d['at'] <= SAT_GONE_S))
@@ -1099,8 +1166,7 @@ class Dashboard:
                     return False, 'bad network name'
                 if not self.send:
                     return False, 'choosing a network needs a board'
-                self.s.outbox.append(f'USE,{name}')
-                msg = f'Switching to "{name}": the board restarts (about 15 s)'
+                msg = self._switch_network(f'USE,{name}', f'Switching to "{name}"')
             elif what == 'aps':
                 macs = c.get('macs')
                 if not isinstance(macs, list) or not 1 <= len(macs) <= MAX_APS:
@@ -1112,19 +1178,16 @@ class Dashboard:
                     return False, 'bad access point list'
                 if not self.send:
                     return False, 'choosing access points needs a board'
-                self.s.outbox.append('APS,' + ','.join(macs))
-                msg = (f"Watching {len(macs)} chosen access point{'s' if len(macs) > 1 else ''}: "
-                       'the board restarts (about 15 s)')
+                msg = self._switch_network('APS,' + ','.join(macs),
+                                    f"Watching {len(macs)} chosen access point{'s' if len(macs) > 1 else ''}")
             elif what == 'aps_clear':
                 if not self.send:
                     return False, 'choosing access points needs a board'
-                self.s.outbox.append('APS,clear')
-                msg = 'Back to every access point of the network: the board restarts (about 15 s)'
+                msg = self._switch_network('APS,clear', 'Back to every access point of the network')
             elif what == 'use_default':
                 if not self.send:
                     return False, 'choosing a network needs a board'
-                self.s.outbox.append('USE_DEFAULT')
-                msg = 'Back to the default network: the board restarts (about 15 s)'
+                msg = self._switch_network('USE_DEFAULT', 'Back to the default network')
             elif what == 'house_use':                    # a board counts for the house, or not
                 key, use = c.get('key'), c.get('use')
                 if not isinstance(key, str) or not (key == 'board' or MAC_RE.fullmatch(key)) \

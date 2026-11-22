@@ -1113,7 +1113,10 @@ int main(void) {
         if (len >= 32 && (it & 8)) memcpy(buf + 24, HELLO_MAGIC, sizeof HELLO_MAGIC);
         { hello_t fh; sat_report_t fr;
           rep_extra_t fx;
-          if (parse_hello(buf, len, &fh) && fh.sealed) hello_open(buf, len, aes128_block, &fz_key, &fr, &fx); }
+          if (parse_hello(buf, len, &fh) && fh.sealed) hello_open(buf, len, aes128_block, &fz_key, &fr, &fx);
+          order_t fo;                                         // ...and as an order
+          if (len >= 33 && (it & 16)) buf[32] = ORDER_VERSION;
+          if (len >= 10 && is_order_to(buf, len, buf + 4)) order_open(buf, len, AP1, aes128_block, &fz_key, &fo); }
         free(buf);
         fuzzed++;
     }
@@ -1234,6 +1237,58 @@ int main(void) {
             ccm_seal(aes128_block, &ak, nn, aa, HELLO_AAD_LEN, m, REPORT_LEN + 2, fr + 53);
             CHECK(hello_open(fr, 53 + REPORT_LEN + 2 + CCM_TAG, aes128_block, &ak, &got, &y) && y.n_links == 0);
             CHECK(rep_k20(1.0f, 1.0f) == 20 && rep_k20(20.0f, 1.0f) == 255 && rep_k20(1.0f, 0.0f) == 0);
+        }
+        {   // the hub's orders: one command line, sealed for one board, to its reports' sender
+            static uint8_t of[ORDER_MAX_LEN];
+            order_t o;
+            int n = build_order(of, HUBM, B1, 6, 7, 0x010203, "USE,Other net", aes128_block, &ak);
+            CHECK(n == 53 + 6 + 13 + CCM_TAG);
+            uint8_t rta2[6]; poke_ta(B1, REPORT_NODE, rta2);
+            CHECK(is_order_to(of, n, rta2) && memcmp(of + 10, HUBM, 6) == 0);
+            CHECK(!parse_hello(of, n, &hl));                 // never taken for a hello or a report
+            CHECK(order_open(of, n, B1, aes128_block, &ak, &o) && strcmp(o.line, "USE,Other net") == 0 &&
+                  o.boot == 7 && o.n == 0x010203 && memcmp(o.hub, HUBM, 6) == 0);
+            static const uint8_t OTHER2[16] = {8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8};
+            aes128_t ck; aes128_init(&ck, OTHER2);
+            CHECK(!order_open(of, n, B1, aes128_block, &ck, &o));      // another key
+            CHECK(!order_open(of, n, PLUG, aes128_block, &ak, &o));    // sealed for another board
+            uint8_t rta3[6]; poke_ta(PLUG, REPORT_NODE, rta3);
+            CHECK(!is_order_to(of, n, rta3));
+            const int at[] = {33, 40, 46, 50, 52, 53, 60, n - 1};      // channel, hub, boot, number, body, tag
+            for (unsigned i = 0; i < sizeof at / sizeof at[0]; i++) {
+                of[at[i]] ^= 0x04;
+                CHECK(!order_open(of, n, B1, aes128_block, &ak, &o));
+                of[at[i]] ^= 0x04;
+            }
+            of[32] ^= 0x04; CHECK(!order_open(of, n, B1, aes128_block, &ak, &o) && !is_order_to(of, n, rta2)); of[32] ^= 0x04;
+            CHECK(!order_open(of, n - 1, B1, aes128_block, &ak, &o));  // cut
+            bool leak = false;                                // the command isn't readable on air
+            for (int i = 53; i + 3 <= n; i++) leak |= memcmp(of + i, "USE", 3) == 0;
+            CHECK(!leak);
+            char longl[ORDER_LINE_MAX + 2];
+            memset(longl, 'A', sizeof longl); longl[sizeof longl - 1] = '\0';
+            CHECK(build_order(of, HUBM, B1, 6, 7, 1, longl, aes128_block, &ak) == 0);
+            longl[ORDER_LINE_MAX] = '\0';
+            CHECK(build_order(of, HUBM, B1, 6, 7, 1, longl, aes128_block, &ak) == ORDER_MAX_LEN);
+            CHECK(order_open(of, ORDER_MAX_LEN, B1, aes128_block, &ak, &o) && strlen(o.line) == ORDER_LINE_MAX);
+            CHECK(build_order(of, HUBM, B1, 6, 7, 1, "CAL\nKEY,x", aes128_block, &ak) == 0);
+            CHECK(build_order(of, HUBM, B1, 6, 7, 1, "", aes128_block, &ak) == 0);
+            // what a board takes from the air
+            CHECK(order_allowed("USE,Net") && order_allowed("USE_DEFAULT") && order_allowed("APS,clear") &&
+                  order_allowed("CAL") && order_allowed("SENS,150") && order_allowed("SENS") &&
+                  order_allowed("SOUND,beep,80,2700") && order_allowed("LEDSET,default") && order_allowed("BEEP,200"));
+            CHECK(!order_allowed("KEY,00") && !order_allowed("PEERKEY,clear") && !order_allowed("HUB,clear") &&
+                  !order_allowed("POKE,aa") && !order_allowed("CALX") && !order_allowed("SCAN") &&
+                  !order_allowed("USEX") && !order_allowed("") && !order_allowed("SENSE"));
+            // its reports say which order it did last; the hub stops then
+            rep_extra_t x = {0}, y;
+            x.has_order = true; x.ord_boot = 7; x.ord_n = 0x010203;
+            int rn = build_report(h, B1, HUBM, AP1, 6, &rp, &x, 44, aes128_block, &ak);
+            CHECK(rn == 53 + REPORT_LEN + 2 + 7 + CCM_TAG);
+            CHECK(hello_open(h, rn, aes128_block, &ak, &got, &y) && y.has_order && y.ord_boot == 7 && y.ord_n == 0x010203);
+            x.has_order = false;
+            rn = build_report(h, B1, HUBM, AP1, 6, &rp, &x, 45, aes128_block, &ak);
+            CHECK(hello_open(h, rn, aes128_block, &ak, &got, &y) && !y.has_order);
         }
         // the hello: broadcast, from the real MAC, nothing about motion
         CHECK(build_hello(h, B1, AP1, 6) == HELLO_V1_LEN);

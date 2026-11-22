@@ -47,10 +47,16 @@ def main():
     # Commands: validated, mapped to board commands
     assert dash.command({'cmd': 'cal'})[0] and sent[-1] == 'CAL'
     assert dash.command({'cmd': 'scan'})[0] and sent[-1] == 'SCAN'
-    assert dash.command({'cmd': 'use', 'name': 'MyNetwork'})[0] and sent[-1] == 'USE,MyNetwork'
+    def switched(line):                          # with other boards heard, they're told first
+        if dash.follow:
+            assert all(c == f'SATCMD,{m},{line}' for c, m in zip(sent[-len(dash.follow['boards']):], dash.follow['boards']))
+            dash.follow['at'] -= 3600                # none confirms (the test has no hub firmware)
+            dash.tick()
+        return sent[-1] == line
+    assert dash.command({'cmd': 'use', 'name': 'MyNetwork'})[0] and switched('USE,MyNetwork')
     assert not dash.command({'cmd': 'use', 'name': 'x' * 33})[0], "name too long"
     assert not dash.command({'cmd': 'use', 'name': 'a\nCAL'})[0], "no command injection"
-    assert dash.command({'cmd': 'use_default'})[0] and sent[-1] == 'USE_DEFAULT'
+    assert dash.command({'cmd': 'use_default'})[0] and switched('USE_DEFAULT')
     # The board's LED: validated; the board's report is what the page shows
     assert dash.command({'cmd': 'led', 'mode': 'motion', 'bright': 200, 'pattern': 'pulse', 'color': '#00FF80'})[0]
     assert sent[-1] == 'LEDSET,motion,200,pulse,00ff80'
@@ -75,12 +81,12 @@ def main():
     # Access points chosen one by one (APS): validated, any network names
     mac = lambda last: ':'.join(f'{x:02x}' for x in (0x50, 2, 0x91, 0x1a, 0x2b, last))
     assert dash.command({'cmd': 'aps', 'macs': [mac(1), mac(2).upper()]})[0]
-    assert sent[-1] == f'APS,{mac(1)},{mac(2)}'
+    assert switched(f'APS,{mac(1)},{mac(2)}')
     for bad in ([], [mac(i) for i in range(9)], [mac(1), mac(1)], ['51' + mac(1)[2:]],
                 [mac(1) + '\nCAL'], ['nope'], mac(1), [1]):
         assert not dash.command({'cmd': 'aps', 'macs': bad})[0], bad
     assert sent[-1] == f'APS,{mac(1)},{mac(2)}', "nothing sent for a bad list"
-    assert dash.command({'cmd': 'aps_clear'})[0] and sent[-1] == 'APS,clear'
+    assert dash.command({'cmd': 'aps_clear'})[0] and switched('APS,clear')
     dash.feed(f'APS,2,{mac(1)},{mac(2)}\n')
     assert dash.slow(30)['network']['ap_list'] == [mac(1), mac(2)]
     dash.feed('APS,0\n')
