@@ -1273,6 +1273,12 @@ class Dashboard:
     def _satcmd_line(self, line):
         """SATCMD,<board>,queued|done|failed|error,<n or why> from the hub."""
         p = line.split(',')
+        if len(p) >= 3 and p[1] == 'error':          # the hub couldn't read the command at all
+            print(f"hub: board command refused ({p[2]})", flush=True)
+            for m, c in self.sat_cmds.items():
+                if c.get('state') == 'sent':
+                    c['state'], c['why'] = 'error', p[2]
+            return
         if len(p) < 3 or not MAC_RE.fullmatch(p[1]):
             return
         mac, st = p[1].lower(), p[2]
