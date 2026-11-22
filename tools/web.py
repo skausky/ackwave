@@ -247,6 +247,7 @@ class Dashboard:
         self.zone_in = {}                # zone id -> people inside now
         self.zone_said = {}              # zone id -> when it last notified
         self.today = ('', {})            # (local date, {(ix, iy): steps someone was tracked there}) at 0.5 m
+        self.snaps = deque(maxlen=300)   # moments of movement: every link's level (self-calibration's data)
         self.house = House()             # every board's verdict combined (boards.py)
         self.travel = Travel()           # someone walking from board to board (boards.py)
         self.travel_ev = None            # its live-stream entry while the path grows
@@ -1107,6 +1108,15 @@ class Dashboard:
                                        for a in (0, math.pi / 2, math.pi, -math.pi / 2)]
         q = lambda x: round(min(3.0, max(0.0, x)) * 20) / 20
         off = set(m.get('track_off', []))
+        now_l = time.time()
+        # a board's learned model as a second opinion on its links: 'empty' makes a
+        # twitch count less, 'moving' lets it count fully (x0.35 .. x1)
+        def trust(key):
+            v = self.mlb.get(key)
+            if not v or now_l - v['at'] > 10:
+                return 1.0
+            pm = v['p'][2] / 100.0
+            return 1.0 if v['motion'] else max(0.35, min(1.0, 0.35 + 1.3 * pm))
         out = []
         act = self._activity()
         for r in self._radio():
@@ -1123,7 +1133,8 @@ class Dashboard:
                 level = None
             a, n = ends_of('hub'), ends_of(node)
             if n and 'hub' not in off and node not in off:
-                out.append(dict(key=r['key'], ends=[(x, y) for x in a for y in n], end_keys=('hub', node), level=level))
+                lvl = None if level is None else q(level * trust('hub'))
+                out.append(dict(key=r['key'], ends=[(x, y) for x in a for y in n], end_keys=('hub', node), level=lvl))
         for b in self._map_boards():
             if b['state'] not in ('motion', 'still'):
                 continue
@@ -1135,7 +1146,7 @@ class Dashboard:
                 if not n or l['key'] == b['key'] or b['key'] in off or l['key'] in off:
                     continue
                 out.append(dict(key=f"{b['key']}>{l['key']}", ends=[(x, y) for x in a for y in n],
-                                end_keys=(b['key'], l['key']), level=q(l['level'])))
+                                end_keys=(b['key'], l['key']), level=q(l['level'] * trust(b['key']))))
         return out, m
 
     def _track_step(self):
@@ -1148,6 +1159,9 @@ class Dashboard:
         now = time.time()
         if not self.tracker.step(links, now):
             return
+        lv = {l['key']: l['level'] for l in links if l['level'] is not None}
+        if len(lv) >= 3 and max(lv.values()) >= 0.8 and (not self.snaps or now - self.snaps[-1]['t'] >= 3):
+            self.snaps.append(dict(t=round(now, 1), links=lv))   # someone moving: a moment to fit routers on
         day = time.strftime('%Y-%m-%d')
         if self.today[0] != day:
             self.today = (day, {})
@@ -1199,6 +1213,23 @@ class Dashboard:
                 pass
         return dict(walks=out[-500:])
 
+    def _send_model(self, model):
+        """Queue a model's MLW steps for every board that sends features; returns their names."""
+        cmds, sent = mltrain.mlw_commands(model), []
+        for key in [k for k in self.feat if time.time() - self.feat[k][-1][0] < 30]:
+            if key == 'hub':
+                if self.send:
+                    self.mlw_q['hub'] = cmds[1:]
+                    self.s.outbox.append(cmds[0])
+                    sent.append('the hub')
+            elif key[4:] in self.sats and self.send:
+                self.mlw_q[key] = cmds[1:]
+                self.s.outbox.append(f'SATCMD,{key[4:]},{cmds[0]}')
+                self.sat_cmds[key[4:]] = dict(line=cmds[0], state='sent', at=time.time())
+                sent.append(self.board_label(key[4:]))
+        self.model_sent = dict(at=time.time(), to=sent, labels=model.get('labels'))
+        return sent
+
     def _teach_view(self):
         now = time.time()
         rows = mltrain.read_rows(os.path.join(self.sessions_dir, 'ml_labels.jsonl')) if self.sessions_dir else []
@@ -1209,7 +1240,9 @@ class Dashboard:
         rec = dict(board=tc['board'], label=tc['label'], left=round(tc['until'] - now, 1), n=tc.get('n', 0)) \
             if tc and now <= tc['until'] else None
         m = getattr(self, 'teach_model', None)
+        ms = getattr(self, 'model_sent', None)
         return dict(boards=boards, counts=mltrain.counts(rows), rec=rec, sending=sorted(self.mlw_q),
+                    sent=dict(at=ms['at'], to=ms['to'], labels=ms['labels'], done=not self.mlw_q) if ms else None,
                     model=dict(score=m['score'], labels=m['labels'], n=m['n']) if m else None)
 
     def _where_words(self):
@@ -1239,6 +1272,7 @@ class Dashboard:
         return dict(people=[p.view() for p in self.tracker.people if p.est], near=nk,
                     zones={k: v for k, v in self.zone_in.items()}, breathing=still,
                     model_err=round(self.tracker.model_err, 2),
+                    learned={k: dict(motion=v['motion'], p=v['p']) for k, v in self.mlb.items() if now - v['at'] <= 10},
                     today=dict(cs=0.5, cells=[[c[0], c[1], n] for c, n in cells]))
 
     def _switch_network(self, line, what):
@@ -1710,22 +1744,23 @@ class Dashboard:
                         json.dump(got, fh)
                 except OSError:
                     pass
-                cmds = mltrain.mlw_commands(got)
-                sent = []
-                for key in [k for k in self.feat if time.time() - self.feat[k][-1][0] < 30]:
-                    if key == 'hub':
-                        if self.send:
-                            self.mlw_q['hub'] = cmds[1:]
-                            self.s.outbox.append(cmds[0])
-                            sent.append('the hub')
-                    elif key[4:] in self.sats and self.send:
-                        self.mlw_q[key] = cmds[1:]
-                        self.s.outbox.append(f'SATCMD,{key[4:]},{cmds[0]}')
-                        self.sat_cmds[key[4:]] = dict(line=cmds[0], state='sent', at=time.time())
-                        sent.append(self.board_label(key[4:]))
+                sent = self._send_model(got)
                 sc = ', '.join(f"{k} {int(v * 100)}%" for k, v in got['score'].items())
                 msg = (f"Trained on {got['n']} s ({sc} right on held-out recordings); "
-                       + (f"sending to {', '.join(sent)} ({len(cmds)} steps each)" if sent else 'no board to send it to right now'))
+                       + (f"sending to {', '.join(sent)} ({len(mltrain.mlw_commands(got))} steps each)" if sent else 'no board to send it to right now'))
+            elif what == 'teach_send':                   # the saved model (sessions/ml_house.json), to every board again
+                try:
+                    with open(os.path.join(self.sessions_dir or '', 'ml_house.json')) as fh:
+                        got = json.load(fh)
+                    assert isinstance(got.get('params'), list) and got.get('no') in (1, 3) and got.get('nh') == 0
+                    assert len(got['params']) == mltrain.mlw_param_count(got) and all(
+                        isinstance(v, (int, float)) and math.isfinite(v) for v in got['params'])
+                except (OSError, ValueError, AssertionError, TypeError):
+                    return False, 'no saved model to send'
+                self.teach_model = got
+                sent = self._send_model(got)
+                msg = (f"Sending the saved model ({', '.join(got.get('labels', []))}) to {', '.join(sent)}"
+                       if sent else 'no board to send it to right now')
             elif what == 'teach_clear':
                 if self.sessions_dir:
                     try:
@@ -2609,6 +2644,8 @@ def make_handler(dash, allowed_hosts):
                     return self._reply(200, dash.map_load())
                 if u.path == '/api/walks':
                     return self._reply(200, dash.walks())
+                if u.path == '/api/snaps':
+                    return self._reply(200, dict(snaps=list(dash.snaps)))
                 if u.path == '/api/plan':
                     got = dash.plan_load(parse_qs(u.query).get('id', [''])[0])
                     if not got:

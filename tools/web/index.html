@@ -274,6 +274,7 @@
             <button type="button" id="map-suggest" title="Try every spot for a board and show where it helps most">Suggest a spot</button>
             <button type="button" id="map-walk" title="Walk around and tap where you really are: shows the real error">Walk check</button>
             <button type="button" id="map-walkfit" title="Move the routers to where your walk-check taps say they fit best">Fit routers to my walk</button>
+            <button type="button" id="map-selffit" title="No walking needed: moves automatic and rough routers to where everyday movement fits best">Fit routers automatically</button>
             <button type="button" id="map-reset" class="ghost">Reset</button>
           </div>
         </div>
@@ -373,7 +374,7 @@
         <button type="button" data-l="moving">Record "moving" (30 s)</button>
       </div>
       <div class="table-wrap short"><table><thead><tr><th>Board</th><th>Empty</th><th>Still</th><th>Moving</th></tr></thead><tbody id="teach-counts"></tbody></table></div>
-      <div class="dlg-tools gap"><button type="button" class="primary" id="teach-train">Train and send to the boards</button><button type="button" class="ghost" id="teach-clear">Start over</button></div>
+      <div class="dlg-tools gap"><button type="button" class="primary" id="teach-train">Train and send to the boards</button><button type="button" id="teach-send">Send the saved model</button><button type="button" class="ghost" id="teach-clear">Start over</button></div>
       <p class="muted small" id="teach-model"></p>
       <p class="muted small">Each board already runs a small learned model (like ESPectre's, trained on this house's earlier clips) and calibrates itself to its own quiet level, so nothing has to be recorded. Recording makes it yours: pick a board, then record each case right where that board sees it ("empty": leave the room after pressing, it waits for nobody). Half a minute of each, a few times on different days, is plenty. <b>Train</b> fits a new model on everything recorded (scored on recordings it didn't learn from) and sends it to every board over the air; the boards keep it. Needs the firmware from 2026-11-21 or later.</p>
     </section>

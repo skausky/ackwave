@@ -392,11 +392,13 @@ function renderTeach() {
   $('#teach-counts').replaceChildren(...(rows.length ? rows : [['', null]]).map(([k, c]) => el('tr', {},
     ...(c ? [el('td', { textContent: nm(k) }), el('td', { textContent: `${c.empty} s` }), el('td', { textContent: `${c.still} s` }), el('td', { textContent: `${c.moving} s` })]
       : [el('td', { colSpan: 4, className: 'muted', textContent: 'nothing recorded yet' })]))));
-  $('#teach-model').textContent = t.model ? `Last trained on ${t.model.n} s: ` + Object.entries(t.model.score).map(([k, v]) => `${k} ${Math.round(v * 100)}% right`).join(', ') + ' (on recordings it did not learn from).' : '';
+  const sentTxt = t.sent ? ` Model (${(t.sent.labels || []).join(' / ')}) ${t.sent.done ? 'on' : 'being sent to'} ${t.sent.to.join(', ') || 'no board'} since ${clock(t.sent.at, true)}.` : '';
+  $('#teach-model').textContent = (t.model ? `Last trained on ${t.model.n} s: ` + Object.entries(t.model.score).map(([k, v]) => `${k} ${Math.round(v * 100)}% right`).join(', ') + ' (on recordings it did not learn from).' : '') + sentTxt;
 }
 for (const e of $('#teach-card').querySelectorAll('[data-l]'))
   e.onclick = () => teachBoard && cmd({ cmd: 'teach', which: teachBoard, label: e.dataset.l, secs: 30 });
 $('#teach-train').onclick = () => cmd({ cmd: 'teach_train' });
+$('#teach-send').onclick = () => cmd({ cmd: 'teach_send' });
 $('#teach-clear').onclick = () => { if (confirm('Put every recording aside and start over? (They are kept as an .old file.)')) cmd({ cmd: 'teach_clear' }); };
 
 // ---------------------------------------------------------------- phone notifications

@@ -122,6 +122,11 @@ def train(rows):
                 n=len(rows), boards=boards)
 
 
+def mlw_param_count(model):
+    nh, no = int(model['nh']), int(model['no'])
+    return 2 * F + 2 + (F * nh + nh + nh * no + no if nh else F * no + no)
+
+
 def mlw_commands(model, per_line=8):
     """The MLW lines that load a model onto a board."""
     p = model['params']

@@ -1190,8 +1190,25 @@ window.AckMap = (() => {
     }
   }
   // Where people were today: the Pi counts the tracking's spots on a 0.5 m grid
+  const todayCv = document.createElement('canvas');
+  let todayKey = '';
   function drawToday() {
     if (!showToday || !todayMap || !todayMap.cells || !todayMap.cells.length) return;
+    // drawn once into its own canvas; again only when the data or the view changes
+    const key = [todayMap.cells.length, todayMap.cells[0] && todayMap.cells[0][2], M.view.x.toFixed(2), M.view.y.toFixed(2), M.view.s.toFixed(2), W, H].join('|');
+    if (key !== todayKey) {
+      todayKey = key;
+      todayCv.width = Math.max(1, Math.round(W * dpr)); todayCv.height = Math.max(1, Math.round(H * dpr));
+      const c2 = todayCv.getContext('2d');
+      c2.setTransform(dpr, 0, 0, dpr, 0, 0);
+      paintToday(c2);
+    }
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(todayCv, 0, 0);
+    ctx.restore();
+  }
+  function paintToday(ctx) {
     const cs = todayMap.cs, mx = Math.max(...todayMap.cells.map((c) => c[2])), r = Math.max(6, cs * 1.6 * M.view.s);
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';         // soft spots that add up where people spend time
@@ -1280,7 +1297,7 @@ window.AckMap = (() => {
       p.show = p.show ? { x: p.show.x + (p.est.x - p.show.x) * k, y: p.show.y + (p.est.y - p.show.y) * k } : { x: p.est.x, y: p.est.y };
       p.showAt = t;
       const e = { ...p.est, x: p.show.x, y: p.show.y };
-      dirty = true;
+      if (Math.hypot(p.est.x - p.show.x, p.est.y - p.show.y) > 0.02) dirty = true;
       const col = p.color.startsWith('--') ? css(p.color) : p.color;
       const fade = Math.max(0, 1 - Math.max(0, t - p.seen - 800) / (KEEP_MS - 800));
       ctx.save();
@@ -1393,7 +1410,8 @@ window.AckMap = (() => {
     // reduced motion: then only on a change. Lowest quality: every other frame
     const live = !reduced.matches || fx.waves.length;
     fx.skip = fx.quality === 0 && !fx.skip;
-    if ((dirty || live) && !fx.skip) { draw(t); dirty = false; }
+    // about 30 frames a second is plenty for glows, trails and gliding (half the work of 60)
+    if ((dirty || live) && !fx.skip && t - (fx.drawnAt || 0) >= 32) { fx.drawnAt = t; draw(t); dirty = false; }
     raf = requestAnimationFrame(loop);
   }
 
@@ -2013,15 +2031,33 @@ window.AckMap = (() => {
   // you really were wins. Links that don't touch the router being moved are
   // computed once per tap; each tap is searched within 8 m of where you were
   // (farther counts as 6 m off anyway).
-  async function fitWalk() {
+  // selfFit: no taps. Moments of movement (the Pi keeps them); a router in the
+  // wrong spot makes them fit badly (no one place explains every link), so the
+  // spot with the smallest total misfit wins. Only automatic and rough routers move.
+  async function fitWalk(selfFit) {
     let recs = [];
-    try { const r = await fetch('api/walks', { headers: { 'X-Ackwave': '1' } }); recs = (await r.json()).walks || []; } catch (e) { /* none */ }
-    recs = recs.filter((q) => q.links && Object.keys(q.links).length >= 2);
-    if (recs.length < 4) { accNote(`Fit needs at least 4 walk-check taps from today (have ${recs.length}): use Walk check first.`); return; }
+    try {
+      const r = await fetch(selfFit ? 'api/snaps' : 'api/walks', { headers: { 'X-Ackwave': '1' } });
+      const j = await r.json();
+      recs = (selfFit ? j.snaps : j.walks) || [];
+    } catch (e) { /* none */ }
+    recs = recs.filter((q) => q.links && Object.keys(q.links).length >= 2).slice(-60);
+    if (recs.length < (selfFit ? 15 : 4)) {
+      accNote(selfFit ? `Not enough movement seen yet to fit on (${recs.length} moments; 15 needed): walk around a bit and try again.`
+        : `Fit needs at least 4 walk-check taps from today (have ${recs.length}): use Walk check first.`);
+      return;
+    }
     const L = links(), lam = lambda(), CS = 0.75, RAD = 8, G0 = 1.2, WG = 1 / 1.5 ** 2;
+    let area = null;
+    if (selfFit) {                                   // the house: the boards and 3 m around
+      const pts = [[0, 0], ...others.map((b) => M.nodes.get(b.key)).filter(Boolean).map((n) => [n.x, n.y])];
+      area = { x0: Math.min(...pts.map((p) => p[0])) - 3, x1: Math.max(...pts.map((p) => p[0])) + 3,
+        y0: Math.min(...pts.map((p) => p[1])) - 3, y1: Math.max(...pts.map((p) => p[1])) + 3 };
+    }
     const grids = recs.map((q) => {
       const px = [], py = [];
-      for (let dy = -RAD; dy <= RAD; dy += CS) for (let dx = -RAD; dx <= RAD; dx += CS) { px.push(q.x + dx); py.push(q.y + dy); }
+      if (area) for (let y = area.y0; y <= area.y1; y += 1) for (let x = area.x0; x <= area.x1; x += 1) { px.push(x); py.push(y); }
+      else for (let dy = -RAD; dy <= RAD; dy += CS) for (let dx = -RAD; dx <= RAD; dx += CS) { px.push(q.x + dx); py.push(q.y + dy); }
       return { px, py };
     });
     const cache = new Map();
@@ -2054,18 +2090,20 @@ window.AckMap = (() => {
           for (let k = 0; k < S.length; k++) R += w[k] * (act[k] - g * S[k][c]) ** 2;
           if (R < bR) { bR = R; best = c; }
         }
-        total += Math.min(6, Math.hypot(px[best] - q.x, py[best] - q.y));
+        total += selfFit ? bR / S.length : Math.min(6, Math.hypot(px[best] - q.x, py[best] - q.y));
       });
       return total / recs.length;
     };
-    const routers = [...new Set(L.map(({ n }) => n).filter((n) => n !== HUB && (n.key || '').startsWith('r:')))];
+    const routers = [...new Set(L.map(({ n }) => n).filter((n) => n !== HUB && (n.key || '').startsWith('r:') && (!selfFit || !n.placed)))];
+    if (selfFit && !routers.length) { accNote('Every router is set to "exactly here": set one to automatic or roughly (its Where menu) to let it be fitted.'); return; }
     if (!routers.length) { accNote('No routers on the map to fit.'); return; }
     const before = err(null), saved = routers.map((n) => [n, n.x, n.y, n.placed]);
     for (let pass = 0; pass < 2; pass++)
       for (const [ri, n] of routers.entries()) {
         accNote(`Fitting router ${ri + 1} of ${routers.length} to ${recs.length} taps (pass ${pass + 1} of 2)…`);
         await new Promise((ok) => setTimeout(ok, 0));
-        const c = n.hint || { x: n.x, y: n.y, r: 12 }, step = Math.max(0.75, c.r / 8);
+        const c0 = n.hint || { x: n.x, y: n.y, r: selfFit ? 8 : 12 }, c = { ...c0, r: selfFit ? Math.min(c0.r, 8) : c0.r };
+        const step = Math.max(0.75, c.r / 8);
         let best = [n.x, n.y, Infinity];
         n.placed = true;
         for (let dy = -c.r; dy <= c.r; dy += step)
@@ -2079,9 +2117,16 @@ window.AckMap = (() => {
         for (const k of [...cache.keys()]) cache.delete(k);   // its links changed for the next router
       }
     const after = err(null);
-    if (after > before - 0.2) {                       // not worth it: back as they were
+    const worth = selfFit ? after < 0.9 * before : after <= before - 0.2;
+    if (!worth) {                                     // not worth it: back as they were
       for (const [n, x, y, pl] of saved) { n.x = x; n.y = y; n.placed = pl; }
-      accNote(`Your routers already fit the walk well (typical error about ${fmtLen(before)}): nothing moved.`);
+      accNote(selfFit ? `Your routers already fit everyday movement well (checked ${recs.length} moments): nothing moved.`
+        : `Your routers already fit the walk well (typical error about ${fmtLen(before)}): nothing moved.`);
+    } else if (selfFit) {                             // moved inside their circles; they stay rough
+      for (const n of routers) { n.auto = null; n.placed = false; n.hint = { x: n.x, y: n.y, r: n.hint ? n.hint.r : DRAG_HINT }; }
+      accNote(`Routers fitted to ${recs.length} moments of everyday movement: they fit ${Math.round((1 - after / before) * 100)}% better. ` +
+        'Each keeps a rough circle where it now sits; drag one if it looks wrong.');
+      scheduleSave();
     } else {
       for (const n of routers) { n.auto = null; n.hint = null; }
       accNote(`Routers fitted to your walk: typical error ${fmtLen(before)} → ${fmtLen(after)} on ${recs.length} taps. ` +
@@ -2233,7 +2278,8 @@ window.AckMap = (() => {
     for (const b of $('#map-unit').children) b.onclick = () => { M.unit = b.dataset.u; syncControls(); dirty = true; renderList(); scheduleSave(); };
     $('#map-fit').onclick = () => { fit(); viewByUser = true; scheduleSave(); };
     $('#map-walk').onclick = walkToggle;
-    $('#map-walkfit').onclick = async () => { $('#map-walkfit').disabled = true; try { await fitWalk(); } finally { $('#map-walkfit').disabled = false; } };
+    $('#map-walkfit').onclick = async () => { $('#map-walkfit').disabled = true; try { await fitWalk(false); } finally { $('#map-walkfit').disabled = false; } };
+    $('#map-selffit').onclick = async () => { $('#map-selffit').disabled = true; try { await fitWalk(true); } finally { $('#map-selffit').disabled = false; } };
     $('#map-acc').onclick = () => { toggleAcc(); $('#map-acc').classList.toggle('on', !!acc); };
     $('#map-suggest').onclick = async () => { $('#map-suggest').disabled = true; try { await suggest(); } finally { $('#map-suggest').disabled = false; $('#map-acc').classList.toggle('on', !!acc); } };
     $('#map-file').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) addPicture(f); };
