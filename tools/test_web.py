@@ -688,6 +688,8 @@ def pages_and_debug(tmp):
     for r in sl['radio']:
         assert {'key', 'label', 'ap', 'rssi', 'rate'} <= set(r) and r['rate'] > 0, r
     assert sl['radio'][0]['key'] == 'ap:0' and sl['radio'][0]['label'] == 'Router 1'
+    r0 = sl['radio'][0]                              # its map dot: the router's address, not the slot
+    assert r0['node'] == 'r:' + d.s.nodes[0].lower() and r0['node'] in sl['hearings'], (r0, sl['hearings'])
     assert [(g['node'], g['state']) for g in sl['gates']] == [(0, 'ok'), (1, 'far')]
     routers_named(d, tmp)
     other_boards(tmp)

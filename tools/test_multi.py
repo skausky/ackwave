@@ -227,11 +227,13 @@ def sat_links():
     sl = d.slow(30)
     mb = sl['map_boards'][0]
     hr = sl['hearings']                             # who hears whom: the Map places from these
-    assert ['sat:' + S, -60] in hr['ap:1'] and ['sat:' + S, -58] in hr['hub'], hr
+    RK = 'r:' + R.lower()                           # a router is keyed by its address
+    assert ['sat:' + S, -60] in hr[RK] and ['sat:' + S, -58] in hr['hub'], hr
     assert ['hub', -40] in hr['sat:' + S], hr
     keys = {l['key']: l for l in mb['links']}
-    assert set(keys) == {'ap:1', 'hub', D} and keys['ap:1']['router'] and not keys[D]['router'], keys
-    assert mb['router'] == 'ap:1', "a router the hub watches shares its dot"
+    assert set(keys) == {RK, 'hub', D} and keys[RK]['router'] and not keys[D]['router'], keys
+    assert keys[RK]['name'] == 'Router 2', "a router the hub watches keeps the hub's name for it"
+    assert mb['router'] == RK, "a router the hub watches shares its dot"
     assert d.surveys[S][FIRST]['rssi'] == -58
 
 

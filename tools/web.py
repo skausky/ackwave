@@ -681,11 +681,8 @@ class Dashboard:
             return 'hub', 'Hub'
         if mac in self.sats or mac in self.cfg['paired']:
             return 'sat:' + mac, self.board_label(mac)
-        if flags & 2:                                    # a router
-            for i, m in self.s.nodes.items():
-                if 0 <= i < MAX_APS and m and m.lower() == mac:
-                    return f'ap:{i}', self._router_name(i)
-            return 'r:' + mac, self.cfg['router_names'].get(mac) or f'Router {mac[-5:]}'
+        if flags & 2:                                    # a router: on the map by its address
+            return 'r:' + mac, self._router_label(mac)
         return mac, self.s.devices.name(mac) or mac[-8:]
 
     def _sats_gone(self):
@@ -987,17 +984,14 @@ class Dashboard:
 
     def _map_boards(self):
         """For the Map: every other board as a point, with its link to its own
-        router. A router the hub also watches shares the hub's dot (ap:N)."""
+        router. A router the hub also watches shares the hub's dot (r:<bssid>)."""
         now = time.time()
-        hub_aps = {m.lower(): i for i, m in self.s.nodes.items() if 0 <= i < MAX_APS and m}
         out = []
         for mac, d in sorted(self.sats.items()):
             gone = now - d['at'] > SAT_GONE_S
             b = d.get('bssid')
-            if b and b in hub_aps:
-                rkey, rname = f'ap:{hub_aps[b]}', self._router_name(hub_aps[b])
-            elif b:
-                rkey, rname = f'r:{b}', self.cfg['router_names'].get(b) or f'Router {b[-5:]}'
+            if b:
+                rkey, rname = f'r:{b}', self._router_label(b)
             else:
                 rkey = rname = None
             now_l = []
@@ -1025,7 +1019,7 @@ class Dashboard:
         add = lambda key, by, rssi: rssi and -100 < rssi < 0 and key != by and \
             out.setdefault(key, []).append([by, int(rssi)])
         for r in self._radio():
-            add(r['key'], 'hub', r['rssi'])
+            add(r.get('node') or r['key'], 'hub', r['rssi'])
         for mac, d in self.sats.items():
             if now - d['at'] > SAT_GONE_S:
                 continue
@@ -1619,6 +1613,9 @@ class Dashboard:
                 d = s.devices.devs.get(key)
                 via = s.devices.link_label(d.ap) if d is not None and 0 <= d.ap < MAX_APS else ''
             row = dict(key=key, src=int(src), label=s.devices.link_label(src), ap=ap, via=via,
+                       # the map's dot for it: a router by its address, so another
+                       # network's router never takes this one's place
+                       node='r:' + s.nodes[src].lower() if ap and s.nodes.get(src) else key,
                        rssi=s.rssi.get((src, 1)), rate=round(rate),
                        alerts=key in self.cfg['alerts'],
                        alerting=bool(self.confirmed.get(src)) and src in self.links and self.links[src]['md'].motion)
@@ -1671,6 +1668,15 @@ class Dashboard:
                         spans=[[r2(p[0]), r2(p[1]), p[2], len(p) > 4,
                                 label_info(p[3])['name'] if p[2] == 'activity' else p[3]] for p in spans],
                         per_link=self.cfg['per_link'])
+
+    def _router_label(self, mac):
+        """A router by its address: your nickname, else the hub's 'Router N' when
+        the hub watches it, else 'Router <last digits>'."""
+        mac = mac.lower()
+        for i, m in self.s.nodes.items():
+            if 0 <= i < MAX_APS and m and m.lower() == mac:
+                return self._router_name(i)
+        return self.cfg['router_names'].get(mac) or f'Router {mac[-5:]}'
 
     def _router_name(self, idx):
         """A router's name for every page: your nickname for its BSSID, else

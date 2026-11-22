@@ -96,13 +96,17 @@ window.AckMap = (() => {
   }
 
   // ---------- nodes from the live links ----------
+  // A router's dot is keyed by its address ('r:<bssid>'), not by the hub's
+  // slot ('ap:N'): switching networks then shows the new routers as new dots
+  // and keeps the old ones' places for when you switch back.
   function nodeFor(r, k) {
-    let n = M.nodes.get(r.key);
+    const key = r.node || r.key;
+    let n = M.nodes.get(key);
     if (!n) {                                // first time heard: place it from its signal
       const d = r.rssi !== null && r.rssi !== undefined ? guessDist(r) : 5;
       const ang = r.key === 'ap:0' ? 0 : (-0.7 + 0.6 * k);
-      n = { key: r.key, name: r.label, x: d * Math.cos(ang), y: d * Math.sin(ang), placed: false };
-      M.nodes.set(r.key, n);
+      n = { key, name: r.label, x: d * Math.cos(ang), y: d * Math.sin(ang), placed: false };
+      M.nodes.set(key, n);
       scheduleSave();
     }
     n.name = r.label;
@@ -146,8 +150,30 @@ window.AckMap = (() => {
   }
   // [{r, a, n, color, d}]: the hub's live links (a = the hub), then each other
   // board's link to its router (a = that board)
+  // Layouts saved before routers had addresses keep them as 'ap:N' (the hub's
+  // slot). Decided once, when the live links first show up: if the hub is on
+  // the network the layout was made with (the one the other boards watch, or
+  // there are no other boards), each dot goes to the router now in its slot;
+  // otherwise those dots are retired ('old:ap:N', kept in the file, never
+  // drawn) so a later network can't inherit them.
+  function adoptOldRouters(live) {
+    const legacy = [...M.nodes.keys()].filter((k) => /^ap:\d+$/.test(k));
+    if (!legacy.length) return;
+    const hubRouters = live.filter((r) => r.ap && r.node && r.node !== r.key);
+    if (!hubRouters.length || others.some((b) => !b.router && b.state !== 'gone')) return;   // not known yet
+    const hubNodes = new Set(hubRouters.map((r) => r.node));
+    const sameNet = !others.length || others.some((b) => b.router && hubNodes.has(b.router));
+    for (const k of legacy) {
+      const old = M.nodes.get(k), r = sameNet && hubRouters.find((x) => x.key === k);
+      M.nodes.delete(k);
+      if (r && !M.nodes.has(r.node)) M.nodes.set(r.node, Object.assign(old, { key: r.node }));
+      else if (!M.nodes.has('old:' + k)) M.nodes.set('old:' + k, Object.assign(old, { key: 'old:' + k }));
+    }
+    scheduleSave();
+  }
   function links() {
     const live = [...radio].sort((a, b) => (a.key === 'ap:0' ? -1 : b.key === 'ap:0' ? 1 : a.src - b.src));
+    adoptOldRouters(live);
     const out = live.map((r, k) => {
       const bk = others.findIndex((o) => o.key === 'sat:' + r.key);   // a board the hub pokes: its square
       const n = bk >= 0 ? boardNode(others[bk], bk) : nodeFor(r, k);
