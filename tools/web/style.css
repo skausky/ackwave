@@ -601,3 +601,17 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 
 /* one board in the boards list: its tick and its own buttons */
 .house-board { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 4px 0; }
+
+/* the wiring picture (Settings) */
+.wiring { width: 100%; max-width: 560px; display: block; margin: 4px auto 10px; }
+.wiring text { font: 12px system-ui, sans-serif; fill: var(--fg, currentColor); }
+.wiring .w-title { font-weight: 600; font-size: 14px; text-anchor: middle; }
+.wiring .w-sub { fill: var(--muted, #888); font-size: 11px; text-anchor: middle; }
+.wiring .w-label { text-anchor: middle; font-weight: 600; }
+.wiring .w-board { fill: none; stroke: var(--accent, #3cc); stroke-width: 2; }
+.wiring .w-part { fill: none; stroke: var(--muted, #888); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.wiring .w-pin circle { fill: var(--accent, #3cc); }
+.wiring path { stroke-width: 3; fill: none; stroke-linecap: round; }
+.wiring .w-red { stroke: #e5484d; }
+.wiring .w-black { stroke: #8a8f98; stroke-dasharray: 1 0; }
+.wiring .w-sig { stroke: #f5a524; }

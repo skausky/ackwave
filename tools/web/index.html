@@ -445,6 +445,31 @@
       <p class="muted small"><b>Status</b> shows everything: motion in your colour, amber fading for 30 s after it, a quick purple flash for a blip too faint to count, a slow blue pulse while calibrating, yellow while looking for the router, and dark when the room is still. <b>Motion only</b> lights it for motion and nothing else. Saved on the board, so it stays the same when the board runs on its own.</p>
     </section>
 
+    <section class="card" id="wiring-card">
+      <div class="card-head"><h2>Wiring a board</h2><span class="muted small">ESP32-S3: pins as printed on the board</span></div>
+      <svg class="wiring" viewBox="0 0 520 210" role="img" aria-label="Buzzer: red wire to GPIO 4, black wire to GND. Light module: IN to GPIO 5, VCC to 5V, GND to GND.">
+        <rect x="170" y="20" width="150" height="170" rx="10" class="w-board"/>
+        <text x="245" y="44" class="w-title">ESP32-S3</text>
+        <text x="245" y="62" class="w-sub">find pins by their printed names</text>
+        <g class="w-pin"><circle cx="170" cy="95" r="5"/><text x="182" y="99">GPIO 4</text></g>
+        <g class="w-pin"><circle cx="170" cy="125" r="5"/><text x="182" y="129">GND</text></g>
+        <g class="w-pin"><circle cx="320" cy="95" r="5"/><text x="308" y="99" text-anchor="end">GPIO 5</text></g>
+        <g class="w-pin"><circle cx="320" cy="125" r="5"/><text x="308" y="129" text-anchor="end">5V</text></g>
+        <g class="w-pin"><circle cx="320" cy="155" r="5"/><text x="308" y="159" text-anchor="end">GND</text></g>
+        <path d="M170 95 H90" class="w-red"/><path d="M170 125 H90" class="w-black"/>
+        <rect x="20" y="80" width="70" height="60" rx="30" class="w-part"/>
+        <text x="55" y="114" class="w-label">buzzer</text>
+        <text x="55" y="160" class="w-sub">red + · black −</text>
+        <path d="M320 95 H420" class="w-sig"/><path d="M320 125 H420" class="w-red"/><path d="M320 155 H420" class="w-black"/>
+        <rect x="420" y="80" width="85" height="90" rx="8" class="w-part"/>
+        <text x="462" y="102" class="w-label">light</text><text x="462" y="118" class="w-label">module</text>
+        <text x="462" y="188" class="w-sub">IN · VCC · GND</text>
+      </svg>
+      <p class="small"><b>Buzzer:</b> red (+) to <b>GPIO 4</b>, black (−) to <b>GND</b>. A passive piezo works either way round; an active buzzer needs + on GPIO 4. Then pick Beeps or Alarm above, and <b>Test sounds</b>.</p>
+      <p class="small"><b>Button:</b> the board's own <b>BOOT</b> button recalibrates (hold it 5 s to reset the settings). <b>LED:</b> the one on the board (GPIO 48), nothing to wire.</p>
+      <p class="small"><b>A light (next firmware):</b> never wire a light straight to a pin: a pin gives 3.3 V and a few milliamps. Put a switch module in between: <b>IN</b> to <b>GPIO 5</b>, <b>VCC</b> to <b>5V</b>, <b>GND</b> to <b>GND</b>, and the light's own red and black wires through the module's output. For a USB or 5–24 V DC light (LED strip, lamp with a DC plug), a <b>logic-level MOSFET module</b> (e.g. one built on an IRLZ44N or AO3400). For anything plugged into the wall, <b>don't wire mains yourself</b>: use a smart plug and the "Light or smart device on motion" card below.</p>
+    </section>
+
     <section class="card" id="notify-card">
       <div class="card-head">
         <h2>Phone notifications <span id="notify-state" class="muted small"></span></h2>
