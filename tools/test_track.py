@@ -42,6 +42,43 @@ def main():
         t += 0.5
     assert not tr.people, "nobody once it is quiet"
     assert tr.step([], t + 1) and not tr.people, "no links: nothing"
+    t += 1.5
+    # one link's spike is not a person (a new person counts once found twice)
+    spike = [dict(l, level=0.05) for l in links(3, 3)]
+    spike[0]['level'] = 1.5
+    tr.step(spike, t)
+    t += 0.5
+    for _ in range(6):
+        tr.step([dict(l, level=0.05) for l in links(3, 3)], t)
+        t += 0.5
+        assert not tr.people, "a one-step spike made a person"
+    # someone walks in and stops: held where they stand while their links still react a little
+    for i in range(8):
+        tr.step(links(1.5 + 0.3 * i, 3.0), t)
+        t += 0.5
+    assert len(tr.people) == 1, "found the walker"
+    for _ in range(20):                           # 10 s standing at (3.6, 3.0): small movements only
+        tr.step(links(3.6, 3.0, amp=0.35), t)
+        t += 0.5
+    assert len(tr.people) == 1, "a person who stopped is still there"
+    e = tr.people[0].est
+    assert math.hypot(e['x'] - 3.6, e['y'] - 3.0) < 1.5, f"held near where they stopped: {e}"
+    for k in range(12):                           # they leave: gone within a few seconds
+        tr.step([dict(l, level=0.05) for l in links(3, 3)], t)
+        t += 0.5
+        if not tr.people:
+            break
+    assert not tr.people and k * 0.5 <= 4.0, f"still there {k * 0.5} s after leaving"
+    # map.js runs the same tracker in the browser: its constants must match (seconds there are ms)
+    import re
+    import track as T
+    js = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web', 'map.js')).read()
+    for py, jn, scale in (('MULTI_GAIN', 'MULTI_GAIN', 1), ('MULTI_LEFT', 'MULTI_LEFT', 1), ('MULTI_SEP', 'MULTI_SEP', 1),
+                          ('KEEP_S', 'KEEP_MS', 1000), ('WEAK', 'WEAK', 1), ('HOLD_S', 'HOLD_MS', 1000), ('HOLD_Z', 'HOLD_Z', 1),
+                          ('HOLD_A', 'HOLD_A', 1), ('CONFIRM', 'CONFIRM', 1), ('CAND_S', 'CAND_MS', 1000), ('SPEED', 'SPEED', 1),
+                          ('SPEED_STILL', 'SPEED_STILL', 1), ('JUMP_P', 'JUMP_P', 1), ('MEAN_R', 'MEAN_R', 1), ('MAX_PEOPLE', 'MAX_PEOPLE', 1)):
+        m = re.search(r'\b' + jn + r' = ([0-9.]+)', js)
+        assert m and abs(float(m.group(1)) - getattr(T, py) * scale) < 1e-9, f"map.js {jn} != track.py {py}"
     # a router's shared reaction (every board's link to it at once) never drags a person:
     # board 'a' sees someone right in front of it; the router end lights up too
     tr2 = Tracker()

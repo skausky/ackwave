@@ -20,7 +20,18 @@ import numpy as np
 
 CELL = 0.25
 SIG0, SIG1, MODEL_ERR = 0.45, 0.25, 1.2
-MAX_PEOPLE, MULTI_GAIN, MULTI_LEFT, MULTI_SEP, KEEP_S = 3, 4.0, 1.5, 2.5, 2.5
+MAX_PEOPLE, MULTI_GAIN, MULTI_LEFT, MULTI_SEP, KEEP_S = 3, 2.0, 0.8, 2.5, 1.5
+# A person who stops walking is still there: held while the links still react the way someone at
+# their spot makes them react (a matched filter against the links' noise, averaged over a few
+# seconds: one step's test is too noisy), never started from weak evidence, at most HOLD_S
+# without walking. KEEP_S after the last evidence they are gone.
+WEAK, HOLD_S = 0.1, 300.0         # below WEAK everywhere: nobody there to hold
+HOLD_Z, HOLD_A = 1.2, 0.3
+CONFIRM, CAND_S = 2, 1.0          # a new person counts once found twice, the second time within CAND_S
+                                  # (one link's spike is not a person)
+SPEED, SPEED_STILL = 1.6, 0.3     # m/s a person may have moved: walking / while the links barely react
+JUMP_P = 0.02                     # the chance a step's evidence is somewhere else entirely
+MEAN_R = 1.2                      # the dot: the posterior's mean within this of its peak
 BACK = 0.45                       # a board's back: 45 % of the amplitude (-7 dB)
 G0, WG = 1.2, 1 / 1.5 ** 2
 MAX_CELLS = 12000
@@ -75,6 +86,9 @@ class Person:
     def __init__(self, pid, t):
         self.id, self.post, self.est, self.trail, self.seen = pid, None, None, [], t
         self.speed, self.heading = 0.0, None
+        self.walked = t
+        self.hits = 0
+        self.hold = 4.0
 
     def view(self):
         e = self.est or {}
@@ -91,6 +105,7 @@ class Tracker:
         self.base = {}                    # key -> idle level (the low envelope)
         self.base_at = None
         self.people = []
+        self.cands = []                   # new people not yet confirmed (CONFIRM)
         self.next_id = 0
         self.at = None
         self.grid = None
@@ -120,8 +135,11 @@ class Tracker:
         self.base_at = t
         self._near(obs, t)
         self._router_shared(obs)
-        self.people = [p for p in self.people if t - p.seen < KEEP_S]
-        if len(obs) < 2 or not any(o['a'] >= 0.6 for o in obs):
+        top = max((o['a'] for o in obs), default=0.0)
+        active = len(obs) >= 2 and top >= 0.6
+        self.people = [p for p in self.people if t - p.seen < KEEP_S and t - p.walked < HOLD_S]
+        weak = len(obs) >= 2 and top >= WEAK and bool(self.people)
+        if not active and not weak:
             return True
         xs = [e.x for o in obs for pair in o['ends'] for e in pair] + [0.0]
         ys = [e.y for o in obs for pair in o['ends'] for e in pair] + [0.0]
@@ -135,7 +153,7 @@ class Tracker:
         g = (x0, y0, gw, gh, cs)
         if self.grid != g:
             self.grid = g
-            for p in self.people:
+            for p in self.people + self.cands:
                 p.post = None
         px = x0 + (np.arange(gw) + 0.5) * cs
         py = y0 + (np.arange(gh) + 0.5) * cs
@@ -152,6 +170,28 @@ class Tracker:
             R = (gg - G0) ** 2 * WG + (w[:, None] * (act[:, None] - gg[None, :] * S) ** 2).sum(0)
             return R, gg
 
+        def hold(p, act):
+            """A still person stays while the links still react like someone at their spot."""
+            if not p.est:
+                return
+            c = int(min(gw - 1, max(0, (p.est['x'] - x0) // cs)) + min(gh - 1, max(0, (p.est['y'] - y0) // cs)) * gw)
+            sc = S[:, c]
+            med = float(np.median(act))
+            noise = max(0.03, 1.4826 * float(np.median(np.abs(act - med))))
+            ac = act - med                                  # the links' shared noise floor out: a pattern, not a level
+            z = float(ac @ sc) / (noise * max(1e-6, float(np.sqrt(sc @ sc))))
+            p.hold = (1 - HOLD_A) * p.hold + HOLD_A * min(z, 6.0)
+            if p.hold < HOLD_Z:
+                return
+            R, _ = fit_one(act)
+            self._update(p, dict(R=R, Rmin=float(R.min())), t, dt, gw, gh, cs, x0, y0, still=True)
+
+        self.cands = [c for c in self.cands if t - c.seen <= CAND_S]
+        if not active:                                     # weak: each held person follows it a little
+            for p in self.people:
+                hold(p, act)
+            self.people = [p for p in self.people if t - p.seen < KEEP_S]
+            return True
         found = []
         for p in range(MAX_PEOPLE):
             if not (act >= 0.6).any():
@@ -165,6 +205,7 @@ class Tracker:
                 break
             found.append(dict(R=R, Rmin=float(R[best]), x=bx, y=by))
             act = np.maximum(0, act - Gc[best] * S[:, best])
+        rest = act                                          # what nobody found explains: held people's
         used = set()
         for f in found:
             pk = int(np.argmin(f['R']))
@@ -179,27 +220,48 @@ class Tracker:
             if bi < 0 or (bd > 3 and len(found) > len(self.people)):
                 if len(self.people) >= MAX_PEOPLE:
                     continue
-                self.next_id += 1
-                self.people.append(Person(self.next_id, t))
-                bi = len(self.people) - 1
+                c = min((c for c in self.cands if c.seen < t and c.est and math.hypot(c.est['x'] - fx, c.est['y'] - fy) < 3),
+                        key=lambda c: math.hypot(c.est['x'] - fx, c.est['y'] - fy), default=None)
+                if c is None:
+                    c = Person(0, t)
+                    self.cands.append(c)
+                self._update(c, f, t, dt, gw, gh, cs, x0, y0)
+                c.hits += 1
+                if c.hits >= CONFIRM:                       # seen again: a person
+                    self.cands.remove(c)
+                    self.next_id += 1
+                    c.id = self.next_id
+                    self.people.append(c)
+                    used.add(len(self.people) - 1)
+                continue
             used.add(bi)
             self._update(self.people[bi], f, t, dt, gw, gh, cs, x0, y0)
-        self.people = [p for i, p in enumerate(self.people) if i in used or t - p.seen < 1.0]
+        for i, p in enumerate(self.people):
+            if i not in used:
+                hold(p, rest)
+        self.people = [p for i, p in enumerate(self.people) if i in used or t - p.seen < KEEP_S]
         self.people.sort(key=lambda p: p.id)
         return True
 
-    def _update(self, p, f, t, dt, gw, gh, cs, x0, y0):
+    def _update(self, p, f, t, dt, gw, gh, cs, x0, y0, still=False):
         like = np.exp(-(f['R'] - f['Rmin']) / 2).reshape(gh, gw)
         if p.post is not None and p.post.shape == like.shape:
-            prior = _blur(p.post, max(1, round(1.0 * dt / cs)))
-            post = like * (0.85 * prior + 0.15 / like.size)
+            prior = _blur(p.post, max(1, round((SPEED_STILL if still else SPEED) * dt / cs)))
+            prior = prior / prior.sum()
+            post = like * ((1 - JUMP_P) * prior + JUMP_P / like.size)
         else:
             post = like
         post = post / post.sum()
+        if not still:
+            p.walked = t
+            p.hold = 4.0                                    # just found: plenty of evidence
         sm = _blur(post, max(1, round(0.5 / cs)))
         bj, bi = np.unravel_index(int(np.argmax(sm)), sm.shape)
-        sx, sy = x0 + (bi + 0.5) * cs, y0 + (bj + 0.5) * cs
+        mx, my = x0 + (bi + 0.5) * cs, y0 + (bj + 0.5) * cs
         PX, PY = np.meshgrid(x0 + (np.arange(gw) + 0.5) * cs, y0 + (np.arange(gh) + 0.5) * cs)
+        near = np.hypot(PX - mx, PY - my) <= MEAN_R          # the peak's own hill: its mean, not one cell
+        wsum = float(post[near].sum())
+        sx, sy = (float((post * PX)[near].sum() / wsum), float((post * PY)[near].sum() / wsum)) if wsum > 0 else (mx, my)
         dist = np.hypot(PX - sx, PY - sy).ravel()
         pp = post.ravel()
         order = np.argsort(dist)

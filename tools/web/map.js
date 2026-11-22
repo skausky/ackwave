@@ -443,7 +443,7 @@ window.AckMap = (() => {
   // differently put the person on the stronger one's side; quiet links rule
   // out their zones. A Bayes filter carries it over time (a person moves
   // ~1 m/s), so the estimate tracks and doesn't flicker.
-  const track = { grid: null, people: [], nextId: 0, est: null, base: new Map(), at: 0, ghosts: [] };
+  const track = { grid: null, people: [], cands: [], nextId: 0, est: null, base: new Map(), at: 0, ghosts: [] };
   // a track that ended keeps its trail on the map, fading over TRAIL_MS
   function keepGhosts(before, after, t) {
     for (const p of before) if (!after.includes(p) && p.trail.length > 1) track.ghosts.push({ trail: p.trail, color: p.color, end: t });
@@ -941,8 +941,21 @@ window.AckMap = (() => {
   //  3. what is left: is another person there? Only if one explains the rest
   //     clearly better than noise would (MULTI_GAIN), up to three
   //  4. each found person joins the nearest track (a Bayes filter each: last
-  //     estimate spread by how far a person walks meanwhile, times now), or starts one
-  const MAX_PEOPLE = 3, MULTI_GAIN = 4, MULTI_LEFT = 1.5, MULTI_SEP = 2.5, KEEP_MS = 2500;
+  //     estimate spread by how far a person walks meanwhile, times now), or
+  //     becomes a candidate: a new person counts once found twice (one link's
+  //     spike is not a person)
+  //  5. a track nothing matched (someone who stopped walking) is held while the
+  //     links still react the way a person at its spot makes them react: a
+  //     matched filter against the links' noise, averaged over a few seconds
+  // Same model and constants as track.py (the Pi's tracker): keep them in step.
+  const MAX_PEOPLE = 3, MULTI_GAIN = 2, MULTI_LEFT = 0.8, MULTI_SEP = 2.5, KEEP_MS = 1500;
+  const WEAK = 0.1, HOLD_MS = 300000, HOLD_Z = 1.2, HOLD_A = 0.3;   // holding a still person
+  const CONFIRM = 2, CAND_MS = 1000;                // a new person: found twice, within a second
+  const SPEED = 1.6, SPEED_STILL = 0.3;             // m/s a person may have moved: walking / held
+  const JUMP_P = 0.02, MEAN_R = 1.2;                // evidence elsewhere entirely; the dot = the peak's mean
+  const median = (v) => { const q = [...v].sort((a, b) => a - b), m = q.length >> 1; return q.length % 2 ? q[m] : (q[m - 1] + q[m]) / 2; };
+  const newPerson = (t) => ({ id: 0, post: null, est: null, trail: [], seen: t, walked: t, hits: 0, hold: 4, speed: 0, heading: null,
+    img: document.createElement('canvas') });
   const TRAIL_MS = 30000;                           // a person's trail: the last 30 s, fading
   const PERSON_C = ['--motion', '--warn', '#b48cff'];
   // What every link to one router shares at the same moment is the router's end
@@ -998,10 +1011,11 @@ window.AckMap = (() => {
     track.baseAt = t;
     nearEnd(obs, t);
     routerShared(obs);
-    const active = obs.length >= 2 && obs.some((o) => o.a >= 0.6);
-    // tracks not seen lately end
-    { const before = track.people; track.people = track.people.filter((p) => t - p.seen < KEEP_MS); keepGhosts(before, track.people, t); }
-    if (!active) { if (track.people.length) dirty = true; track.est = track.people[0] ? track.people[0].est : null; return; }
+    const top = obs.reduce((m, o) => Math.max(m, o.a), 0), active = obs.length >= 2 && top >= 0.6;
+    // tracks with no evidence lately end (and anyone held HOLD_MS without walking)
+    { const before = track.people; track.people = track.people.filter((p) => t - p.seen < KEEP_MS && t - p.walked < HOLD_MS); keepGhosts(before, track.people, t); }
+    const faint = obs.length >= 2 && top >= WEAK && track.people.length > 0;   // someone to hold, and something to hold them on
+    if (!active && !faint) { if (track.people.length) dirty = true; track.est = track.people[0] ? track.people[0].est : null; return; }
     let x0 = 0, x1 = 0, y0 = 0, y1 = 0;
     for (const o of obs) for (const [a, n] of o.ends) for (const m of [a, n]) {
       x0 = Math.min(x0, m.x); x1 = Math.max(x1, m.x); y0 = Math.min(y0, m.y); y1 = Math.max(y1, m.y);
@@ -1010,7 +1024,7 @@ window.AckMap = (() => {
     let cs = CELL, gw = Math.ceil((x1 - x0) / cs), gh = Math.ceil((y1 - y0) / cs);
     while (gw * gh > 12000) { cs *= 1.5; gw = Math.ceil((x1 - x0) / cs); gh = Math.ceil((y1 - y0) / cs); }
     const g = track.grid, same = g && g.x0 === x0 && g.y0 === y0 && g.gw === gw && g.gh === gh;
-    if (!same) { track.grid = { x0, y0, gw, gh, cs }; for (const p of track.people) p.post = null; }
+    if (!same) { track.grid = { x0, y0, gw, gh, cs }; for (const p of [...track.people, ...track.cands]) p.post = null; }
     const N = gw * gh, lam = lambda(), K = obs.length;
     const S = obs.map(() => new Float32Array(N));          // 1. sensitivities
     for (let j = 0; j < gh; j++) {
@@ -1040,7 +1054,37 @@ window.AckMap = (() => {
       return [R, Gc];
     };
     const misfit0 = (act) => act.reduce((sum, a, k) => sum + w[k] * a * a, 0);   // nobody there
+    // 5. a still person stays while the links still react like someone at their spot
+    const hold = (p, act) => {
+      if (!p.est) return;
+      const ci = Math.min(gw - 1, Math.max(0, Math.floor((p.est.x - x0) / cs))) + Math.min(gh - 1, Math.max(0, Math.floor((p.est.y - y0) / cs))) * gw;
+      const med = median(act), noise = Math.max(0.03, 1.4826 * median(act.map((a) => Math.abs(a - med))));
+      let dot = 0, ss = 0;                            // the links' shared noise floor out: a pattern, not a level
+      for (let k = 0; k < K; k++) { dot += (act[k] - med) * S[k][ci]; ss += S[k][ci] ** 2; }
+      const z = dot / (noise * Math.max(1e-6, Math.sqrt(ss)));
+      p.hold = (1 - HOLD_A) * p.hold + HOLD_A * Math.min(z, 6);
+      if (p.hold < HOLD_Z) return;
+      const [R] = fitOne(act);
+      let rmin = Infinity;
+      for (let c = 0; c < N; c++) if (R[c] < rmin) rmin = R[c];
+      updatePerson(p, { R, Rmin: rmin }, t, dt, true);
+    };
+    const finish = () => {
+      track.people.sort((p1, p2) => p1.id - p2.id);
+      track.people.forEach((p, i) => { p.color = PERSON_C[i % PERSON_C.length]; });
+      track.est = track.people[0] ? track.people[0].est : null;
+      dirty = true;
+    };
+    track.cands = track.cands.filter((c) => t - c.seen <= CAND_MS);
     let act = obs.map((o) => o.a);
+    if (!active) {                                    // only faint reactions: each held person follows them a little
+      for (const p of track.people) hold(p, act);
+      const before = track.people;
+      track.people = track.people.filter((p) => t - p.seen < KEEP_MS);
+      keepGhosts(before, track.people, t);
+      finish();
+      return;
+    }
     const found = [];
     for (let p = 0; p < MAX_PEOPLE; p++) {
       if (!act.some((a) => a >= 0.6)) break;
@@ -1069,37 +1113,59 @@ window.AckMap = (() => {
         if (dd < bd) { bd = dd; bi = i; }
       });
       // far from every track: a new person only if there are more people than tracks,
-      // else the nearest free track jumps (an estimate can leap a few metres)
+      // else the nearest free track jumps (an estimate can leap a few metres).
+      // A new one is a candidate first: it counts once found again (CONFIRM)
       if (bi < 0 || (bd > 3 && found.length > track.people.length)) {
         if (track.people.length >= MAX_PEOPLE) continue;
-        track.people.push({ id: ++track.nextId, post: null, est: null, trail: [], seen: t, speed: 0, heading: null,
-          img: document.createElement('canvas') });
-        bi = track.people.length - 1;
+        let cand = null, cd = 3;
+        for (const c of track.cands) {
+          if (c.seen >= t || !c.est) continue;
+          const dd = Math.hypot(c.est.x - px, c.est.y - py);
+          if (dd < cd) { cd = dd; cand = c; }
+        }
+        if (!cand) { cand = newPerson(t); track.cands.push(cand); }
+        updatePerson(cand, f, t, dt);
+        if (++cand.hits >= CONFIRM) {                 // seen again: a person
+          track.cands = track.cands.filter((c) => c !== cand);
+          cand.id = ++track.nextId;
+          track.people.push(cand);
+          used.add(track.people.length - 1);
+        }
+        continue;
       }
       used.add(bi);
       updatePerson(track.people[bi], f, t, dt);
     }
-    // tracks no detection matched this step: gone once not seen for a second
-    { const before = track.people; track.people = track.people.filter((tp, i) => used.has(i) || t - tp.seen < 1000); keepGhosts(before, track.people, t); }
-    track.people.sort((p1, p2) => p1.id - p2.id);
-    track.people.forEach((p, i) => { p.color = PERSON_C[i % PERSON_C.length]; });
-    track.est = track.people[0] ? track.people[0].est : null;
-    dirty = true;
+    // tracks no detection matched: held if their spot still reacts, else gone after KEEP_MS
+    track.people.forEach((tp, i) => { if (!used.has(i)) hold(tp, act); });
+    { const before = track.people; track.people = track.people.filter((tp, i) => used.has(i) || t - tp.seen < KEEP_MS); keepGhosts(before, track.people, t); }
+    finish();
   }
-  function updatePerson(p, f, t, dt) {
+  function updatePerson(p, f, t, dt, still = false) {
     const { x0, y0, gw, gh, cs } = track.grid, N = gw * gh;
-    const prior = p.post ? blur(p.post, gw, gh, Math.max(1, Math.round(1.0 * dt / cs))) : null;
+    const prior = p.post ? blur(p.post, gw, gh, Math.max(1, Math.round((still ? SPEED_STILL : SPEED) * dt / cs))) : null;
+    let psum = 0;
+    if (prior) for (let c = 0; c < N; c++) psum += prior[c];
     const post = new Float32Array(N);
     let sum = 0;
     for (let c = 0; c < N; c++) {
-      post[c] = Math.exp(-(f.R[c] - f.Rmin) / 2) * (prior ? 0.85 * prior[c] + 0.15 / N : 1);
+      post[c] = Math.exp(-(f.R[c] - f.Rmin) / 2) * (prior ? (1 - JUMP_P) * prior[c] / psum + JUMP_P / N : 1);
       sum += post[c];
     }
     for (let c = 0; c < N; c++) post[c] /= sum;
+    if (!still) { p.walked = t; p.hold = 4; }        // just found: plenty of evidence
     const sm = blur(post, gw, gh, Math.max(1, Math.round(0.5 / cs)));
     let best = 0, mx = 0;
     for (let c = 0; c < N; c++) { if (sm[c] > sm[best]) best = c; if (post[c] > mx) mx = post[c]; }
-    const sx = x0 + ((best % gw) + 0.5) * cs, sy = y0 + (Math.floor(best / gw) + 0.5) * cs;
+    // the dot: the posterior's mean over the peak's own hill, not one cell (no hopping between cells)
+    const bx = x0 + ((best % gw) + 0.5) * cs, by = y0 + (Math.floor(best / gw) + 0.5) * cs;
+    let ws = 0, wx = 0, wy = 0;
+    for (let c = 0; c < N; c++) {
+      const cx = x0 + ((c % gw) + 0.5) * cs, cy = y0 + (Math.floor(c / gw) + 0.5) * cs;
+      if (Math.hypot(cx - bx, cy - by) > MEAN_R) continue;
+      ws += post[c]; wx += post[c] * cx; wy += post[c] * cy;
+    }
+    const sx = ws > 0 ? wx / ws : bx, sy = ws > 0 ? wy / ws : by;
     const byDist = [];
     for (let c = 0; c < N; c++)
       if (post[c] > 1e-7) byDist.push([Math.hypot(x0 + ((c % gw) + 0.5) * cs - sx, y0 + (Math.floor(c / gw) + 0.5) * cs - sy), post[c]]);
