@@ -1,5 +1,5 @@
 {
- "note": "Logistic model on mlfeat.FEATURES, trained only on this project's own labelled activity clips (2026-11-21). Experimental: shown beside the board verdict, never replaces it.",
+ "note": "Logistic model on mlfeat.FEATURES, trained only on this project's own labelled activity clips (2026-11-21). Experimental: shown beside the board verdict, never replaces it. ref: the training clips' quiet level (20th percentile of jump, jump4 when not moving): each board shifts its own quiet level onto it.",
  "features": [
   "jump",
   "jump4",
@@ -41,5 +41,11 @@
   0.48504
  ],
  "b": -0.32294,
- "threshold": 0.5
+ "threshold": 0.5,
+ "ref": [
+  -2.99486,
+  -2.98086
+ ],
+ "hidden": 0,
+ "outputs": 1
 }

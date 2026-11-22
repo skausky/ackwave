@@ -361,6 +361,42 @@ const outCmd = (mode) => cmd(Object.assign({ cmd: 'out', mode, secs: +$('#out-se
 for (const b of $('#out-mode').children) b.onclick = () => outCmd(b.dataset.m);
 $('#out-secs').onchange = () => { const on = [...$('#out-mode').children].find((b) => b.classList.contains('on')); if (on) outCmd(on.dataset.m); };
 
+// ---------------------------------------------------------------- teach the boards (learned detector)
+let teachBoard = null;
+function renderTeach() {
+  const t = slow && slow.teach;
+  if (!t) return;
+  const seg = $('#teach-board'), sig = JSON.stringify(t.boards.map((b) => [b.key, b.name, b.live]));
+  if (!teachBoard || !t.boards.some((b) => b.key === teachBoard)) teachBoard = (t.boards[0] || {}).key || null;
+  if (seg.dataset.sig !== sig) {
+    seg.dataset.sig = sig;
+    seg.replaceChildren(...t.boards.map((b) => {
+      const e = el('button', { type: 'button', textContent: (/^\d+$/.test(b.name) ? `Board ${b.name}` : b.name) + (b.live ? '' : ' (silent)') });
+      e.dataset.k = b.key;
+      e.onclick = () => { teachBoard = b.key; renderTeach(); };
+      return e;
+    }));
+  }
+  for (const e of seg.children) e.classList.toggle('on', e.dataset.k === teachBoard);
+  const b = t.boards.find((x) => x.key === teachBoard);
+  const ml = b && b.ml;
+  $('#teach-now').textContent = !t.boards.length ? 'No board sends its features yet: they need the new firmware.'
+    : !ml ? 'waiting for this board…'
+    : `Its learned model now: ${ml.motion ? 'MOVING' : 'not moving'} · empty ${ml.p[0]}% · still ${ml.p[1]}% · moving ${ml.p[2]}%`;
+  $('#teach-state').textContent = t.rec ? `recording "${t.rec.label}" · ${Math.ceil(t.rec.left)} s left · ${t.rec.n} s saved`
+    : t.sending.length ? `sending the model to ${t.sending.length} board${t.sending.length > 1 ? 's' : ''}…` : '';
+  const rows = Object.entries(t.counts);
+  const nm = (k) => { const x = t.boards.find((y) => y.key === k); return x ? x.name : k.replace('sat:', '…'); };
+  $('#teach-counts').replaceChildren(...(rows.length ? rows : [['', null]]).map(([k, c]) => el('tr', {},
+    ...(c ? [el('td', { textContent: nm(k) }), el('td', { textContent: `${c.empty} s` }), el('td', { textContent: `${c.still} s` }), el('td', { textContent: `${c.moving} s` })]
+      : [el('td', { colSpan: 4, className: 'muted', textContent: 'nothing recorded yet' })]))));
+  $('#teach-model').textContent = t.model ? `Last trained on ${t.model.n} s: ` + Object.entries(t.model.score).map(([k, v]) => `${k} ${Math.round(v * 100)}% right`).join(', ') + ' (on recordings it did not learn from).' : '';
+}
+for (const e of $('#teach-card').querySelectorAll('[data-l]'))
+  e.onclick = () => teachBoard && cmd({ cmd: 'teach', which: teachBoard, label: e.dataset.l, secs: 30 });
+$('#teach-train').onclick = () => cmd({ cmd: 'teach_train' });
+$('#teach-clear').onclick = () => { if (confirm('Put every recording aside and start over? (They are kept as an .old file.)')) cmd({ cmd: 'teach_clear' }); };
+
 // ---------------------------------------------------------------- phone notifications
 function renderNotify(n) {
   if (!n || page !== 'settings') return;
@@ -1100,7 +1136,7 @@ function renderFast() {
   if (!fast) return;
   renderHeader(fast.header);
   renderActHome();
-  if (page === 'activity') renderActNow();
+  if (page === 'activity') { renderActNow(); renderTeach(); }
   if (page === 'map' || page === 'home') window.AckMap.update(null, fast.header);   // the board's verdict pulses the router link
   if (!paused) drawLive(true);
 }
@@ -2077,6 +2113,20 @@ if (params.has('shot')) {
     setTimeout(() => s.remove(), 600);
   }, { passive: true });
 })();
+
+// Home's map: the clean view (Details shows the technical layers) and today's heat
+function syncMapFlags() {
+  const f = window.AckMap && window.AckMap.viewFlags ? window.AckMap.viewFlags() : { details: false, today: false };
+  $('#hm-details').classList.toggle('on', f.details);
+  $('#hm-today').classList.toggle('on', f.today);
+}
+const mapFlag = (k, v) => { try { if (v === undefined) return localStorage.getItem(k) === '1'; localStorage.setItem(k, v ? '1' : ''); } catch (e) { /* private mode */ } return false; };
+$('#hm-details').onclick = () => { const on = !window.AckMap.viewFlags().details; window.AckMap.setDetails(on); mapFlag('ackwave.mapDetails', on); syncMapFlags(); };
+$('#hm-today').onclick = () => { const on = !window.AckMap.viewFlags().today; window.AckMap.setToday(on); mapFlag('ackwave.mapToday', on); syncMapFlags(); };
+setTimeout(() => {
+  if (window.AckMap) { window.AckMap.setDetails(mapFlag('ackwave.mapDetails')); window.AckMap.setToday(mapFlag('ackwave.mapToday')); }
+  syncMapFlags();
+}, 0);
 
 // Home's folded details: its charts measure themselves when it opens
 $('#home-more').addEventListener('toggle', () => {

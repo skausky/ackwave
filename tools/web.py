@@ -46,6 +46,7 @@ from light import Light, http_call
 from notify import Notify, pushover_call
 from track import End, Tracker, in_zone
 from mlfeat import Shadow
+import mltrain
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LED_MODES, LED_PATTERNS, LONG_C, MOTION_C,
                  SCAN_C, STILL_C, SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
 
@@ -235,12 +236,17 @@ class Dashboard:
         self.follow = None               # a network switch waiting for the other boards to confirm
         self.out = None                  # the hub's light output as it last said (OUT lines)
         self.breath = {}                 # 'hub' / 'sat:<mac>' -> its latest breathing reading (BREATH lines)
+        self.mlb = {}                    # 'hub' / 'sat:<mac>' -> its learned model's last second (ML lines)
+        self.feat = {}                   # 'hub' / 'sat:<mac>' -> deque of (wall, 8 features) (FEAT lines)
+        self.teach = None                # recording labelled features: dict(board, label, until)
+        self.mlw_q = {}                  # board key -> commands still to send (weights, one at a time)
         self.out_pin = None
         # Where people are, all the time (track.py: the Map's tracker on the Pi); zones on the map
         self.tracker = Tracker()
         self.track_layout = (None, {})   # (map file mtime, layout)
         self.zone_in = {}                # zone id -> people inside now
         self.zone_said = {}              # zone id -> when it last notified
+        self.today = ('', {})            # (local date, {(ix, iy): steps someone was tracked there}) at 0.5 m
         self.house = House()             # every board's verdict combined (boards.py)
         self.travel = Travel()           # someone walking from board to board (boards.py)
         self.travel_ev = None            # its live-stream entry while the path grows
@@ -380,7 +386,7 @@ class Dashboard:
         # count at the placement they were recorded at.
         src = self.act.feat.src
         self.act.place = f"{self.s.nodes.get(src, src)}|{d['ch']}|{self.cfg['act_place']}"
-        if self.ml is not None:
+        if self.ml is not None and 'hub' not in self.mlb:      # the hub's own model wins once it reports
             ch = self.ml.feed(src, d, t)
             if ch is not None:
                 self._ml_period(ch, self.s.wall(t) if self.s.wall_off is not None else time.time())
@@ -446,6 +452,75 @@ class Dashboard:
         if key.startswith('sat:'):
             return self.board_label(key[4:])
         return name or key
+
+    def _board_key(self, mac):
+        mac = mac.lower()
+        return 'hub' if mac == (self.s.me or '').lower() else 'sat:' + mac
+
+    def _ml_line(self, line):
+        """ML,<board>,<moving>,<p empty>,<p still>,<p moving> / FEAT,<board>,<8 numbers>."""
+        p = line.split(',')
+        if len(p) < 3 or not MAC_RE.fullmatch(p[1]):
+            return
+        key, now = self._board_key(p[1]), time.time()
+        try:
+            if p[0] == 'ML' and len(p) == 6:
+                was = self.mlb.get(key, {}).get('motion')
+                motion = p[2] == '1'
+                self.mlb[key] = dict(motion=motion, p=[int(p[3]), int(p[4]), int(p[5])], at=now)
+                if motion != was and self.timeline:
+                    name = ('Hub' if key == 'hub' else self.board_label(key[4:])) + ' · learned'
+                    if motion:
+                        self.ml_open_b = getattr(self, 'ml_open_b', {})
+                        self.ml_open_b[key] = now
+                    elif getattr(self, 'ml_open_b', {}).get(key) is not None:
+                        self.timeline.add(self.ml_open_b.pop(key), now, 'ml:' + key, name)
+            elif p[0] == 'FEAT' and len(p) == 10:
+                f = [float(x) for x in p[2:]]
+                if all(math.isfinite(x) for x in f):
+                    self.feat.setdefault(key, deque(maxlen=120)).append((now, f))
+                    tc = self.teach
+                    if tc and tc['board'] == key and now <= tc['until']:
+                        self._teach_save(key, tc['label'], f, now)
+        except ValueError:
+            pass
+
+    def _teach_save(self, key, label, f, now):
+        if not self.sessions_dir:
+            return
+        try:
+            with open(os.path.join(self.sessions_dir, 'ml_labels.jsonl'), 'a') as fh:
+                fh.write(json.dumps(dict(t=round(now, 2), board=key, label=label, f=[round(x, 4) for x in f])) + '\n')
+            self.teach['n'] = self.teach.get('n', 0) + 1
+        except OSError:
+            pass
+
+    def _mlw_line(self, line):
+        """The hub's own answers to weights: the next command goes once one is taken."""
+        q = self.mlw_q.get('hub')
+        if q and (line.startswith('MLW,got,') or line.startswith(('MLW,loaded', 'MLW,built-in'))):
+            self.s.outbox.append(q.pop(0))
+            if not q:
+                del self.mlw_q['hub']
+        elif q and line.startswith('MLW,error'):
+            del self.mlw_q['hub']
+            self._event('health', f"Hub refused the new model ({line[10:40]})", 'hub', important=True)
+
+    def _mlw_step_sat(self, mac, done):
+        """A board confirmed an order: its next weights command, through the hub."""
+        key = 'sat:' + mac
+        q = self.mlw_q.get(key)
+        if not q:
+            return
+        if not done:
+            del self.mlw_q[key]
+            self._event('health', f"{self.board_label(mac)}: the new model didn't arrive (older firmware?)", key, important=True)
+            return
+        cmd = q.pop(0)
+        self.s.outbox.append(f'SATCMD,{mac},{cmd}')
+        self.sat_cmds[mac] = dict(line=cmd, state='sent', at=time.time())
+        if not q:
+            del self.mlw_q[key]
 
     def _ml_period(self, on, wall):
         """The learned detector's periods: the timeline only (a lane to compare
@@ -931,6 +1006,10 @@ class Dashboard:
                 return
             if line.startswith('SATCMD,'):
                 self._satcmd_line(line.strip())
+            elif line.startswith(('ML,', 'FEAT,')):        # a board's learned model: its verdict, its features
+                self._ml_line(line.strip())
+            elif line.startswith('MLW,'):
+                self._mlw_line(line.strip())
             elif line.startswith('BREATH,'):             # a board's breathing reading (its router link)
                 p = line.strip().split(',')
                 if len(p) == 6 and MAC_RE.fullmatch(p[1]) and p[2] in ('none', 'possible', 'clear'):
@@ -1065,6 +1144,14 @@ class Dashboard:
         now = time.time()
         if not self.tracker.step(links, now):
             return
+        day = time.strftime('%Y-%m-%d')
+        if self.today[0] != day:
+            self.today = (day, {})
+        for p in self.tracker.people:
+            if p.est:
+                c = (math.floor(p.est['x'] / 0.5), math.floor(p.est['y'] / 0.5))
+                if c in self.today[1] or len(self.today[1]) < 20000:
+                    self.today[1][c] = self.today[1].get(c, 0) + 1
         zones = m.get('zones', [])
         near = self.tracker.near['key'] if self.tracker.near else None
         for z in zones:
@@ -1099,6 +1186,19 @@ class Dashboard:
                 pass
         return dict(walks=out[-500:])
 
+    def _teach_view(self):
+        now = time.time()
+        rows = mltrain.read_rows(os.path.join(self.sessions_dir, 'ml_labels.jsonl')) if self.sessions_dir else []
+        boards = [dict(key=k, name='Hub' if k == 'hub' else self.board_label(k[4:]),
+                       live=now - self.feat[k][-1][0] < 30 if self.feat.get(k) else False,
+                       ml=self.mlb.get(k)) for k in sorted(self.feat, key=lambda k: (k != 'hub', k))]
+        tc = self.teach
+        rec = dict(board=tc['board'], label=tc['label'], left=round(tc['until'] - now, 1), n=tc.get('n', 0)) \
+            if tc and now <= tc['until'] else None
+        m = getattr(self, 'teach_model', None)
+        return dict(boards=boards, counts=mltrain.counts(rows), rec=rec, sending=sorted(self.mlw_q),
+                    model=dict(score=m['score'], labels=m['labels'], n=m['n']) if m else None)
+
     def _people(self):
         """For the page: the Pi's tracking (works with no page open), the zones, and
         who's still but breathing near a board (presence)."""
@@ -1106,8 +1206,10 @@ class Dashboard:
         now = time.time()
         still = {k: dict(level=b['level'], rate=b['rate'], name='Hub' if k == 'hub' else self.board_label(k[4:]))
                  for k, b in self.breath.items() if now - b['at'] <= 10 and b['level'] != 'none'}
+        cells = sorted(self.today[1].items(), key=lambda kv: -kv[1])[:2000]
         return dict(people=[p.view() for p in self.tracker.people if p.est], near=nk,
-                    zones={k: v for k, v in self.zone_in.items()}, breathing=still)
+                    zones={k: v for k, v in self.zone_in.items()}, breathing=still,
+                    today=dict(cs=0.5, cells=[[c[0], c[1], n] for c, n in cells]))
 
     def _switch_network(self, line, what):
         """A new network for the hub: the other boards are told first (through
@@ -1149,6 +1251,9 @@ class Dashboard:
             return
         c = self.sat_cmds.setdefault(mac, dict(line='', at=time.time()))
         c['state'], c['why'] = st, p[3] if len(p) > 3 else ''
+        if ('sat:' + mac) in self.mlw_q and st in ('done', 'failed', 'error'):
+            self._mlw_step_sat(mac, st == 'done')
+            return
         if st in ('done', 'failed', 'error') and not self.follow:
             self._event('health', f"{self.board_label(mac)}: " + {
                 'done': f"done ({c.get('line', '').split(',')[0].lower() or 'command'})",
@@ -1526,6 +1631,54 @@ class Dashboard:
                 msg = ('Light on motion: off' if not cf['enabled'] else
                        'Light on motion: on, off as soon as the room is still' if not cf['off_after'] else
                        f"Light on motion: on, off after {fmt_age(cf['off_after'])} of stillness")
+            elif what == 'teach':                        # record labelled seconds of one board's features
+                board, label = c.get('which'), c.get('label')
+                secs = c.get('secs', 30)
+                if label == 'stop':
+                    self.teach = None
+                    return True, 'stopped'
+                if board not in self.feat or label not in mltrain.LABELS or isinstance(secs, bool) \
+                        or not isinstance(secs, int) or not 5 <= secs <= 600:
+                    return False, 'pick a board that sends its features (new firmware) and a label'
+                self.teach = dict(board=board, label=label, until=time.time() + secs, secs=secs, n=0)
+                name = 'the hub' if board == 'hub' else self.board_label(board[4:])
+                msg = f"Recording '{label}' on {name} for {secs} s"
+            elif what == 'teach_train':                  # train on everything recorded, send to the boards
+                if not self.sessions_dir:
+                    return False, 'nowhere to keep the recordings'
+                got = mltrain.train(mltrain.read_rows(os.path.join(self.sessions_dir, 'ml_labels.jsonl')))
+                if 'error' in got:
+                    return False, got['error']
+                self.teach_model = got
+                try:
+                    with open(os.path.join(self.sessions_dir, 'ml_house.json'), 'w') as fh:
+                        json.dump(got, fh)
+                except OSError:
+                    pass
+                cmds = mltrain.mlw_commands(got)
+                sent = []
+                for key in [k for k in self.feat if time.time() - self.feat[k][-1][0] < 30]:
+                    if key == 'hub':
+                        if self.send:
+                            self.mlw_q['hub'] = cmds[1:]
+                            self.s.outbox.append(cmds[0])
+                            sent.append('the hub')
+                    elif key[4:] in self.sats and self.send:
+                        self.mlw_q[key] = cmds[1:]
+                        self.s.outbox.append(f'SATCMD,{key[4:]},{cmds[0]}')
+                        self.sat_cmds[key[4:]] = dict(line=cmds[0], state='sent', at=time.time())
+                        sent.append(self.board_label(key[4:]))
+                sc = ', '.join(f"{k} {int(v * 100)}%" for k, v in got['score'].items())
+                msg = (f"Trained on {got['n']} s ({sc} right on held-out recordings); "
+                       + (f"sending to {', '.join(sent)} ({len(cmds)} steps each)" if sent else 'no board to send it to right now'))
+            elif what == 'teach_clear':
+                if self.sessions_dir:
+                    try:
+                        os.replace(os.path.join(self.sessions_dir, 'ml_labels.jsonl'),
+                                   os.path.join(self.sessions_dir, f'ml_labels-{int(time.time())}.jsonl.old'))
+                    except OSError:
+                        pass
+                msg = 'Recordings put aside (kept as a .old file)'
             elif what == 'walk_mark':                    # the walk check: where you really are now
                 try:
                     x, y = _num(c.get('x'), -10000, 10000), _num(c.get('y'), -10000, 10000)
@@ -1735,6 +1888,7 @@ class Dashboard:
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        routers=self._routers(), boards=self._boards(), house=self._house_slow(), tz=PC_TZ,
                        map_boards=self._map_boards(), hearings=self._hearings(), tracked=self._people(),
+                       teach=self._teach_view(),
                        demo_people=list(self.demo_people.values()) if self.demo else None, events=list(self.events)[-80:],
                        board_settings=self._board_settings(), primary=self.primary or self.s.me,
                        pairing=self.pair.status(self.pair.me == self.cfg['hub'], self._hub_boards()),

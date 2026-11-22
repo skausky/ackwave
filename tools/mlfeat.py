@@ -133,27 +133,94 @@ def read_raw(path):
     return t[order], np.array(a, dtype=float)[order], np.array(r, dtype=float)[order]
 
 
-class Shadow:
-    """The learned detector, live, beside the board's own verdict (experimental):
-    the decision link's packets in, every second a probability of movement;
-    motion once two of the last three seconds say so, still once three in a
-    row don't. It never changes the board's verdict, the light or the alerts."""
+class Model:
+    """The board's model (csi_core.h ml_forward), from a params list or ml_motion.json."""
 
-    def __init__(self, path=None):
+    def __init__(self, p, nh=0, no=1):
+        p = np.asarray(p, float)
+        F = len(FEATURES)
+        self.nh, self.no = nh, no
+        self.mu, self.sd, self.ref = p[:F], p[F:2 * F], p[2 * F:2 * F + 2]
+        w = p[2 * F + 2:]
+        if nh:
+            self.w1, self.b1 = w[:F * nh].reshape(F, nh), w[F * nh:F * nh + nh]
+            w = w[F * nh + nh:]
+        nin = nh or F
+        self.w2, self.b2 = w[:nin * no].reshape(nin, no), w[nin * no:nin * no + no]
+
+    @classmethod
+    def load(cls, path=None):
         import json
         import os
-        from collections import deque
         path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ml_motion.json')
         with open(path) as f:
             m = json.load(f)
         if tuple(m['features']) != FEATURES:
             raise ValueError('the model was made for other features')
-        self.mu, self.sd = np.array(m['mu']), np.array(m['sd'])
-        self.w, self.b, self.thr = np.array(m['w']), float(m['b']), float(m.get('threshold', 0.5))
+        nh, no = int(m.get('hidden', 0)), int(m.get('outputs', 1))
+        p = list(m['mu']) + list(m['sd']) + list(m.get('ref', [0.0, 0.0]))
+        p += (list(np.ravel(m['w1'])) + list(m['b1']) + list(np.ravel(m['w2'])) + list(m['b2'])) if nh else \
+            (list(np.ravel(m['w'])) + ([m['b']] if np.isscalar(m['b']) else list(m['b'])))
+        return cls(p, nh, no), float(m.get('threshold', 0.5))
+
+    def params(self):
+        out = list(self.mu) + list(self.sd) + list(self.ref)
+        if self.nh:
+            out += list(self.w1.ravel()) + list(self.b1)
+        return out + list(self.w2.ravel()) + list(self.b2)
+
+    def forward(self, f, quiet=None):
+        """[p_empty, p_still, p_moving] (1-output models: [1-p, 0, p])."""
+        x = np.array(f, float)
+        if quiet is not None:
+            x[:2] += self.ref - quiet
+        x = (x - self.mu) / np.maximum(self.sd, 1e-9)
+        h = np.tanh(x @ self.w1 + self.b1) if self.nh else x
+        z = h @ self.w2 + self.b2
+        if self.no == 1:
+            p = 1 / (1 + np.exp(-z[0]))
+            return np.array([1 - p, 0.0, p])
+        e = np.exp(z - z.max())
+        return e / e.sum()
+
+
+class Quiet:
+    """This board's quiet level of jump, jump4: their 20th percentile over the
+    last 5 min of features (csi_core.h ml_quiet_t)."""
+    N, MIN = 300, 60
+
+    def __init__(self):
+        from collections import deque
+        self.ring = deque(maxlen=self.N)
+
+    def add(self, f):
+        self.ring.append((f[0], f[1]))
+        return self.level()
+
+    def level(self):
+        if len(self.ring) < self.MIN:
+            return None
+        a = np.array(self.ring, dtype=np.float32)
+        return np.array([np.percentile(a[:, 0], 20), np.percentile(a[:, 1], 20)])
+
+
+class Shadow:
+    """The learned detector, live, beside the board's own verdict (experimental):
+    the decision link's packets in, every second a probability of movement;
+    motion once two of the last three seconds say so, still once three in a
+    row don't. It never changes the board's verdict, the light or the alerts.
+    Same steps as the board (csi_core.h ml_*): the twin the tests compare."""
+
+    def __init__(self, path=None):
+        from collections import deque
+        self.model, self.thr = Model.load(path)
+        self.quiet = Quiet()
         self.buf = deque()
         self.next_t = None
         self.recent = deque(maxlen=3)
         self.p = None
+        self.probs = None
+        self.f = None
         self.motion = False
 
     def feed(self, src, d, t):
@@ -164,20 +231,32 @@ class Shadow:
         if self.buf and t < self.buf[-1][0]:
             self.buf.clear()                         # the board restarted
             self.next_t = None
-        self.buf.append((t, d['amp'][USED].astype(float), float(d['rssi'])))
-        while self.buf and self.buf[0][0] < t - LONG_S - 0.5:
-            self.buf.popleft()
         if self.next_t is None:
             self.next_t = t + LONG_S
-        if t < self.next_t:
-            return None
-        self.next_t = t + WIN_S
-        ts = np.array([b[0] for b in self.buf])
-        f = window_features(ts, np.array([b[1] for b in self.buf]), np.array([b[2] for b in self.buf]), t)
-        if f is None or not np.isfinite(f).all():
-            self.p = None
-            return None
-        self.p = float(1 / (1 + np.exp(-(((f - self.mu) / self.sd) @ self.w + self.b))))
+        got = None
+        while t > self.next_t:                       # windows on a 1 s grid, as the board (ml_feed)
+            te = self.next_t
+            self.next_t += WIN_S
+            if not self.buf:
+                continue
+            ts = np.array([b[0] for b in self.buf])
+            f = window_features(ts, np.array([b[1] for b in self.buf]), np.array([b[2] for b in self.buf]), te)
+            if f is None or not np.isfinite(f).all():
+                self.p = None
+                continue
+            ch = self.step(f)
+            got = ch if ch is not None else got
+        self.buf.append((t, d['amp'][USED].astype(float), float(d['rssi'])))
+        while self.buf and self.buf[0][0] <= t - LONG_S - 0.5:
+            self.buf.popleft()
+        return got
+
+    def step(self, f):
+        """One second's features (from the Pi or from a board's report)."""
+        q = self.quiet.add(f)
+        self.f = f
+        self.probs = self.model.forward(f, q)
+        self.p = float(self.probs[2])
         self.recent.append(self.p > self.thr)
         was = self.motion
         if not was and sum(self.recent) >= 2:

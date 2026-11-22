@@ -48,7 +48,8 @@
       <div class="hs-boards" id="hs-boards"></div>
     </div>
     <article class="card home-map-card" id="home-map-card">
-      <div class="card-head"><h2>Live map <span class="muted small">people, and where the motion is</span></h2><a href="#/map" class="muted small">Set up the map</a></div>
+      <div class="card-head"><h2>Live map <span class="muted small">people, and where the motion is</span></h2>
+        <div class="dlg-tools"><button type="button" class="ghost small" id="hm-today" title="Where people were today">Today</button><button type="button" class="ghost small" id="hm-details" title="Show the links' zones, lengths and estimates">Details</button><a href="#/map" class="muted small">Set up the map</a></div></div>
       <div class="home-map-slot" id="home-map-slot"></div>
       <div class="map-legend muted small"><span><i class="lg-person"></i>a person (ring: how sure)</span><span><i class="lg-board"></i>a board (red while it sees motion)</span><span><i class="lg-link"></i>a link lights up when it sees motion</span></div>
     </article>
@@ -362,6 +363,20 @@
   <!-- ======================= SETTINGS ======================= -->
   <!-- ======================= ACTIVITY ======================= -->
   <section class="page" data-page="activity" hidden>
+    <section class="card" id="teach-card">
+      <div class="card-head"><h2>Teach the boards <span class="muted small">their learned detector: empty, someone still, moving</span></h2><span id="teach-state" class="muted small"></span></div>
+      <div class="led-row"><span>Board</span><div class="seg" id="teach-board"></div></div>
+      <div class="teach-now" id="teach-now"></div>
+      <div class="dlg-tools gap">
+        <button type="button" data-l="empty">Record "empty" (30 s)</button>
+        <button type="button" data-l="still">Record "someone still" (30 s)</button>
+        <button type="button" data-l="moving">Record "moving" (30 s)</button>
+      </div>
+      <div class="table-wrap short"><table><thead><tr><th>Board</th><th>Empty</th><th>Still</th><th>Moving</th></tr></thead><tbody id="teach-counts"></tbody></table></div>
+      <div class="dlg-tools gap"><button type="button" class="primary" id="teach-train">Train and send to the boards</button><button type="button" class="ghost" id="teach-clear">Start over</button></div>
+      <p class="muted small" id="teach-model"></p>
+      <p class="muted small">Each board already runs a small learned model (like ESPectre's, trained on this house's earlier clips) and calibrates itself to its own quiet level, so nothing has to be recorded. Recording makes it yours: pick a board, then record each case right where that board sees it ("empty": leave the room after pressing, it waits for nobody). Half a minute of each, a few times on different days, is plenty. <b>Train</b> fits a new model on everything recorded (scored on recordings it didn't learn from) and sends it to every board over the air; the boards keep it. Needs the firmware from 2026-11-21 or later.</p>
+    </section>
     <section class="row2">
       <article class="card act-now" id="act-now" data-state="uncalibrated">
         <div class="card-head"><h2>Activity now</h2><span id="act-meta" class="muted small"></span></div>

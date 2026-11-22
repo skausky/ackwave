@@ -61,6 +61,25 @@ int main(void) {
         len = parse_csi_data(line + off, len, buf);      // either line format
         if (len < 128) continue;
         if (kind < 0 || kind > 1) continue;  // the Python parser rejects these too
+        if (src == 0 && kind == 1) {         // learned features on node 0's ACKs (FEAT lines)
+            static ml_state_t ml;
+            static bool ml_ready;
+            if (!ml_ready) { ml_init(&ml); ml_ready = true; }
+            float af[N_SC];
+            static ml_model_t mdl;
+            static ml_quiet_t qt;
+            static ml_vote_t vt;
+            if (!mdl.np) ml_model_default(&mdl);
+            if (lltf_amplitudes(buf, len, af) && ml_feed(&ml, ts, af, rssi)) {
+                printf("FEAT %lld %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f\n", (long long)(ml.next_us - 1000000), ml.f[0], ml.f[1],
+                       ml.f[2], ml.f[3], ml.f[4], ml.f[5], ml.f[6], ml.f[7]);
+                ml_quiet_add(&qt, ml.f);
+                float pr[3];
+                float pm = ml_forward(&mdl, ml.f, &qt, pr);
+                int ch = ml_vote(&vt, pm > 0.5f);
+                printf("ML %lld %.5f %d %d\n", (long long)(ml.next_us - 1000000), pm, vt.motion, ch);
+            }
+        }
         if (src == 0 && kind == 1) {
             float am[N_SC];
             if (lltf_amplitudes(buf, len, am) && br_feed(&br, ts, am))

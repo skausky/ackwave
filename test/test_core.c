@@ -1294,10 +1294,42 @@ int main(void) {
             for (int i = 0; i < REP_SEEN_MAX; i++) { memcpy(x.seen[i].mac, AP1, 6); x.seen[i].mac[5] = (uint8_t)i; }
             x.has_order = true; x.ord_boot = 3; x.ord_n = 9;
             x.has_breath = true; x.br_level = BR_CLEAR; x.br_rate2 = 28; x.br_prom = 200; x.br_agree = 75;
+            x.has_ml = true; x.ml_motion = 1; x.ml_p[0] = 10; x.ml_p[1] = 20; x.ml_p[2] = 225;
+            for (int i = 0; i < 8; i++) x.ml_f[i] = (int16_t)(i * 1000 - 3500);
             int n = build_report(h, B1, HUBM, AP1, 6, &rp, &x, 46, aes128_block, &ak);
-            CHECK(n == 438 && n <= REPORT_MAX_LEN);
+            CHECK(n == 460 && n <= REPORT_MAX_LEN);
             CHECK(hello_open(h, n, aes128_block, &ak, &got, &y) && y.has_breath && y.br_level == BR_CLEAR &&
                   y.br_rate2 == 28 && y.br_prom == 200 && y.br_agree == 75 && y.has_order && y.n_seen == REP_SEEN_MAX);
+            CHECK(y.has_ml && y.ml_motion == 1 && y.ml_p[2] == 225 && y.ml_f[0] == -3500 && y.ml_f[7] == 3500);
+        }
+        {   // the learned model: weights over the air (MLW), forward pass, verdict
+            int a, b, nv; float vals[MLW_VALS_MAX];
+            CHECK(parse_mlw("MLW", &a, &b, vals, &nv) == MLW_QUERY && parse_mlw("MLW,default", &a, &b, vals, &nv) == MLW_DEFAULT);
+            CHECK(parse_mlw("MLW,begin,12,3", &a, &b, vals, &nv) == MLW_BEGIN && a == 12 && b == 3);
+            CHECK(parse_mlw("MLW,begin,17,3", &a, &b, vals, &nv) == MLW_BAD && parse_mlw("MLW,begin,4,2", &a, &b, vals, &nv) == MLW_BAD);
+            CHECK(parse_mlw("MLW,40,1.5,-2e-3,7", &a, &b, vals, &nv) == MLW_VALUES && a == 40 && nv == 3 && vals[1] == -2e-3f);
+            CHECK(parse_mlw("MLW,commit,27", &a, &b, vals, &nv) == MLW_COMMIT && a == 27);
+            CHECK(parse_mlw("MLW,1,x", &a, &b, vals, &nv) == MLW_BAD && parse_mlw("MLW,1,", &a, &b, vals, &nv) == MLW_BAD &&
+                  parse_mlw("MLW,1,nan", &a, &b, vals, &nv) == MLW_BAD && parse_mlw("MLWX", &a, &b, vals, &nv) == MLW_BAD);
+            CHECK(order_allowed("MLW,0,1,2") && order_allowed("MLW,commit,27"));
+            static ml_model_t mm;
+            ml_model_default(&mm);
+            CHECK(ml_model_ok(&mm) && mm.np == ml_param_count(0, 1));
+            float pr[3], quiet[ML_F] = {-3.0f, -3.0f, 1.0f, 0.1f, 0.05f, 0.5f, 0.04f, 0.3f};
+            float loud[ML_F] = {-1.5f, -1.6f, 1.2f, 0.7f, 0.2f, 0.2f, 0.15f, 1.5f};
+            CHECK(ml_forward(&mm, quiet, NULL, pr) < 0.5f && ml_forward(&mm, loud, NULL, pr) > 0.5f);
+            CHECK(fabsf(pr[0] + pr[2] - 1.0f) < 1e-5f && pr[1] == 0.0f);
+            // a 3-output model with a hidden layer: probabilities sum to 1
+            mm.nh = 4; mm.no = 3; mm.np = (uint16_t)ml_param_count(4, 3);
+            for (int i = 0; i < mm.np; i++) mm.p[i] = (i % 7 - 3) * 0.1f;
+            for (int i = 0; i < ML_F; i++) mm.p[ML_F + i] = 1.0f;                     // sd
+            CHECK(ml_model_ok(&mm));
+            ml_forward(&mm, loud, NULL, pr);
+            CHECK(fabsf(pr[0] + pr[1] + pr[2] - 1.0f) < 1e-5f && pr[0] > 0 && pr[1] > 0 && pr[2] > 0);
+            mm.np--; CHECK(!ml_model_ok(&mm));
+            ml_vote_t vt = {0};
+            CHECK(ml_vote(&vt, true) == 0 && ml_vote(&vt, true) == 1 && vt.motion);   // 2 of 3: moving
+            CHECK(ml_vote(&vt, false) == 0 && ml_vote(&vt, false) == 0 && ml_vote(&vt, false) == -1 && !vt.motion);
         }
         {   // breathing on the board: a 12 /min ripple is found, plain noise isn't
             static br_state_t br;

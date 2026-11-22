@@ -132,6 +132,13 @@ static sat_report_t my_rep;       // what our hellos say (under seen_mux; print_
 typedef struct { uint8_t f[REPORT_MAX_LEN]; int16_t len; int8_t rssi; } sat_rx_t;
 static rep_extra_t my_links;      // our links' scores (print_task fills, under seen_mux)
 static rep_extra_t my_breath;     // our breathing reading (print_task fills, under seen_mux)
+static rep_extra_t my_ml;         // the learned model's last second (print_task fills, under seen_mux)
+// The learned model: two copies, print_task uses ml_models[ml_cur]; MLW (control
+// task) fills the other and then switches. Saved as "mlw" (else the built-in).
+static ml_model_t ml_models[2], ml_load;
+static volatile int ml_cur;
+static bool ml_from_pc;            // weights loaded by MLW (else the built-in ones)
+static int ml_load_n = -1;         // params received for the model being loaded (-1: none)
 static QueueHandle_t sat_q;       // other boards' sealed hellos: opened and printed by the control task
 
 // Keys (from the PC over USB, saved): our own seals our reports; the hub
@@ -235,6 +242,13 @@ static void print_peerkeys(void) {
 // 10 s, who it hears (SURV,<board>,<mac>:<kind>:<rssi>,...); hub only
 static void print_extra(const uint8_t *who, const rep_extra_t *x) {
     static char line[24 + REP_SEEN_MAX * 28];
+    if (x->has_ml) {                     // its learned model's last second (ML and FEAT lines, as a board prints its own)
+        printf("ML," MACF ",%u,%d,%d,%d\n", MACA(who), x->ml_motion,
+               (int)(x->ml_p[0] * 100 / 255), (int)(x->ml_p[1] * 100 / 255), (int)(x->ml_p[2] * 100 / 255));
+        printf("FEAT," MACF ",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n", MACA(who), x->ml_f[0] / 1000.0,
+               x->ml_f[1] / 1000.0, x->ml_f[2] / 1000.0, x->ml_f[3] / 1000.0, x->ml_f[4] / 1000.0,
+               x->ml_f[5] / 1000.0, x->ml_f[6] / 1000.0, x->ml_f[7] / 1000.0);
+    }
     if (x->has_breath)                   // its latest breathing reading (BREATH lines, as a board prints its own)
         printf("BREATH," MACF ",%s,%.1f,%u,%u\n", MACA(who),
                x->br_level == BR_CLEAR ? "clear" : x->br_level == BR_POSSIBLE ? "possible" : "none",
@@ -964,6 +978,10 @@ static void poke_task(void *arg) {
             memcpy(ext.link, my_links.link, sizeof ext.link);
             ext.n_seen = 0;
             ext.has_order = have_ord;
+            ext.has_ml = my_ml.has_ml;
+            ext.ml_motion = my_ml.ml_motion;
+            memcpy(ext.ml_p, my_ml.ml_p, sizeof ext.ml_p);
+            memcpy(ext.ml_f, my_ml.ml_f, sizeof ext.ml_f);
             ext.has_breath = my_breath.has_breath;
             ext.br_level = my_breath.br_level; ext.br_rate2 = my_breath.br_rate2;
             ext.br_prom = my_breath.br_prom; ext.br_agree = my_breath.br_agree;
@@ -1141,7 +1159,8 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
-    int snd, smode, svol, shz, sens, sx, na, ledc, ext, kc, pk, hc, oc, omode, osecs;
+    int snd, smode, svol, shz, sens, sx, na, ledc, ext, kc, pk, hc, oc, omode, osecs, mlc, mla, mlb, mln;
+    float mlv[MLW_VALS_MAX];
     uint8_t newkey[16], pmac[6];
     ap_list_t new_aps;
     led_cfg_t new_led;
@@ -1231,6 +1250,41 @@ static void run_cmd(const char *line) {
         if (ledc != LED_QUERY && !led_save(ledc == LED_SET ? &led_cfg : NULL))
             printf("LEDSET,error,not-saved\n");
         print_led();
+    } else if ((mlc = parse_mlw(line, &mla, &mlb, mlv, &mln)) != MLW_BAD) {
+        if (mlc == MLW_BEGIN) {
+            memset(&ml_load, 0, sizeof ml_load);
+            ml_load.nh = (uint8_t)mla; ml_load.no = (uint8_t)mlb;
+            ml_load.np = (uint16_t)ml_param_count(mla, mlb);
+            ml_load_n = 0;
+        } else if (mlc == MLW_VALUES) {
+            if (ml_load_n < 0 || mla != ml_load_n || mla + mln > ml_load.np) {
+                printf("MLW,error,out-of-order,%d\n", ml_load_n);
+                return;
+            }
+            memcpy(ml_load.p + mla, mlv, sizeof(float) * (size_t)mln);
+            ml_load_n += mln;
+            printf("MLW,got,%d\n", ml_load_n);
+            return;
+        } else if (mlc == MLW_COMMIT) {
+            if (ml_load_n != ml_load.np || mla != ml_load.np || !ml_model_ok(&ml_load)) {
+                printf("MLW,error,incomplete,%d\n", ml_load_n);
+                return;
+            }
+            int nxt = 1 - ml_cur;
+            ml_models[nxt] = ml_load;
+            ml_cur = nxt;                    // print_task uses it from the next second
+            ml_from_pc = true;
+            nvs_put("mlw", &ml_load, sizeof ml_load);
+            ml_load_n = -1;
+        } else if (mlc == MLW_DEFAULT) {
+            int nxt = 1 - ml_cur;
+            ml_model_default(&ml_models[nxt]);
+            ml_cur = nxt;
+            ml_from_pc = false;
+            nvs_put("mlw", NULL, 0);
+        }
+        printf("MLW,%s,%d,%d,%d\n", ml_from_pc ? "loaded" : "built-in", ml_models[ml_cur].nh, ml_models[ml_cur].no,
+               ml_models[ml_cur].np);
     } else if ((oc = parse_out(line, &omode, &osecs)) != OUT_BAD) {
         if (oc == OUT_DEFAULT) {
             out_mode = OUT_MODE; out_secs = OUT_OFF_S;
@@ -1748,6 +1802,34 @@ static void print_task(void *arg) {
             link_acks = link_rssi_sum = 0;
         }
         md_update(&det, p.src, p.kind, p.ts, p.rssi, p.buf, p.len);
+        if (p.src == 0 && p.kind == 1) {     // the learned model on the router link: every second
+            static ml_state_t mls;
+            static ml_quiet_t mlq;
+            static ml_vote_t mlv;
+            static bool mls_ready;
+            if (!mls_ready) { ml_init(&mls); mls_ready = true; }
+            float af[N_SC];
+            if (lltf_amplitudes(p.buf, p.len, af) && ml_feed(&mls, p.ts, af, p.rssi)) {
+                ml_quiet_add(&mlq, mls.f);
+                float pr[3];
+                float pm = ml_forward(&ml_models[ml_cur], mls.f, &mlq, pr);
+                ml_vote(&mlv, pm > 0.5f);
+                taskENTER_CRITICAL(&seen_mux);
+                my_ml.has_ml = true;
+                my_ml.ml_motion = mlv.motion;
+                for (int k = 0; k < 3; k++) my_ml.ml_p[k] = (uint8_t)(pr[k] * 255.0f + 0.5f);
+                for (int k = 0; k < 8; k++) {
+                    float v = mls.f[k] * 1000.0f;
+                    my_ml.ml_f[k] = (int16_t)(v > 32767 ? 32767 : v < -32767 ? -32767 : v);
+                }
+                taskEXIT_CRITICAL(&seen_mux);
+                // ML,<board>,<moving 0/1>,<p empty>,<p still>,<p moving> (%), then its 8 features
+                printf("ML," MACF ",%d,%d,%d,%d\n", MACA(my_mac), mlv.motion,
+                       (int)(pr[0] * 100 + 0.5f), (int)(pr[1] * 100 + 0.5f), (int)(pr[2] * 100 + 0.5f));
+                printf("FEAT," MACF ",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n", MACA(my_mac), mls.f[0], mls.f[1],
+                       mls.f[2], mls.f[3], mls.f[4], mls.f[5], mls.f[6], mls.f[7]);
+            }
+        }
         if (p.src == 0 && p.kind == 1) {     // breathing on the router link: every 2 s
             static br_state_t br;
             static bool br_ready;
@@ -1919,6 +2001,9 @@ void app_main(void) {
     configASSERT(ch_lock);
     have_hub = nvs_take("hub", hub_mac, 6);
     have_ord = nvs_take("ordmk", ord_mk, sizeof ord_mk);
+    ml_model_default(&ml_models[0]);
+    if (nvs_take("mlw", &ml_load, sizeof ml_load) && ml_model_ok(&ml_load)) { ml_models[0] = ml_load; ml_from_pc = true; }
+    ml_cur = 0;
     int32_t hch;
     if (nvs_take("hubch", &hch, sizeof hch)) hubl.ch = hch;
     uint8_t k[16];

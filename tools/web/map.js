@@ -445,6 +445,9 @@ window.AckMap = (() => {
   const track = { grid: null, people: [], nextId: 0, est: null, base: new Map(), at: 0 };
   let zoneIn = {};                                  // zone id -> people inside, from the Pi's tracking
   let breathing = {};                               // 'hub' / 'sat:<mac>' -> breathing near that board
+  let todayMap = null;                              // where people were today (the Pi's tracking): {cs, cells}
+  let homeDetails = false, showToday = false;       // Home: the technical layers; today's heat (the page remembers them)
+  const simple = () => readOnly && !homeDetails;   // Home's clean view
   const CELL = 0.25;
   const SIG0 = 0.45, SIG1 = 0.25, MODEL_ERR = 1.2;          // a link's scatter: idle noise, plus more the stronger it reacts
   let heatKey = '', heatView = null, viewSeen = '', viewMovedAt = 0;
@@ -757,11 +760,13 @@ window.AckMap = (() => {
     locate(t);
     stepTrack(t);
     drawPlans();
+    if (simple() && M.plans.some((p) => !p.hidden && p.img)) {   // the pictures a little darker: people and boards stand out
+      ctx.fillStyle = alpha(css('--bg') || '#000000', 0.28); ctx.fillRect(0, 0, W, H);
+    }
+    drawToday();
     drawAcc();
     drawZones();
-    grid();
-    drawLikely();
-    drawHints();
+    if (!simple()) { grid(); drawLikely(); drawHints(); }
     const L = links(), lam = lambda(), motionC = css('--motion');
     const pulse = 0.5 + 0.5 * Math.sin(t / 260);
     const hv = heat(L, t);                         // where each link is sensitive (estimate)
@@ -770,7 +775,7 @@ window.AckMap = (() => {
       const k = M.view.s / hv.s;
       ctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * (W / 2 - (W / 2) * k + (hv.x - M.view.x) * M.view.s),
                        dpr * (H / 2 - (H / 2) * k + (hv.y - M.view.y) * M.view.s));
-      ctx.drawImage(heatCv, 0, 0, W, H);
+      if (!simple()) ctx.drawImage(heatCv, 0, 0, W, H);   // the clean view: only where motion is now
       ctx.globalAlpha = 0.45 + 0.55 * pulse;
       ctx.drawImage(heatMv, 0, 0, W, H);
       ctx.globalAlpha = 1;
@@ -779,10 +784,15 @@ window.AckMap = (() => {
     for (const { r, a: e, n, color, d } of L) {    // zones first, dots on top
       if (d < 0.05) continue;
       const rot = Math.atan2(n.y - e.y, n.x - e.x), cx = (e.x + n.x) / 2, cy = (e.y + n.y) / 2;
+      const mv = moving(r), wk = weak(r) && !mv;
+      if (simple()) {                              // the clean view: a thin line, lit while it sees motion
+        ctx.strokeStyle = mv ? motionC : alpha(color, wk ? 0.18 : 0.35); ctx.lineWidth = mv ? 2.5 : 1;
+        ctx.beginPath(); ctx.moveTo(X(e.x), Y(e.y)); ctx.lineTo(X(n.x), Y(n.y)); ctx.stroke();
+        continue;
+      }
       const A = (d + lam / 2) / 2, b = Math.sqrt(Math.max(A * A - d * d / 4, 0));
       const a = Math.max(A * Math.hypot(n.x - e.x, n.y - e.y) / d, b);   // seen from above
       ellipse(cx, cy, a, b, rot);                  // the first Fresnel zone: a thin outline
-      const mv = moving(r), wk = weak(r) && !mv;
       ctx.strokeStyle = mv ? motionC : alpha(color, wk ? 0.3 : 0.8); ctx.lineWidth = mv ? 1.8 : 1;
       ctx.setLineDash(wk ? [4, 4] : []);
       ctx.stroke();
@@ -1147,6 +1157,22 @@ window.AckMap = (() => {
       dirty = true;
     }
   }
+  // Where people were today: the Pi counts the tracking's spots on a 0.5 m grid
+  function drawToday() {
+    if (!showToday || !todayMap || !todayMap.cells || !todayMap.cells.length) return;
+    const cs = todayMap.cs, mx = Math.max(...todayMap.cells.map((c) => c[2])), r = Math.max(6, cs * 1.6 * M.view.s);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';         // soft spots that add up where people spend time
+    for (const [ix, iy, n] of todayMap.cells) {
+      const q = Math.sqrt(n / mx), x = X((ix + 0.5) * cs), y = Y((iy + 0.5) * cs);
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, `rgba(255, ${Math.round(170 - 110 * q)}, 50, ${0.05 + 0.3 * q})`);
+      g.addColorStop(1, 'rgba(255, 120, 50, 0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+    }
+    ctx.restore();
+  }
   function drawZones() {
     for (const z of M.zones || []) {
       if (z.near) {                                  // around its router or board
@@ -1204,8 +1230,13 @@ window.AckMap = (() => {
     if (!g || !track.people.length) return;
     const many = track.people.length > 1;
     track.people.forEach((p, i) => {
-      const e = p.est;
-      if (!e) return;
+      if (!p.est) return;
+      // glide: the dot eases towards each new estimate (about a quarter second) instead of jumping
+      const k = p.showAt ? 1 - Math.exp(-Math.min(1000, t - p.showAt) / 250) : 1;
+      p.show = p.show ? { x: p.show.x + (p.est.x - p.show.x) * k, y: p.show.y + (p.est.y - p.show.y) * k } : { x: p.est.x, y: p.est.y };
+      p.showAt = t;
+      const e = { ...p.est, x: p.show.x, y: p.show.y };
+      dirty = true;
       const col = p.color.startsWith('--') ? css(p.color) : p.color;
       const fade = Math.max(0, 1 - Math.max(0, t - p.seen - 800) / (KEEP_MS - 800));
       ctx.save();
@@ -1223,8 +1254,9 @@ window.AckMap = (() => {
       const pulse = reduced.matches ? 0 : 0.5 + 0.5 * Math.sin(t / 300 + i);
       ctx.shadowColor = col; ctx.shadowBlur = 12 + 10 * pulse;
       ctx.fillStyle = col;
-      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, simple() ? 8 : 5, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
+      if (simple()) { ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 2; ctx.stroke(); }
       if (p.heading !== null && p.speed > 0.25) {     // heading: an arrow out of the dot
         const a = p.heading, L2 = 14 + 10 * Math.min(1, p.speed);
         ctx.strokeStyle = col; ctx.lineWidth = 2;
@@ -2255,7 +2287,7 @@ window.AckMap = (() => {
     },
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
-      if (slow && slow.tracked) { zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; }
+      if (slow && slow.tracked) { zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; todayMap = slow.tracked.today || null; }
       if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPeople = slow.demo_people || []; if (slow.channel) channel = slow.channel; }
       if (header) {
         boardMotion = hubMoving(header);
@@ -2303,6 +2335,9 @@ window.AckMap = (() => {
     fmtLen,                                    // for tests in the browser
     _env: () => ({ fit: envFit, hearings, nodes: [...M.nodes.values()].map(({ key, x, y, placed, board }) => ({ key, x, y, placed, board })) }),
     _nodeRef: (k) => M.nodes.get(k),             // tests: one node itself
+    setDetails: (on) => { homeDetails = !!on; heatKey = ''; dirty = true; },
+    setToday: (on) => { showToday = !!on; dirty = true; },
+    viewFlags: () => ({ details: homeDetails, today: showToday }),
     _layers: () => M.plans.map(({ img, ...p }) => p),
     _screenOf(id, u, v) {                      // where picture pixel (u, v) is on the canvas
       const p = plan(id), k = p.w / p.iw, c = Math.cos(p.rot), s = Math.sin(p.rot);

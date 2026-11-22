@@ -787,7 +787,7 @@ static inline int poke_ta_node(const uint8_t me[6], const uint8_t *dmac) {
 // The hello carries no network name, but it is not encrypted: anyone nearby
 // with a sniffer could read whether a board sees motion.
 #define HELLO_LEN    71         // a report with no extra sections (version 4's size)
-#define REPORT_MAX_LEN 448      // a report with every section (version 5): 53 + 10 + links 110 + order 9 + breathing 6 + survey 242 + tag 8 = 438
+#define REPORT_MAX_LEN 480      // a report with every section (version 5): 53 + 10 + links 110 + order 9 + breathing 6 + learned 22 + survey 242 + tag 8 = 460
 #define HELLO_V1_LEN 40         // a hello: who and where (broadcast, every board)
 #define HELLO_EVERY_MS 500      // hellos and reports each at a fixed rate: timing says nothing
 #define MAX_PEERS    8          // boards one board lists, and keys a hub holds
@@ -829,7 +829,7 @@ typedef struct {
 //  - links (every report): each link's target, and its short and long scores
 //    relative to the board's quiet level (x20, so 20 = at the quiet level)
 //  - survey (every 10 s): who the board hears and how strongly (the map lays itself out)
-enum { TLV_LINKS = 1, TLV_SURVEY = 2, TLV_ORDER = 3, TLV_BREATH = 4 };
+enum { TLV_LINKS = 1, TLV_SURVEY = 2, TLV_ORDER = 3, TLV_BREATH = 4, TLV_ML = 5 };
 enum { RL_ACK = 1, RL_AP = 2, RL_DEVICE = 4 };           // link flags
 enum { RS_ROUTER = 0, RS_BOARD = 1, RS_DEVICE = 2 };     // survey kinds
 #define REP_LINKS_MAX 12
@@ -844,6 +844,9 @@ typedef struct {
     uint32_t ord_boot, ord_n;
     bool has_breath;            // breathing on its router link (TLV_BREATH): BR_* level,
     uint8_t br_level, br_rate2, br_prom, br_agree;   // rate x2 (/min), prominence (capped), agree %
+    bool has_ml;                // the learned model's last second (TLV_ML): its verdict,
+    uint8_t ml_motion, ml_p[3]; // [empty, still, moving] x255,
+    int16_t ml_f[8];            // and the 8 features x1000 (the PC records clips from them)
 } rep_extra_t;
 
 static inline uint8_t rep_k20(float score, float floor) {
@@ -914,6 +917,11 @@ static inline int build_report(uint8_t out[REPORT_MAX_LEN], const uint8_t me[6],
             m[n++] = x->link[i].flags; m[n++] = x->link[i].ks; m[n++] = x->link[i].kl;
         }
     }
+    if (x && x->has_ml) {
+        m[n++] = TLV_ML; m[n++] = 20;
+        m[n++] = x->ml_motion; m[n++] = x->ml_p[0]; m[n++] = x->ml_p[1]; m[n++] = x->ml_p[2];
+        for (int i = 0; i < 8; i++) { m[n++] = (uint8_t)(x->ml_f[i] & 0xFF); m[n++] = (uint8_t)((uint16_t)x->ml_f[i] >> 8); }
+    }
     if (x && x->has_breath) {
         m[n++] = TLV_BREATH; m[n++] = 4;
         m[n++] = x->br_level; m[n++] = x->br_rate2; m[n++] = x->br_prom; m[n++] = x->br_agree;
@@ -978,6 +986,7 @@ static inline bool hello_open(const uint8_t *f, int len, aes_block_fn enc, void 
         x->n_links = x->n_seen = 0;
         x->has_order = false;
         x->has_breath = false;
+        x->has_ml = false;
         for (int i = REPORT_LEN; i + 2 <= mlen;) {
             int tag = m[i], tl = m[i + 1];
             const uint8_t *v = m + i + 2;
@@ -987,6 +996,11 @@ static inline bool hello_open(const uint8_t *f, int len, aes_block_fn enc, void 
                     rep_link_t *e = &x->link[x->n_links++];
                     memcpy(e->mac, v + k, 6); e->flags = v[k + 6]; e->ks = v[k + 7]; e->kl = v[k + 8];
                 }
+            else if (tag == TLV_ML && tl >= 20) {
+                x->has_ml = true;
+                x->ml_motion = v[0]; x->ml_p[0] = v[1]; x->ml_p[1] = v[2]; x->ml_p[2] = v[3];
+                for (int i = 0; i < 8; i++) x->ml_f[i] = (int16_t)(v[4 + 2 * i] | v[5 + 2 * i] << 8);
+            }
             else if (tag == TLV_BREATH && tl >= 4) {
                 x->has_breath = true;
                 x->br_level = v[0]; x->br_rate2 = v[1]; x->br_prom = v[2]; x->br_agree = v[3];
@@ -1085,7 +1099,7 @@ static inline bool order_open(const uint8_t *f, int len, const uint8_t me[6], ae
 // recalibrate, sensitivity, sounds, the LED and the light output. Never keys, the hub, pokes or
 // a settings reset: those need its USB cable.
 static inline bool order_allowed(const char *line) {
-    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE", "OUT" };
+    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE", "OUT", "MLW" };
     for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++) {
         size_t k = strlen(ok[i]);
         if (strncmp(line, ok[i], k) == 0 && (ok[i][k - 1] == ',' || line[k] == '\0' || line[k] == ',')) return true;
@@ -1812,6 +1826,306 @@ static inline bool br_feed(br_state_t *b, int64_t ts_us, const float a[N_SC]) {
     b->next_us = ts_us + BR_EVERY_US;
     br_estimate(b, b->cur - 1);
     return b->have;
+}
+
+
+// ---------- Learned motion features (twin: tools/mlfeat.py) ----------
+// Every second, 8 numbers that say *how* the router link's signal moves, all
+// ratios so the radio's gain cancels: the shape's change over 0.1 s (last 1 s
+// and 4 s, and its burstiness), the per-packet spread's smoothness, range and
+// crossing rate, the subcarriers' wobble, and the signal strength's spread.
+// A small model (weights on the board, updatable over the air: MLW) turns
+// them into empty / still / moving. Runs on one link (the decision link).
+#define ML_F        8
+#define ML_RING     512             // packets kept (4 s at up to ~120/s)
+#define ML_LAGS     32              // recent normalised shapes, for the 0.1 s lag
+#define ML_LAG_US   100000
+#define ML_WIN_US   1000000
+#define ML_LONG_US  4000000
+#define ML_MIN_PKTS 15
+typedef struct { int64_t t, tj; float d, sp, rssi; } ml_pkt_t;   // tj: the lag packet's time (-1: none)
+typedef struct {
+    ml_pkt_t r[ML_RING];
+    int head, n;
+    float lagv[ML_LAGS][N_SC];      // normalised shapes, newest at lag_head - 1
+    int64_t lagt[ML_LAGS];
+    int lag_head, lag_n;
+    double sc_s[N_SC], sc_q[N_SC];  // per-subcarrier sums over the next window's last second (tcv)
+    int sc_n;
+    int64_t sc_from;                // the second those sums cover starts after this
+    int64_t next_us;                // next window end (-1: not started)
+    int64_t t0;                     // first packet
+    float f[ML_F];                  // the latest features
+    bool have;
+} ml_state_t;
+
+static inline void ml_init(ml_state_t *m) {
+    memset(m, 0, sizeof *m);
+    m->next_us = -1;
+    m->t0 = -1;
+    m->sc_from = -1;
+}
+
+static inline int ml_cmpf(const void *a, const void *b) {
+    float x = *(const float *)a, y = *(const float *)b;
+    return x < y ? -1 : x > y;
+}
+// numpy.percentile (linear) of a sorted array
+static inline float ml_pct(const float *v, int n, float q) {
+    float pos = q / 100.0f * (float)(n - 1);
+    int lo = (int)pos;
+    if (lo >= n - 1) return v[n - 1];
+    return v[lo] + (pos - (float)lo) * (v[lo + 1] - v[lo]);
+}
+
+static inline bool ml_window(ml_state_t *m, int64_t te) {
+    static float sp[ML_RING];
+    // the packets in the last 1 s (w) and 4 s (lw); a jump counts only if its
+    // lag packet is inside the 4 s too (as mlfeat.py: searchsorted within lw)
+    int nw = 0, nd = 0, ndw = 0;
+    double dsum = 0, dsumw = 0, rs = 0, rq = 0;
+    double ch_s[4] = {0}; int ch_n[4] = {0};
+    for (int k = 0; k < m->n; k++) {
+        const ml_pkt_t *p = &m->r[(m->head - m->n + k + ML_RING) % ML_RING];
+        if (p->t <= te - ML_LONG_US || p->t > te) continue;
+        bool inw = p->t > te - ML_WIN_US;
+        if (inw) { sp[nw++] = p->sp; rs += p->rssi; rq += (double)p->rssi * p->rssi; }
+        if (p->tj >= 0 && p->tj > te - ML_LONG_US) {
+            nd++; dsum += p->d;
+            if (inw) {
+                ndw++; dsumw += p->d;
+                int c = (int)((p->t - (te - ML_WIN_US) - 1) / (ML_WIN_US / 4));
+                if (c >= 0 && c < 4) { ch_s[c] += p->d; ch_n[c]++; }
+            }
+        }
+    }
+    if (nw < ML_MIN_PKTS || ndw < ML_MIN_PKTS - 1) return false;
+    float jump = (float)(dsumw / ndw), jump4 = (float)(dsum / nd);
+    float best = -1;
+    for (int c = 0; c < 4; c++) if (ch_n[c] && (float)(ch_s[c] / ch_n[c]) > best) best = (float)(ch_s[c] / ch_n[c]);
+    float burst = (best < 0 ? jump : best) / (jump > 1e-9f ? jump : 1e-9f);
+    double mean = 0;
+    for (int i = 0; i < nw; i++) mean += sp[i];
+    mean /= nw;
+    double den = 0, num = 0;
+    int zc = 0;
+    for (int i = 0; i < nw; i++) {
+        double s0 = sp[i] - mean;
+        den += s0 * s0;
+        if (i) {
+            double s1 = sp[i - 1] - mean;
+            num += s0 * s1;
+            int a = (s0 > 0) - (s0 < 0), b = (s1 > 0) - (s1 < 0);
+            if (a != b) zc++;
+        }
+    }
+    float sp_ac = den > 0 ? (float)(num / den) : 0.0f;
+    float sp_zcr = nw > 1 ? (float)zc / (float)(nw - 1) : 0.0f;
+    qsort(sp, (size_t)nw, sizeof sp[0], ml_cmpf);
+    float q1 = ml_pct(sp, nw, 25), q2 = ml_pct(sp, nw, 50), q3 = ml_pct(sp, nw, 75);
+    float sp_iqr = (q3 - q1) / (q2 > 1e-9f ? q2 : 1e-9f);
+    float cv[N_SC];
+    for (int k = 0; k < N_SC; k++) {
+        double mu = m->sc_s[k] / m->sc_n, var = m->sc_q[k] / m->sc_n - mu * mu;
+        cv[k] = (float)(sqrt(var > 0 ? var : 0) / (mu > 1e-9 ? mu : 1e-9));
+    }
+    qsort(cv, N_SC, sizeof cv[0], ml_cmpf);
+    float tcv = 0.5f * (cv[N_SC / 2 - 1] + cv[N_SC / 2]);
+    double rm = rs / nw, rv = rq / nw - rm * rm;
+    m->f[0] = logf(jump + 1e-6f); m->f[1] = logf(jump4 + 1e-6f); m->f[2] = burst; m->f[3] = sp_ac;
+    m->f[4] = sp_iqr; m->f[5] = sp_zcr; m->f[6] = tcv; m->f[7] = (float)sqrt(rv > 0 ? rv : 0);
+    return true;
+}
+
+// One packet's amplitudes (lltf_amplitudes) and RSSI; true when new features are ready
+static inline bool ml_feed(ml_state_t *m, int64_t ts, const float a[N_SC], int rssi) {
+    float mean = 0;
+    for (int i = 0; i < N_SC; i++) mean += a[i];
+    mean /= N_SC;
+    if (mean <= 0) return false;
+    if (m->n && ts < m->r[(m->head - 1 + ML_RING) % ML_RING].t) ml_init(m);   // clock went back
+    bool done = false;
+    if (m->next_us < 0) { m->t0 = ts; m->next_us = ts + ML_LONG_US; }
+    // windows that end before this packet: evaluated now, without it (as mlfeat.py)
+    while (ts > m->next_us) {
+        m->have = m->sc_n > 0 && m->sc_from == m->next_us - ML_WIN_US && ml_window(m, m->next_us);
+        done = done || m->have;
+        m->next_us += ML_WIN_US;
+    }
+    float v[N_SC], sp = 0;
+    for (int i = 0; i < N_SC; i++) { v[i] = a[i] / mean; }
+    float vm = 0;
+    for (int i = 0; i < N_SC; i++) vm += v[i];
+    vm /= N_SC;
+    for (int i = 0; i < N_SC; i++) sp += (v[i] - vm) * (v[i] - vm);
+    sp = sqrtf(sp / N_SC);
+    // the lag packet: the newest one at least 0.1 s older
+    int64_t tj = -1;
+    float d = 0;
+    for (int k = 0; k < m->lag_n; k++) {
+        int s = (m->lag_head - 1 - k + ML_LAGS) % ML_LAGS;
+        if (m->lagt[s] <= ts - ML_LAG_US) {
+            tj = m->lagt[s];
+            for (int i = 0; i < N_SC; i++) d += fabsf(v[i] - m->lagv[s][i]);
+            d /= N_SC;
+            break;
+        }
+    }
+    ml_pkt_t *p = &m->r[m->head];
+    p->t = ts; p->tj = tj; p->d = d; p->sp = sp; p->rssi = (float)rssi;
+    m->head = (m->head + 1) % ML_RING;
+    if (m->n < ML_RING) m->n++;
+    memcpy(m->lagv[m->lag_head], v, sizeof v);
+    m->lagt[m->lag_head] = ts;
+    m->lag_head = (m->lag_head + 1) % ML_LAGS;
+    if (m->lag_n < ML_LAGS) m->lag_n++;
+    if (ts > m->next_us - ML_WIN_US) {        // in the coming window's last second
+        if (m->sc_from != m->next_us - ML_WIN_US) {
+            memset(m->sc_s, 0, sizeof m->sc_s); memset(m->sc_q, 0, sizeof m->sc_q); m->sc_n = 0;
+            m->sc_from = m->next_us - ML_WIN_US;
+        }
+        for (int i = 0; i < N_SC; i++) { m->sc_s[i] += v[i]; m->sc_q[i] += (double)v[i] * v[i]; }
+        m->sc_n++;
+    }
+    return done;
+}
+
+
+// ---------- The learned model (weights on the board, updatable: MLW) ----------
+// Inputs: the 8 features, the first two (the shape's change) measured against
+// this board's own quiet level (its 20th percentile over the last 5 min, as a
+// calibration that never stops), then standardised. Either logistic (no hidden
+// layer) or one tanh hidden layer; 1 output (moving) or 3 (empty, still,
+// moving). Params, flat: mu[8] sd[8] ref[2] then w1[8*nh] b1[nh] w2[nh*no] b2[no]
+// (nh = 0: w2[8*no] b2[no]). ref: the training set's quiet level of f0, f1.
+#define ML_H_MAX   16
+#define ML_P_MAX   (2 * ML_F + 2 + ML_F * ML_H_MAX + ML_H_MAX + ML_H_MAX * 3 + 3)
+#define ML_QUIET_N 300              // 5 min of features at 1/s
+#define ML_QUIET_MIN 60             // before its quiet level counts
+typedef struct { uint8_t nh, no; uint16_t np; float p[ML_P_MAX]; } ml_model_t;
+
+static inline int ml_param_count(int nh, int no) {
+    return 2 * ML_F + 2 + (nh ? ML_F * nh + nh + nh * no + no : ML_F * no + no);
+}
+static inline bool ml_model_ok(const ml_model_t *m) {
+    return m->nh <= ML_H_MAX && (m->no == 1 || m->no == 3) && m->np == ml_param_count(m->nh, m->no);
+}
+
+typedef struct {
+    float ring[ML_QUIET_N][2];
+    int head, n;
+    float q[2];                     // the quiet level of f0, f1 (valid once n >= ML_QUIET_MIN)
+} ml_quiet_t;
+
+// 20th percentile of the last ML_QUIET_N values (sorted copy: 300 floats, once a second)
+static inline void ml_quiet_add(ml_quiet_t *qt, const float f[ML_F]) {
+    qt->ring[qt->head][0] = f[0]; qt->ring[qt->head][1] = f[1];
+    qt->head = (qt->head + 1) % ML_QUIET_N;
+    if (qt->n < ML_QUIET_N) qt->n++;
+    static float v[ML_QUIET_N];
+    for (int k = 0; k < 2; k++) {
+        for (int i = 0; i < qt->n; i++) v[i] = qt->ring[i][k];
+        qsort(v, (size_t)qt->n, sizeof v[0], ml_cmpf);
+        qt->q[k] = ml_pct(v, qt->n, 20);
+    }
+}
+
+// out: [p_empty, p_still, p_moving] (1-output models: [1-p, 0, p]); returns p_moving
+static inline float ml_forward(const ml_model_t *m, const float f[ML_F], const ml_quiet_t *qt, float out[3]) {
+    const float *mu = m->p, *sd = m->p + ML_F, *ref = m->p + 2 * ML_F, *w = m->p + 2 * ML_F + 2;
+    float x[ML_F];
+    for (int i = 0; i < ML_F; i++) {
+        float v = f[i];
+        if (i < 2 && qt && qt->n >= ML_QUIET_MIN) v += ref[i] - qt->q[i];   // this board's quiet = the training's
+        x[i] = (v - mu[i]) / (sd[i] > 1e-9f ? sd[i] : 1e-9f);
+    }
+    float h[ML_H_MAX], z[3] = {0};
+    const float *in = x;
+    int nin = ML_F;
+    if (m->nh) {
+        const float *w1 = w, *b1 = w + ML_F * m->nh;
+        for (int j = 0; j < m->nh; j++) {
+            float a = b1[j];
+            for (int i = 0; i < ML_F; i++) a += x[i] * w1[i * m->nh + j];
+            h[j] = tanhf(a);
+        }
+        in = h; nin = m->nh;
+        w = b1 + m->nh;
+    }
+    const float *w2 = w, *b2 = w + nin * m->no;
+    for (int o = 0; o < m->no; o++) {
+        float a = b2[o];
+        for (int i = 0; i < nin; i++) a += in[i] * w2[i * m->no + o];
+        z[o] = a;
+    }
+    if (m->no == 1) {
+        float p = 1.0f / (1.0f + expf(-z[0]));
+        out[0] = 1 - p; out[1] = 0; out[2] = p;
+        return p;
+    }
+    float mx = z[0] > z[1] ? (z[0] > z[2] ? z[0] : z[2]) : (z[1] > z[2] ? z[1] : z[2]), s = 0;
+    for (int o = 0; o < 3; o++) { out[o] = expf(z[o] - mx); s += out[o]; }
+    for (int o = 0; o < 3; o++) out[o] /= s;
+    return out[2];
+}
+
+// The verdict: moving once 2 of the last 3 seconds say so, still after 3 in a row don't
+typedef struct { uint8_t recent; int nrec; bool motion; } ml_vote_t;
+static inline int ml_vote(ml_vote_t *v, bool says) {
+    v->recent = (uint8_t)(((v->recent << 1) | says) & 7);
+    if (v->nrec < 3) v->nrec++;
+    int on = (v->recent & 1) + ((v->recent >> 1) & 1) + ((v->recent >> 2) & 1);
+    bool was = v->motion;
+    if (!was && on >= 2) v->motion = true;
+    else if (was && v->nrec == 3 && on == 0) v->motion = false;
+    return v->motion == was ? 0 : v->motion ? 1 : -1;
+}
+
+static const float ML_DEFAULT_P[] = {  // tools/ml_motion.json: logistic, trained on our own clips
+    -2.85863f, -2.85406f, 1.09646f, 0.20521f, 0.07422f, 0.42898f, 0.05869f, 0.35351f, 0.20348f, 0.18420f, 0.06923f, 0.26063f, 0.03435f, 0.11547f, 0.02176f, 0.16903f, -2.99486f, -2.98086f, -0.37494f, 0.52192f, -0.00262f, 0.91648f, -0.25597f, 0.12388f, 0.55290f, 0.48504f, -0.32294f};
+static inline void ml_model_default(ml_model_t *m) {
+    m->nh = 0; m->no = 1; m->np = (uint16_t)(sizeof ML_DEFAULT_P / sizeof ML_DEFAULT_P[0]);
+    memcpy(m->p, ML_DEFAULT_P, sizeof ML_DEFAULT_P);
+}
+
+// MLW: load weights from the PC or the hub, a few at a time (each a command line)
+//   MLW                       report (MLW,<built-in|loaded>,<nh>,<no>,<np>)
+//   MLW,begin,<nh>,<no>       start a new model
+//   MLW,<offset>,<v>[,<v>...] its params from offset (plain decimal numbers)
+//   MLW,commit,<np>           use it (and save it) if every param arrived
+//   MLW,default               back to the built-in model
+enum { MLW_BAD = -1, MLW_QUERY = 0, MLW_BEGIN, MLW_VALUES, MLW_COMMIT, MLW_DEFAULT };
+#define MLW_VALS_MAX 16
+static inline int parse_mlw(const char *line, int *a, int *b, float *vals, int *nvals) {
+    *a = *b = 0; *nvals = 0;
+    if (!line || strncmp(line, "MLW", 3) != 0) return MLW_BAD;
+    const char *s = line + 3;
+#define MLW_END(c) ((c) == '\0' || (c) == '\r' || (c) == '\n')
+    if (MLW_END(*s)) return MLW_QUERY;
+    if (*s++ != ',') return MLW_BAD;
+    if (strncmp(s, "default", 7) == 0 && MLW_END(s[7])) return MLW_DEFAULT;
+    int kind = strncmp(s, "begin,", 6) == 0 ? MLW_BEGIN : strncmp(s, "commit,", 7) == 0 ? MLW_COMMIT : MLW_VALUES;
+    if (kind == MLW_BEGIN) s += 6; else if (kind == MLW_COMMIT) s += 7;
+    char *e;
+    long x = strtol(s, &e, 10);
+    if (e == s || x < 0 || x > 4096) return MLW_BAD;
+    *a = (int)x; s = e;
+    if (kind == MLW_COMMIT) return MLW_END(*s) ? MLW_COMMIT : MLW_BAD;
+    if (kind == MLW_BEGIN) {
+        if (*s++ != ',') return MLW_BAD;
+        x = strtol(s, &e, 10);
+        if (e == s || x < 1 || x > 3 || !MLW_END(*e)) return MLW_BAD;
+        *b = (int)x;
+        return *a <= ML_H_MAX && (*b == 1 || *b == 3) ? MLW_BEGIN : MLW_BAD;
+    }
+    while (*s == ',' && *nvals < MLW_VALS_MAX) {
+        s++;
+        float v = strtof(s, &e);
+        if (e == s || !(v == v) || v > 1e6f || v < -1e6f) return MLW_BAD;
+        vals[(*nvals)++] = v; s = e;
+    }
+#undef MLW_END
+    return *nvals && (*s == '\0' || *s == '\r' || *s == '\n') ? MLW_VALUES : MLW_BAD;
 }
 
 
