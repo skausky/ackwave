@@ -1106,6 +1106,7 @@ class Dashboard:
             return [End(cx, cy, z)] + [End(cx + r * math.cos(a), cy + r * math.sin(a), z)
                                        for a in (0, math.pi / 2, math.pi, -math.pi / 2)]
         q = lambda x: round(min(3.0, max(0.0, x)) * 20) / 20
+        off = set(m.get('track_off', []))
         out = []
         act = self._activity()
         for r in self._radio():
@@ -1121,7 +1122,7 @@ class Dashboard:
             else:
                 level = None
             a, n = ends_of('hub'), ends_of(node)
-            if n:
+            if n and 'hub' not in off and node not in off:
                 out.append(dict(key=r['key'], ends=[(x, y) for x in a for y in n], end_keys=('hub', node), level=level))
         for b in self._map_boards():
             if b['state'] not in ('motion', 'still'):
@@ -1131,7 +1132,7 @@ class Dashboard:
                 continue
             for l in b['links']:
                 n = ends_of(l['key'])
-                if not n or l['key'] == b['key']:
+                if not n or l['key'] == b['key'] or b['key'] in off or l['key'] in off:
                     continue
                 out.append(dict(key=f"{b['key']}>{l['key']}", ends=[(x, y) for x in a for y in n],
                                 end_keys=(b['key'], l['key']), level=q(l['level'])))
@@ -2527,6 +2528,12 @@ def clean_map(m):
             if isinstance(au, list) and len(au) == 3:
                 c['auto'] = [_num(au[0], 0, 1000), _num(au[1], 0, 1000), _num(au[2], -7, 7)]
             out['nodes'].append(c)
+    if 'track_off' in m:                        # boards left out of the tracking: 'hub' / 'sat:<mac>'
+        to = m['track_off']
+        if not isinstance(to, list) or len(to) > SAT_MAX + 1 or not all(
+                isinstance(k, str) and (k == 'hub' or (k.startswith('sat:') and MAC_RE.fullmatch(k[4:]))) for k in to):
+            raise ValueError('bad boards left out of the map')
+        out['track_off'] = sorted({k.lower() for k in to})
     if 'zones' in m:                            # areas on the map: who's in them, and what to do then
         zs = m['zones']
         if not isinstance(zs, list) or len(zs) > 16:

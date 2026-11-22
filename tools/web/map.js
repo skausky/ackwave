@@ -26,7 +26,9 @@ window.AckMap = (() => {
   };
 
   // ---------- state ----------
-  const M = { unit: 'ft', env: 'home', view: null, nodes: new Map(), plans: [], zones: [], hubFloor: 1, floorH: 3.0, hubFacing: null };
+  const M = { unit: 'ft', env: 'home', view: null, nodes: new Map(), plans: [], zones: [], hubFloor: 1, floorH: 3.0, hubFacing: null, trackOff: new Set() };
+  // boards you left out of the map's tracking (Floors panel): links touching them don't place people
+  const offMap = (m) => (m === HUB ? M.trackOff.has('hub') : !!(m && m.key && M.trackOff.has(m.key)));
   // nodes: key -> {key, name, x, y, placed, floor}. floor: the one you chose (1 = ground); a router or
   // device you haven't given one gets the floor that fits its signals best (autoFloor)
   // Picture layers, bottom first: {id, name, x, y (top-left corner, metres), w (width, metres), rot (radians),
@@ -993,7 +995,7 @@ window.AckMap = (() => {
     if (t - track.at < 500) return;
     const dt = Math.min(5, (t - track.at) / 1000);
     track.at = t;
-    const L = links().filter(({ d, r }) => d >= 0.3 && !weak(r) && judged(r));
+    const L = links().filter(({ a, n, d, r }) => d >= 0.3 && !weak(r) && judged(r) && !offMap(a) && !offMap(n));
     const obs = L.map(({ a, n, r }) => ({ a: excess(r, t), ends: endSamples(a, n), A: a, N: n, ap: !!r.ap })).filter((o) => o.a !== null);
     track.baseAt = t;
     nearEnd(obs, t);
@@ -1516,7 +1518,7 @@ window.AckMap = (() => {
   // in the last few seconds (a phone's picker may not keep the focus).
   const floorsBusy = () => !!floorsEl && (floorsEl.contains(document.activeElement) || performance.now() - floorsTouched < 4000);
   function floorsPanel() {
-    const sig = JSON.stringify([M.hubFacing, others.map((b) => (M.nodes.get(b.key) || {}).facing), envFit && [envFit.n.toFixed(1), Math.round(envFit.lf), envFit.checks.map((c) => c.key + c.by)],
+    const sig = JSON.stringify([[...M.trackOff], M.hubFacing, others.map((b) => (M.nodes.get(b.key) || {}).facing), envFit && [envFit.n.toFixed(1), Math.round(envFit.lf), envFit.checks.map((c) => c.key + c.by)],
       M.hubFloor, M.floorH, others.map((b) => [b.key, b.label]),
       links().map(({ n }) => [n.key, n.name, n.floor, n.autoFloor]), [...M.nodes.values()].map((n) => n.floor)]);
     if (floorsEl && (sig === floorsSig || floorsBusy())) return floorsEl;   // unchanged, or in use: keep it
@@ -1543,10 +1545,15 @@ window.AckMap = (() => {
       b.onclick = () => { clear(); heatKey = ''; locAt = 0; dirty = true; floorsEl = null; renderList(); scheduleSave(); };
       return b;
     };
-    det.append(row('Hub', M.hubFloor, null, (f) => { M.hubFloor = f || 1; }), aim(HUB, () => { M.hubFacing = null; }));
+    const useTick = (key) => {                     // this board's links place people, or not
+      const cb = el('input', { type: 'checkbox', checked: !M.trackOff.has(key) });
+      cb.onchange = () => { if (cb.checked) M.trackOff.delete(key); else M.trackOff.add(key); dirty = true; floorsEl = null; renderList(); scheduleSave(); };
+      return el('label', { className: 'check small' }, cb, 'used for the map');
+    };
+    det.append(row('Hub', M.hubFloor, null, (f) => { M.hubFloor = f || 1; }), aim(HUB, () => { M.hubFacing = null; }), useTick('hub'));
     for (const b of others) {
       const n = M.nodes.get(b.key);
-      if (n) det.append(row(b.label, n.floor || M.hubFloor, null, (f) => { n.floor = f; }), aim(n, () => { n.facing = undefined; }));
+      if (n) det.append(row(b.label, n.floor || M.hubFloor, null, (f) => { n.floor = f; }), aim(n, () => { n.facing = undefined; }), useTick(b.key));
     }
     const seen = new Set();
     for (const { n, r } of links()) {
@@ -1739,6 +1746,7 @@ window.AckMap = (() => {
         !n.placed && n.auto ? { auto: [Math.min(1000, n.auto.a), Math.min(1000, n.auto.b), n.auto.rot] } : {})),
       hub_floor: M.hubFloor, floor_h: M.floorH };
     if (typeof M.hubFacing === 'number') body.hub_facing = M.hubFacing;
+    body.track_off = [...M.trackOff];
     body.zones = (M.zones || []).map((z) => Object.assign({ id: z.id, name: String(z.name).slice(0, 32),
       notify: !!z.notify, night: !!z.night, light: !!z.light }, z.near ? { near: z.near } : { x: z.x, y: z.y, w: z.w, h: z.h }));
     if (M.view && viewByUser) body.view = M.view;
@@ -1759,6 +1767,7 @@ window.AckMap = (() => {
       facing: typeof n.facing === 'number' ? n.facing : undefined,
       hint: Array.isArray(n.hint) && n.hint.length === 3 ? { x: n.hint[0], y: n.hint[1], r: n.hint[2] } : null });
     M.zones = Array.isArray(m.zones) ? m.zones.map((z) => ({ ...z })) : [];
+    M.trackOff = new Set(Array.isArray(m.track_off) ? m.track_off : []);
     if (m.plans) {
       M.plans = m.plans.map((p) => Object.assign({ name: p.id, rot: 0, opacity: 1, hidden: false }, p));
       for (const p of M.plans) loadPicture(p);
