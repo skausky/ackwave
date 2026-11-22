@@ -57,6 +57,18 @@
 #ifndef LED_GPIO
 #define LED_GPIO       48        // on-board RGB LED (WS2812): 48 on most S3 boards,
 #endif                           // 38 on DevKitC-1 v1.1; -1 = no LED
+#ifndef OUT_GPIO
+#define OUT_GPIO       5         // light module IN (MOSFET or relay module); -1 = none
+#endif
+#ifndef OUT_ACTIVE_HIGH
+#define OUT_ACTIVE_HIGH 1        // 1 = the module switches on with the pin high, 0 = low
+#endif
+#ifndef OUT_MODE
+#define OUT_MODE       OUT_MODE_MOTION  // off / motion / on (OUT_MODE_* in csi_core.h)
+#endif
+#ifndef OUT_OFF_S
+#define OUT_OFF_S      60        // "motion": off after this many seconds of stillness
+#endif
 #ifndef LED_BRIGHT
 #define LED_BRIGHT     40        // motion colour brightness, 1-255
 #endif
@@ -68,6 +80,9 @@
 
 #if CAL_BUTTON_GPIO >= 0 && CAL_BUTTON_GPIO == BUZZER_GPIO
 #error "CAL_BUTTON_GPIO and BUZZER_GPIO must differ"
+#endif
+#if OUT_GPIO >= 0 && (OUT_GPIO == BUZZER_GPIO || OUT_GPIO == CAL_BUTTON_GPIO || OUT_GPIO == LED_GPIO)
+#error "OUT_GPIO must differ from BUZZER_GPIO, CAL_BUTTON_GPIO and LED_GPIO"
 #endif
 #if LED_GPIO >= 0 && (LED_GPIO == BUZZER_GPIO || LED_GPIO == CAL_BUTTON_GPIO)
 #error "LED_GPIO must differ from BUZZER_GPIO and CAL_BUTTON_GPIO"
@@ -659,6 +674,59 @@ static void led_update(bool searching) {
         shown = c;                           // else retry next poll
 }
 
+// ---------------- Light output (OUT) ----------------
+// A pin for a light module: off, on with motion (the LED's verdict: the board's
+// own plus EXT), or always on. Saved on the board ("out"). The pin is set to
+// inactive and made an output only after the settings are read (out_init), and
+// only control_task (out_update, run_cmd) drives it after that.
+typedef struct { int8_t mode; uint8_t pad; uint16_t pad2; int32_t secs; } out_saved_t;
+static int out_mode = OUT_MODE, out_secs = OUT_OFF_S;
+static out_state_t out_st;
+static bool out_ok;
+
+static void out_pin(bool on) {
+#if OUT_GPIO >= 0
+    if (out_ok) gpio_set_level(OUT_GPIO, on == (bool)OUT_ACTIVE_HIGH);
+#else
+    (void)on;
+#endif
+}
+
+static void print_out(void) {
+    printf("OUT,%s,%d,%s\n", OUT_MODE_NAMES[out_mode], out_secs,
+           !out_ok ? "none" : out_st.on ? "on" : "off");
+}
+
+static void out_load(void) {
+    out_saved_t o;
+    if (nvs_take("out", &o, sizeof o) && o.mode >= OUT_MODE_OFF && o.mode <= OUT_MODE_ON &&
+        o.secs >= 0 && o.secs <= OUT_OFF_MAX) {
+        out_mode = o.mode; out_secs = (int)o.secs;
+    }
+}
+
+static void out_init(void) {
+    out_ok = false;
+#if OUT_GPIO < 0
+    printf("OUT,nopin\n");
+#else
+    gpio_set_level(OUT_GPIO, !OUT_ACTIVE_HIGH);          // inactive before it becomes an output
+    gpio_config_t io = { .pin_bit_mask = 1ULL << OUT_GPIO, .mode = GPIO_MODE_OUTPUT };
+    esp_err_t err = gpio_config(&io);
+    if (err == ESP_OK) err = gpio_set_level(OUT_GPIO, !OUT_ACTIVE_HIGH);
+    if (err != ESP_OK) { printf("OUT,error,%s\n", esp_err_to_name(err)); return; }
+    out_ok = true;
+    printf("OUT,gpio%d\n", OUT_GPIO);
+#endif
+}
+
+static void out_update(void) {
+    if (!out_ok) return;
+    bool was = out_st.on;
+    bool on = out_step(&out_st, out_mode, out_secs, led_motion || ext_on(), clock_ms());
+    if (on != was) { out_pin(on); print_out(); }
+}
+
 // ---------------- Probe mode (hardware bring-up) ----------------
 #if CSI_PROBE
 typedef struct {
@@ -1065,7 +1133,7 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
-    int snd, smode, svol, shz, sens, sx, na, ledc, ext, kc, pk, hc;
+    int snd, smode, svol, shz, sens, sx, na, ledc, ext, kc, pk, hc, oc, omode, osecs;
     uint8_t newkey[16], pmac[6];
     ap_list_t new_aps;
     led_cfg_t new_led;
@@ -1155,6 +1223,24 @@ static void run_cmd(const char *line) {
         if (ledc != LED_QUERY && !led_save(ledc == LED_SET ? &led_cfg : NULL))
             printf("LEDSET,error,not-saved\n");
         print_led();
+    } else if ((oc = parse_out(line, &omode, &osecs)) != OUT_BAD) {
+        if (oc == OUT_DEFAULT) {
+            out_mode = OUT_MODE; out_secs = OUT_OFF_S;
+            nvs_put("out", NULL, 0);
+        } else if (oc == OUT_SET) {
+            int bm = out_mode, bs = out_secs;
+            out_mode = omode;
+            if (osecs >= 0) out_secs = osecs;
+            if (out_mode != bm || out_secs != bs) {
+                out_saved_t o = { .mode = (int8_t)out_mode, .secs = out_secs };
+                nvs_put("out", &o, sizeof o);
+            }
+        }
+        if (oc != OUT_QUERY && out_ok) {     // takes effect now, not at the next poll
+            out_step(&out_st, out_mode, out_secs, led_motion || ext_on(), clock_ms());
+            out_pin(out_st.on);
+        }
+        print_out();
     } else if ((sens = parse_sens(line, &sx)) != SENS_BAD) {
         if (sens == SENS_SET) {
             if (sx != sens_x100) { int16_t v = (int16_t)sx; nvs_put("sens", &v, sizeof v); }
@@ -1322,18 +1408,20 @@ static void net_scan(void) {
 }
 
 // BOOT held 5 s: the settings saved from the dashboard go back to the build's
-// (buzzer, sensitivity, LED, poked devices). The network is kept: it has its own
+// (buzzer, sensitivity, LED, light output, poked devices). The network is kept: it has its own
 // "back to default". Confirmed by three white flashes.
 static void settings_reset(void) {
     nvs_put("snd", NULL, 0);
     nvs_put("sens", NULL, 0);
     nvs_put("devs", NULL, 0);
+    nvs_put("out", NULL, 0);
     led_save(NULL);
     snd_mode = MOTION_ALARM ? SND_ALARM : SND_BEEP;
     snd_vol = BUZZER_VOL;
     snd_hz = BUZZER_HZ;
     if (sens_build_x100) sens_x100 = sens_build_x100;
     led_cfg = led_cfg_default(LED_BRIGHT);
+    out_mode = OUT_MODE; out_secs = OUT_OFF_S;   // out_update applies it at the next poll
     for (int k = 0; k < MAX_DEVS; k++) dev_clear(&nodes, k);
     printf("BUTTON,reset-settings\n");
     for (int i = 0; i < 3; i++) {
@@ -1341,7 +1429,7 @@ static void settings_reset(void) {
         led_rgb(0, 0, 0); vTaskDelay(pdMS_TO_TICKS(150));
     }
     buzzer_auto(&TUNE_READY);
-    print_sound(); print_sens(); print_led();
+    print_sound(); print_sens(); print_led(); print_out();
     printf("UNPOKED,all\n");
 }
 
@@ -1490,6 +1578,7 @@ static void control_task(void *arg) {
         ord_rx_t orx;
         while (ord_q && xQueueReceive(ord_q, &orx, 0) == pdTRUE) order_take(&orx);
         led_update(!my_ssid[0] && !aps.n); // no network chosen yet: yellow
+        out_update();
 
         for (int n = node_count(&nodes); printed < n; printed++) {
             const uint8_t *m = nodes.mac[printed];
@@ -1542,6 +1631,7 @@ static void control_task(void *arg) {
             print_aps();
             print_led();
             print_sound();                   // so the PC sees a change it missed (e.g. a restart)
+            print_out();
             if (sens_x100) print_sens();
             printf("STATS,%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
                    ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 "\n", esp_timer_get_time(), n_poke,
@@ -1779,6 +1869,8 @@ void app_main(void) {
     usb_init();
     ssid_load();
     led_load();
+    out_load();
+    out_init();                              // never fatal; inactive until out_update
     snd_saved_t sv;                          // the buzzer as last set (saved), else the build's
     if (nvs_take("snd", &sv, sizeof sv) && sv.mode >= 0 && sv.mode <= SND_ALARM && sv.vol >= 1 &&
         sv.vol <= SOUND_VOL_MAX && sv.hz >= 100) {

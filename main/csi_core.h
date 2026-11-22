@@ -259,6 +259,9 @@ static inline int seen_note(seen_list_t *l, const node_table_t *t, const uint8_t
 //   SENS           report the long-window threshold (parse_sens)
 //   SENS,<x100>    set it (saved on the board): 110-300 = x1.1-x3.0
 //   SENS,default   back to the build's
+//   OUT            report the light output (OUT,<mode>,<off_after_s>,<on|off|none>)
+//   OUT,<off|motion|on>[,<off_after_s>]  change it (saved on the board; parse_out)
+//   OUT,default    back to the build's
 //   APS,<mac>[,<mac>...]  watch these access points (1-8, any network names,
 //                  saved; parse_aps) instead of every one named like the network
 //   APS,clear      back to watching every access point of the network by name
@@ -519,6 +522,61 @@ static inline int parse_sens(const char *line, int *x100) {
 #undef SENS_END
     *x100 = v;
     return SENS_SET;
+}
+
+// ---------- The light output (OUT) ----------
+// A pin that switches a light module (a logic-level MOSFET or relay module, its
+// IN on the pin): off, on with motion, or always on. "motion" is the board's own
+// verdict plus EXT from the PC (what drives the LED and buzzer); the light goes
+// off only after off_after_s of stillness.
+enum { OUT_MODE_OFF = 0, OUT_MODE_MOTION, OUT_MODE_ON };
+enum { OUT_BAD = -1, OUT_QUERY = 0, OUT_SET, OUT_DEFAULT };
+#define OUT_OFF_MAX 86400                    // a day
+static const char *const OUT_MODE_NAMES[] = {"off", "motion", "on"};
+
+// OUT, OUT,default or OUT,<off|motion|on>[,<off_after_s>]: returns one of
+// OUT_*; for OUT_SET sets *mode (OUT_MODE_*) and *secs (0-86400, -1 = not given)
+static inline int parse_out(const char *line, int *mode, int *secs) {
+    *mode = *secs = -1;
+    if (!line || strncmp(line, "OUT", 3) != 0) return OUT_BAD;
+    const char *s = line + 3;
+#define OUT_END(c) ((c) == '\0' || (c) == '\r' || (c) == '\n')
+    if (OUT_END(*s)) return OUT_QUERY;
+    if (*s++ != ',') return OUT_BAD;
+    if (strncmp(s, "default", 7) == 0 && OUT_END(s[7])) return OUT_DEFAULT;
+    int m = -1;
+    for (int i = 0; i < 3 && m < 0; i++) {
+        size_t n = strlen(OUT_MODE_NAMES[i]);
+        if (strncmp(s, OUT_MODE_NAMES[i], n) == 0 && (s[n] == ',' || OUT_END(s[n]))) { m = i; s += n; }
+    }
+    if (m < 0) return OUT_BAD;
+    int v = -1;
+    if (*s == ',') {
+        s++;
+        int digits = 0;
+        v = 0;
+        while (*s >= '0' && *s <= '9' && digits < 6) { v = v * 10 + (*s++ - '0'); digits++; }
+        if (!digits || v > OUT_OFF_MAX) return OUT_BAD;
+    }
+    if (!OUT_END(*s)) return OUT_BAD;
+#undef OUT_END
+    *mode = m; *secs = v;
+    return OUT_SET;
+}
+
+// Whether the output is on. Call it every poll with the motion verdict; now_ms
+// may wrap. Leaving "on" for "motion" keeps the light on for off_after_s (it
+// counts as motion just seen), like a timer.
+typedef struct { bool on; uint32_t last_ms; } out_state_t;
+static inline bool out_step(out_state_t *o, int mode, int off_after_s, bool motion, uint32_t now_ms) {
+    if (mode == OUT_MODE_MOTION) {
+        if (motion) { o->on = true; o->last_ms = now_ms; }
+        else if (o->on && now_ms - o->last_ms >= (uint32_t)off_after_s * 1000u) o->on = false;
+    } else {
+        o->on = mode == OUT_MODE_ON;
+        o->last_ms = now_ms;
+    }
+    return o->on;
 }
 
 // ---------- The status LED (LEDSET) ----------
@@ -1010,10 +1068,10 @@ static inline bool order_open(const uint8_t *f, int len, const uint8_t me[6], ae
 }
 
 // The commands a board takes from the air: which network to watch,
-// recalibrate, sensitivity, sounds and the LED. Never keys, the hub, pokes or
+// recalibrate, sensitivity, sounds, the LED and the light output. Never keys, the hub, pokes or
 // a settings reset: those need its USB cable.
 static inline bool order_allowed(const char *line) {
-    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE" };
+    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE", "OUT" };
     for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++) {
         size_t k = strlen(ok[i]);
         if (strncmp(line, ok[i], k) == 0 && (ok[i][k - 1] == ',' || line[k] == '\0' || line[k] == ',')) return true;

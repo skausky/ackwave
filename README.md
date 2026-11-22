@@ -216,6 +216,10 @@ Requires ESP-IDF v5.x and an ESP32-S3.
    | `CAL_BUTTON_GPIO` | 0 | button that recalibrates (BOOT on most boards); -1 = none |
    | `CAL_DELAY_S` | 5 | after a press: time to step away before measuring |
    | `LED_GPIO` | 48 | on-board RGB LED (WS2812); 38 on DevKitC-1 v1.1; -1 = none |
+   | `OUT_GPIO` | 5 | light output: a switch module's IN pin (logic-level MOSFET or relay module); -1 = none |
+   | `OUT_ACTIVE_HIGH` | 1 | 1 = the module switches on with the pin high, 0 = with it low |
+   | `OUT_MODE` | `OUT_MODE_MOTION` | the light output's default: `OUT_MODE_OFF`, `OUT_MODE_MOTION` or `OUT_MODE_ON` (OUT changes it on the board) |
+   | `OUT_OFF_S` | 60 | in motion mode: off after this many seconds of stillness |
    | `LED_BRIGHT` | 40 | LED brightness, 1-255 (the default; Settings → Board LED changes it on the board) |
    | `MD_ON_SHORT` / `MD_ON_LONG` | 2.8 / 1.4 | thresholds as multiples of the quiet level; lower = more sensitive |
 
@@ -278,7 +282,7 @@ Wire a **passive piezo** between a free GPIO (GPIO 4 is a good choice; avoid str
 
 A piezo can't be detected electrically, so the buzzer is opt-in. If the pin can't be set up, the board prints `BUZZER,error,...` and carries on sensing.
 
-**Changing it without reflashing:** the web dashboard's Settings page has a Buzzer section: off, beeps or alarm, volume, pitch and a test button. The board saves the choice, so it keeps it after RST or unplugging, also on a charger or power bank away from the PC (the dashboard keeps its own copy too and re-applies it when connected). **Holding BOOT for 5 s** puts the board's saved settings (buzzer, sensitivity, LED, poked devices) back to the firmware's, with three white flashes; a short press still recalibrates. The network it watches is kept.
+**Changing it without reflashing:** the web dashboard's Settings page has a Buzzer section: off, beeps or alarm, volume, pitch and a test button. The board saves the choice, so it keeps it after RST or unplugging, also on a charger or power bank away from the PC (the dashboard keeps its own copy too and re-applies it when connected). **Holding BOOT for 5 s** puts the board's saved settings (buzzer, sensitivity, LED, light output, poked devices) back to the firmware's, with three white flashes; a short press still recalibrates. The network it watches is kept.
 
 ### Bring-up: probe mode
 
@@ -314,6 +318,8 @@ UNPOKED,<mac|all>   REFUSED,<mac>,<not-seen-on-network|is-an-ap|full>   REFUSED,
 BUZZER,<off|gpioN|error,...>
 SOUND,<off|beep|alarm>,<vol>,<hz>[,no-buzzer]   buzzer settings: at boot and after each SOUND command
 SENS,<x100>   slow-window motion threshold: at boot and after each SENS command
+OUT,<gpioN|nopin|error,...>   the light output pin, at boot
+OUT,<off|motion|on>,<off_after_s>,<on|off|none>   light output settings and state: every 5 s, after each OUT command and whenever it switches (none = no pin)
 NETWORK,<default|chosen|none|saved>,<name>   the network being watched, at boot and every 5 s
 LINK,<ts>,<weak|ok>,<acks/s>,<rssi>   router link quality changed (weak = no motion beeps)
 LED,<off|gpioN|error,...>
@@ -355,6 +361,10 @@ SOUND,test      play the current mode's sound: started, then ended (the siren in
 SENS            report the slow (4 s) window's motion threshold: SENS,<x100> (140 = x1.4)
 SENS,<110-300>  change it (saved on the board; the web dashboard's Sensitivity setting)
 SENS,default    back to the build's
+OUT             report the light output: OUT,<off|motion|on>,<off_after_s>,<on|off|none>
+OUT,<off|motion|on>[,<0-86400>]  change it (saved on the board): motion = on with the board's
+                motion verdict or EXT, off after that many seconds of stillness
+OUT,default     back to the build's OUT_MODE and OUT_OFF_S
 EXT,<1|0>       a device link the PC watches sees motion: the LED (purple) and the buzzer follow it
                 too; EXT,1 lapses after 5 s unless repeated. Never changes the board's own verdict
 LEDSET          report the LED settings
