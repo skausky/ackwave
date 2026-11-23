@@ -453,6 +453,7 @@ window.AckMap = (() => {
   }
   let zoneIn = {};                                  // zone id -> people inside, from the Pi's tracking
   let breathing = {};                               // 'hub' / 'sat:<mac>' -> breathing near that board
+  let learned = {};                                 // 'hub' / 'sat:<mac>' -> its learned model now: {motion, p: [empty, still, moving] %}
   let todayMap = null;                              // where people were today (the Pi's tracking): {cs, cells}
   let homeDetails = false, showToday = false;       // Home: the technical layers; today's heat (the page remembers them)
   const simple = () => readOnly && !homeDetails;   // Home's clean view
@@ -930,9 +931,17 @@ window.AckMap = (() => {
   }
   // Each link's excess activity: its strength over its own idle level (a slow
   // low envelope: falls at once, rises over ~1 min), so 0 = idle, 1 = clearly moving
-  function excess(r, now) {
-    const st = strength(r);
-    if (st === null) return null;
+  // A board's learned model as a second opinion on its links (web.py _track_links trust()):
+  // 'empty' makes a twitch count less, 'moving' lets it count fully (x0.35 .. x1)
+  function trustOf(r) {
+    const v = learned[r.board ? r.board.key : 'hub'];     // a satellite's links: its model; the hub's: the hub's
+    if (!v || !v.p) return 1;
+    return v.motion ? 1 : Math.max(0.35, Math.min(1, 0.35 + 1.3 * v.p[2] / 100));
+  }
+  function excess(r, now, k = 1) {
+    const s0 = strength(r);
+    if (s0 === null) return null;
+    const st = s0 * k;
     let b = track.base.get(r.key);
     if (b === undefined || st < b) b = st;
     else b += (st - b) * Math.min(1, (now - (track.baseAt || now)) / 60000);
@@ -1014,7 +1023,7 @@ window.AckMap = (() => {
     const dt = Math.min(5, (t - track.at) / 1000);
     track.at = t;
     const L = links().filter(({ a, n, d, r }) => d >= 0.3 && !weak(r) && judged(r) && !offMap(a) && !offMap(n));
-    const obs = L.map(({ a, n, r }) => ({ a: excess(r, t), ends: endSamples(a, n), A: a, N: n, ap: !!r.ap })).filter((o) => o.a !== null);
+    const obs = L.map(({ a, n, r }) => ({ a: excess(r, t, trustOf(r)), ends: endSamples(a, n), A: a, N: n, ap: !!r.ap })).filter((o) => o.a !== null);
     track.baseAt = t;
     nearEnd(obs, t);
     routerShared(obs);
@@ -2500,7 +2509,7 @@ window.AckMap = (() => {
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
       if (slow && slow.tracked && slow.tracked.model_err) modelErr = slow.tracked.model_err;
-      if (slow && slow.tracked) { zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; todayMap = slow.tracked.today || null; }
+      if (slow && slow.tracked) { zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; todayMap = slow.tracked.today || null; learned = slow.tracked.learned || {}; }
       if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPeople = slow.demo_people || []; if (slow.channel) channel = slow.channel; }
       if (header) {
         boardMotion = hubMoving(header);
