@@ -2280,9 +2280,12 @@ window.AckMap = (() => {
         : `Fit needs at least 4 walk-check taps from today (have ${recs.length}): use Walk check first.`);
       return;
     }
-    const L = links(), lam = lambda(), CS = 0.75, RAD = 8, G0 = 1.2, WG = 1 / 1.5 ** 2;
+    const wz = watchZone();                           // watching a house: only it, and the links reaching into it
+    const L = links().filter(({ a, n }) => !wz || inZone(wz, a) || inZone(wz, n)), lam = lambda(), CS = 0.75, RAD = 8, G0 = 1.2, WG = 1 / 1.5 ** 2;
     let area = null;
-    if (selfFit) {                                   // the house: the boards and 3 m around
+    if (selfFit && wz) {                             // the watched house: people are only ever placed in there
+      area = { x0: wz.x, x1: wz.x + wz.w, y0: wz.y, y1: wz.y + wz.h };
+    } else if (selfFit) {                            // the house: the boards and 3 m around
       const pts = [[0, 0], ...others.map((b) => M.nodes.get(b.key)).filter(Boolean).map((n) => [n.x, n.y])];
       area = { x0: Math.min(...pts.map((p) => p[0])) - 3, x1: Math.max(...pts.map((p) => p[0])) + 3,
         y0: Math.min(...pts.map((p) => p[1])) - 3, y1: Math.max(...pts.map((p) => p[1])) + 3 };
@@ -2342,6 +2345,7 @@ window.AckMap = (() => {
         for (let dy = -c.r; dy <= c.r; dy += step)
           for (let dx = -c.r; dx <= c.r; dx += step) {
             if (Math.hypot(dx, dy) > c.r) continue;
+            if (wz && !inZone(wz, { x: c.x + dx, y: c.y + dy }) && inZone(wz, c)) continue;   // a router in the watched house stays in it
             n.x = c.x + dx; n.y = c.y + dy;
             const e = err(n);
             if (e < best[2]) best = [n.x, n.y, e];

@@ -2232,7 +2232,7 @@ class Dashboard:
         out['nodes'] = list(nodes.values())[:64]
         return out
 
-    def map_save(self, m):
+    def map_save(self, m, who=''):
         """Validate and store a layout; (ok, message). Written atomically. With
         'edits' (what this page changed), merged into what is stored (_map_merge)."""
         edits = m.pop('edits', None) if isinstance(m, dict) else None
@@ -2240,6 +2240,7 @@ class Dashboard:
             m = clean_map(m)
         except ValueError as e:
             return False, str(e)
+        before = self.map_load()
         if isinstance(edits, list) and len(edits) <= 200 and all(isinstance(e, str) for e in edits):
             m = self._map_merge(m, set(edits))
         elif edits is None and self.map_load():
@@ -2249,6 +2250,12 @@ class Dashboard:
         p = self._map_path()
         if not p:
             return False, 'nowhere to save the map (no sessions folder)'
+        if before:                                   # zones or boards left out changed: said in the add-on's log
+            zn = lambda mm: sorted(z.get('name', '') for z in mm.get('zones', []))
+            if zn(before) != zn(m) or sorted(before.get('track_off', [])) != sorted(m.get('track_off', [])):
+                print(f"map: zones {zn(before)} -> {zn(m)}, left out {before.get('track_off', [])} -> "
+                      f"{m.get('track_off', [])} (edits: {sorted(edits) if isinstance(edits, list) else 'an old page'}; {who[:60]})",
+                      flush=True)
         try:
             os.makedirs(os.path.dirname(p), exist_ok=True)
             tmp = p + '.tmp'
@@ -2861,7 +2868,7 @@ def make_handler(dash, allowed_hosts):
                     m = json.loads(self.rfile.read(n) or b'{}')
                 except ValueError:
                     return self._reply(400, {'ok': False, 'msg': 'bad request'})
-                ok, msg = dash.map_save(m)
+                ok, msg = dash.map_save(m, who=self.headers.get('User-Agent') or '')
                 return self._reply(200 if ok else 400, dict(ok=ok, msg=msg, map=dash.map_load() if ok else None))
             if path == '/api/plan':                   # a map picture: raw bytes, empty = remove
                 try:
