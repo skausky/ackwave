@@ -20,7 +20,7 @@ import numpy as np
 
 CELL = 0.25
 SIG0, SIG1, MODEL_ERR = 0.45, 0.25, 1.2
-MAX_PEOPLE, MULTI_GAIN, MULTI_LEFT, MULTI_SEP, KEEP_S = 3, 2.0, 0.8, 2.5, 1.5
+MAX_PEOPLE, MULTI_GAIN, MULTI_LEFT, MULTI_SEP, KEEP_S = 3, 4.0, 1.5, 2.5, 1.5
 # A person who stops walking is still there: held while the links still react the way someone at
 # their spot makes them react (a matched filter against the links' noise, averaged over a few
 # seconds: one step's test is too noisy), never started from weak evidence, at most HOLD_S

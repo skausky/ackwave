@@ -760,6 +760,7 @@ window.AckMap = (() => {
   function draw(t) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
+    labelBoxes = [];
     if (!loaded) return;                           // the saved layout first: guesses would set the view
     const cnt = links().length;                    // something new appeared: show it (a saved view stays at load)
     if (!M.view || (cnt > nodeCount && (readOnly ? !homeTouched : autoFit && !viewByUser))) fit();   // never over a view you set
@@ -873,6 +874,8 @@ window.AckMap = (() => {
     const keys = [['hub', X(0), Y(0)]];
     for (const { n } of L) if (n !== HUB) keys.push([n.key, X(n.x), Y(n.y)]);
     ripples(t, keys);
+    for (const pl of personLabels) label(...pl);    // people's names last: they find room around everything else
+    personLabels = [];
     $('#map-msg').textContent = L.length ? '' : 'Waiting for live links: the router appears once the board hears it.';
   }
   // A router: how sure you are of where it is. Exactly (placed), roughly
@@ -948,7 +951,7 @@ window.AckMap = (() => {
   //     links still react the way a person at its spot makes them react: a
   //     matched filter against the links' noise, averaged over a few seconds
   // Same model and constants as track.py (the Pi's tracker): keep them in step.
-  const MAX_PEOPLE = 3, MULTI_GAIN = 2, MULTI_LEFT = 0.8, MULTI_SEP = 2.5, KEEP_MS = 1500;
+  const MAX_PEOPLE = 3, MULTI_GAIN = 4, MULTI_LEFT = 1.5, MULTI_SEP = 2.5, KEEP_MS = 1500;
   const WEAK = 0.1, HOLD_MS = 300000, HOLD_Z = 1.2, HOLD_A = 0.3;   // holding a still person
   const CONFIRM = 2, CAND_MS = 1000;                // a new person: found twice, within a second
   const SPEED = 1.6, SPEED_STILL = 0.3;             // m/s a person may have moved: walking / held
@@ -957,7 +960,9 @@ window.AckMap = (() => {
   const newPerson = (t) => ({ id: 0, post: null, est: null, trail: [], seen: t, walked: t, hits: 0, hold: 4, speed: 0, heading: null,
     img: document.createElement('canvas') });
   const TRAIL_MS = 30000;                           // a person's trail: the last 30 s, fading
-  const PERSON_C = ['--motion', '--warn', '#b48cff'];
+  const TRAIL_JUMP = 1.5;                           // m in one step (3 m/s): the estimate jumped, the trail breaks there
+  const PERSON_C = ['--motion', '#5ec8ff', '#c79bff'];   // red, sky, violet: none of them the map's amber
+  const RING_MAX = 3;                               // m: a wider "within" ring says little, it's drawn as a faint area
   // What every link to one router shares at the same moment is the router's end
   // (someone by the router, or the router itself changing its signal): it is
   // taken out before people are placed, so it never drags a person's dot
@@ -1330,6 +1335,7 @@ window.AckMap = (() => {
         const keep = (1 - Math.min(1, (t - tr[k].t) / TRAIL_MS)) ** 1.5;
         if (keep <= 0) continue;
         ctx.strokeStyle = alpha(col, 0.7 * keep); ctx.lineWidth = 1.5 + 3 * keep;
+        if (Math.hypot(tr[k].x - tr[k - 1].x, tr[k].y - tr[k - 1].y) > TRAIL_JUMP) continue;   // a jump: not a path walked
         ctx.beginPath(); ctx.moveTo(X(tr[k - 1].x), Y(tr[k - 1].y)); ctx.lineTo(X(tr[k].x), Y(tr[k].y)); ctx.stroke();
       }
       ctx.restore();
@@ -1347,9 +1353,10 @@ window.AckMap = (() => {
       dirty = true;
       const col = p.color.startsWith('--') ? css(p.color) : p.color;
       const fade = Math.max(0, 1 - Math.max(0, t - p.seen - 800) / (KEEP_MS - 800));
+      const still = t - (p.walked || t) > 1500, vague = e.r > RING_MAX;   // held standing; a wide guess
       ctx.save();
       ctx.imageSmoothingEnabled = true;
-      ctx.globalAlpha = 0.9 * fade;
+      ctx.globalAlpha = (vague ? 0.35 : 0.8) * fade;   // a vague person's cloud stays faint: it isn't a place
       ctx.drawImage(p.img, X(g.x0), Y(g.y0), g.gw * g.cs * M.view.s, g.gh * g.cs * M.view.s);
       ctx.globalAlpha = fade;
       const tr = p.trail;
@@ -1358,6 +1365,7 @@ window.AckMap = (() => {
         for (let k = 1; k < tr.length; k++) {
           const age = Math.min(1, (t - tr[k].t) / TRAIL_MS), keep = (1 - age) ** 1.5;
           ctx.strokeStyle = alpha(col, (glow ? 0.18 : 0.9) * keep); ctx.lineWidth = (glow ? w0 : 1.5 + w0 * keep);
+          if (Math.hypot(tr[k].x - tr[k - 1].x, tr[k].y - tr[k - 1].y) > TRAIL_JUMP) continue;   // a jump: not a path walked
           ctx.beginPath(); ctx.moveTo(X(tr[k - 1].x), Y(tr[k - 1].y)); ctx.lineTo(X(tr[k].x), Y(tr[k].y)); ctx.stroke();
         }
       }
@@ -1366,14 +1374,19 @@ window.AckMap = (() => {
         ctx.fillStyle = alpha(col, 0.8 * keep);
         ctx.beginPath(); ctx.arc(X(tr[k].x), Y(tr[k].y), 1.5 + 2 * keep, 0, Math.PI * 2); ctx.fill();
       }
-      const x = X(e.x), y = Y(e.y), rr = Math.max(12, e.r * M.view.s);
-      const pulse = reduced.matches ? 0 : 0.5 + 0.5 * Math.sin(t / 300 + i);
-      ctx.shadowColor = col; ctx.shadowBlur = 12 + 10 * pulse;
+      const x = X(e.x), y = Y(e.y), rr = Math.max(12, Math.min(e.r, RING_MAX) * M.view.s);
+      const pulse = reduced.matches || still ? 0 : 0.5 + 0.5 * Math.sin(t / 300 + i);   // standing still: calm
+      const dotR = simple() ? 8 : 5;
+      ctx.shadowColor = col; ctx.shadowBlur = still ? 8 : 12 + 10 * pulse;
       ctx.fillStyle = col;
-      ctx.beginPath(); ctx.arc(x, y, simple() ? 8 : 5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, dotR, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
       if (simple()) { ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 2; ctx.stroke(); }
-      if (p.heading !== null && p.speed > 0.25) {     // heading: an arrow out of the dot
+      if (still) {                                    // standing: a steady halo instead of an arrow
+        ctx.strokeStyle = alpha(col, 0.6); ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(x, y, dotR + 5, 0, Math.PI * 2); ctx.stroke();
+      }
+      if (!still && p.heading !== null && p.speed > 0.25) {     // heading: an arrow out of the dot
         const a = p.heading, L2 = 20 + 14 * Math.min(1, p.speed);
         ctx.strokeStyle = col; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.moveTo(x + 7 * Math.cos(a), y + 7 * Math.sin(a)); ctx.lineTo(x + L2 * Math.cos(a), y + L2 * Math.sin(a)); ctx.stroke();
@@ -1383,13 +1396,15 @@ window.AckMap = (() => {
         ctx.lineTo(x + L2 * Math.cos(a - 0.45), y + L2 * Math.sin(a - 0.45));
         ctx.closePath(); ctx.fill();
       }
-      ctx.strokeStyle = alpha(col, 0.85); ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
-      ctx.beginPath(); ctx.arc(x, y, rr, 0, Math.PI * 2); ctx.stroke();
-      ctx.setLineDash([]);
+      if (!vague) {                                   // how sure: a ring you can read as "within this"
+        ctx.strokeStyle = alpha(col, 0.7); ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+        ctx.beginPath(); ctx.arc(x, y, rr, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+      }
       ctx.restore();
       const who = many ? `person ${i + 1}` : 'someone here';
-      const sp = p.speed > 0.25 ? ` · ${M.unit === 'ft' ? (p.speed / FT).toFixed(1) + ' ft/s' : p.speed.toFixed(1) + ' m/s'}` : ' · still-ish';
-      label(x, i % 2 ? y - rr - 34 : y + rr + 4, who, `within ${fmtLen(e.r)}${sp}`, col);   // alternate: below, above
+      const sp = still ? 'still' : p.speed > 0.25 ? (M.unit === 'ft' ? (p.speed / FT).toFixed(1) + ' ft/s' : p.speed.toFixed(1) + ' m/s') : 'moving';
+      personLabels.push([x, y + Math.min(rr, 24) + 6, who, `${vague ? 'roughly here' : 'within ' + fmtLen(e.r)} · ${sp}`, col, true]);
     });
   }
 
@@ -1441,8 +1456,32 @@ window.AckMap = (() => {
     dirty = true;
     return focusKey(keys[keys.length - 1]);
   }
-  function label(x, y, text, sub, color) {
+  // Labels make room for each other: one that would overlap a label already drawn
+  // this frame moves down, up or aside (nearest free spot first)
+  let labelBoxes = [], personLabels = [];
+  function labelSpot(x, y, w, h) {
+    const inside = (lx, ly) => lx - w / 2 >= 2 && lx + w / 2 <= W - 2 && ly >= 2 && ly + h <= H - 2;
+    const free = (lx, ly) => inside(lx, ly) && !labelBoxes.some((b) => lx - w / 2 < b.x1 && lx + w / 2 > b.x0 && ly < b.y1 && ly + h > b.y0);
+    for (let ring = 0; ring <= 3; ring++)          // the spot asked for, then rings of spots further out
+      for (const [dx, dy] of ring ? [[0, ring * (h + 2)], [0, -ring * (h + 2)], [ring * (w * 0.6 + 6), 0], [-ring * (w * 0.6 + 6), 0],
+        [ring * (w * 0.6 + 6), ring * (h + 2)], [-ring * (w * 0.6 + 6), -ring * (h + 2)]] : [[0, 0]])
+        if (free(x + dx, y + dy)) return [x + dx, y + dy];
+    return [Math.min(W - w / 2 - 2, Math.max(w / 2 + 2, x)), Math.min(H - h - 2, Math.max(2, y))];   // crowded: at least on the map
+  }
+  // pill: a dark backing so the label reads over trails, clouds and pictures (people's labels)
+  function label(x, y, text, sub, color, pill = false) {
     ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    let w = ctx.measureText(text).width;
+    if (sub) { ctx.font = '11px ui-monospace, monospace'; w = Math.max(w, ctx.measureText(sub).width); ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif'; }
+    const h = sub ? 28 : 15;
+    [x, y] = labelSpot(x, y, w + 6, h);
+    labelBoxes.push({ x0: x - w / 2 - 3, x1: x + w / 2 + 3, y0: y, y1: y + h });
+    if (pill) {
+      ctx.save(); ctx.fillStyle = alpha(css('--bg') || '#000000', 0.78); ctx.strokeStyle = alpha(color, 0.55); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x - w / 2 - 6, y - 3, w + 12, h + 5, 6) : ctx.rect(x - w / 2 - 6, y - 3, w + 12, h + 5);
+      ctx.fill(); ctx.stroke(); ctx.restore();
+      ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif';
+    }
     ctx.lineWidth = 3; ctx.strokeStyle = css('--bg'); ctx.strokeText(text, x, y);
     ctx.fillStyle = color; ctx.fillText(text, x, y);
     if (sub) {
