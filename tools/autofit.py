@@ -197,6 +197,8 @@ def _xy(nodes, key, over):
     n = nodes.get(key)
     if not n:
         return (1e9, 1e9)
+    if n.get('fit'):
+        return tuple(n['fit'])
     return (n['hint'][0], n['hint'][1]) if n.get('hint') else (n['x'], n['y'])
 
 

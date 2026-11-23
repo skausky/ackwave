@@ -270,6 +270,10 @@ window.AckMap = (() => {
           const P = (sp + P0 * wp) / (obs.length * wm + wp);
           let J = (P - P0) ** 2 * wp;
           obs.forEach(([, r], i) => { J += (r - (P - ls[i])) ** 2 * wm; });
+          if (box) {                               // in the watched house: signal from one side only says how far, softly; the middle unless it's clear
+            J *= 0.35;
+            J += ((gx - (box.x0 + box.x1) / 2) / ((box.x1 - box.x0) / 2)) ** 2 + ((gy - (box.y0 + box.y1) / 2) / ((box.y1 - box.y0) / 2)) ** 2;
+          }
           fc.push([gx, gy, J]);
           if (!fb || J < fb[2]) fb = [gx, gy, J];
         }
@@ -349,7 +353,11 @@ window.AckMap = (() => {
     let moved = false;
     for (const [key, n] of M.nodes) {
       if (n.placed || key === 'light') continue;
-      if (n.hint && n.hint.r <= 2) { n.x = n.hint.x; n.y = n.hint.y; n.auto = null; continue; }   // your spot, give or take 5 ft
+      if (n.fit && (!n.hint || Math.hypot(n.fit.x - n.hint.x, n.fit.y - n.hint.y) <= n.hint.r + 0.5)) {   // the Pi fitted it (signal + movement)
+        n.x += (n.fit.x - n.x) * (n.auto ? 0.3 : 1); n.y += (n.fit.y - n.y) * (n.auto ? 0.3 : 1);
+        n.auto = { x: n.fit.x, y: n.fit.y, a: 1, b: 1, rot: 0, heardBy: 0, floor: n.floor || M.hubFloor }; moved = true; continue;
+      }
+      if (n.hint && n.hint.r <= 1) { n.x = n.hint.x; n.y = n.hint.y; n.auto = null; continue; }   // your spot
       const s = solveOne(key, n);
       if (!s) { n.auto = null; continue; }
       // calm: a new estimate within half its own uncertainty is the same
@@ -905,7 +913,7 @@ window.AckMap = (() => {
   // (a circle you drag: auto-placement and the tracking stay inside it), or
   // not at all (auto, anywhere its signals fit).
   const SURE = [['auto', 0], ['r5', 1.524], ['r10', 3], ['r30', 9], ['r60', 18], ['exact', -1]];
-  const DRAG_HINT = 1.524;                          // a router you drag: within 5 ft of where you put it
+  const DRAG_HINT = 3.05;                           // a router you drag: around there (10 ft); exact / 25 ft on its panel
   // A router's spot: automatic (inside the watched house, from how loudly each
   // board hears it), or where you dragged it (within 5 ft), with a way back
   function routerWhere(n) {
@@ -915,9 +923,18 @@ window.AckMap = (() => {
     if (n.hint || n.placed) {
       const b = el('button', { type: 'button', className: 'ghost small', textContent: 'back to automatic' });
       b.onclick = () => { n.hint = null; n.placed = false; n.auto = null; locAt = 0; heatKey = ''; dirty = true; renderList(); scheduleSave(); };
-      return el('div', { className: 'map-floor-row' }, el('span', { className: 'small', textContent: 'Placed by you (within 5 ft) · ' }), b);
+      const sure = el('div', { className: 'seg small' });
+      for (const [lab, r] of [['exact', 0], ['10 ft', 3.05], ['25 ft', 7.6]]) {
+        const sb = el('button', { type: 'button', textContent: lab, className: (r === 0 ? n.placed : n.hint && Math.abs(n.hint.r - r) < 0.3) ? 'on' : '' });
+        sb.onclick = () => { if (r === 0) { n.placed = true; n.hint = null; } else { n.placed = false; n.hint = { x: n.x, y: n.y, r }; }
+          n.auto = null; locAt = 0; heatKey = ''; dirty = true; renderList(); scheduleSave(); };
+        sure.append(sb);
+      }
+      return el('div', { className: 'map-floor-row' }, el('span', { className: 'small', textContent: 'You put it here, within ' }), sure,
+        el('span', { className: 'small', textContent: ' · the Pi fine-tunes inside that · ' }), b);
     }
-    return el('span', { className: 'small', textContent: `Placed automatically in ${wz.name}, from how loudly each board hears it. Drag it if you know better.` });
+    return el('span', { className: 'small', textContent: n.fit ? `Placed automatically in ${wz.name} (fitted by the Pi from signal and movement). Drag it if you know better.`
+      : `Placed automatically in ${wz.name}; the Pi fine-tunes it once it has seen some movement. Drag it if you know better.` });
   }
   function whereSure(n) {
     const sel = el('select', { className: 'small', title: 'How sure you are of where this router is' });
@@ -1961,7 +1978,7 @@ window.AckMap = (() => {
       n.x = wx; n.y = wy;
       if (n.hint) { n.hint.x = wx; n.hint.y = wy; n.auto = null; locAt = 0; }   // the rough spot moves with it
       else if (!n.placed && !n.board && (n.key || '').startsWith('r:')) {   // a router: "within 5 ft" of your spot
-        n.hint = { x: wx, y: wy, r: DRAG_HINT }; n.auto = null; locAt = 0;
+        n.hint = { x: wx, y: wy, r: DRAG_HINT }; n.auto = null; n.fit = null; locAt = 0;
       } else n.placed = true;
       dirty = true;
       renderList();
@@ -2057,6 +2074,7 @@ window.AckMap = (() => {
       const hint = Array.isArray(n.hint) && n.hint.length === 3 ? { x: n.hint[0], y: n.hint[1], r: n.hint[2] } : null;
       if (!loc) { M.nodes.set(n.key, { key: n.key, name: n.name || n.key, x: n.x, y: n.y, placed: !!n.placed, floor: n.floor || 0,
         facing: typeof n.facing === 'number' ? n.facing : undefined, hint }); continue; }
+      loc.fit = Array.isArray(n.fit) ? { x: n.fit[0], y: n.fit[1] } : null;   // the Pi's fitted spot
       if (n.placed || hint || loc.placed || loc.hint) {   // a placement: as the Pi has it
         Object.assign(loc, { x: n.x, y: n.y, placed: !!n.placed, floor: n.floor || 0, hint,
           facing: typeof n.facing === 'number' ? n.facing : undefined });
@@ -2088,7 +2106,8 @@ window.AckMap = (() => {
     if (typeof m.hub_facing === 'number') M.hubFacing = m.hub_facing;
     for (const n of m.nodes || []) M.nodes.set(n.key, { key: n.key, name: n.name || n.key, x: n.x, y: n.y, placed: !!n.placed, floor: n.floor || 0,
       facing: typeof n.facing === 'number' ? n.facing : undefined,
-      hint: Array.isArray(n.hint) && n.hint.length === 3 ? { x: n.hint[0], y: n.hint[1], r: n.hint[2] } : null });
+      hint: Array.isArray(n.hint) && n.hint.length === 3 ? { x: n.hint[0], y: n.hint[1], r: n.hint[2] } : null,
+      fit: Array.isArray(n.fit) ? { x: n.fit[0], y: n.fit[1] } : null });
     M.zones = Array.isArray(m.zones) ? m.zones.map((z) => ({ ...z })) : [];
     M.trackOff = new Set(Array.isArray(m.track_off) ? m.track_off : []);
     if (m.plans) {

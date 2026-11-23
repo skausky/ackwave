@@ -1103,6 +1103,9 @@ class Dashboard:
             z = ((n.get('floor') or hub_fl) - hub_fl) * fh
             if n.get('placed') or key.startswith('sat:'):
                 return [End(n['x'], n['y'], z, n.get('facing'))]
+            if n.get('fit'):                     # the Pi fitted it: there, give or take a metre
+                fx, fy = n['fit']
+                return [End(fx, fy, z)] + [End(fx + math.cos(a), fy + math.sin(a), z) for a in (0, math.pi / 2, math.pi, -math.pi / 2)]
             au = n.get('auto')                   # the map's own estimate: its ellipse (map.js endSamples)
             if au and not n.get('hint'):
                 if au[0] < 1:
@@ -1332,7 +1335,7 @@ class Dashboard:
         if not any(z.get('watch') for z in layout.get('zones', [])):
             return
         snaps, heard = list(self.snaps)[-120:], self._hearings()
-        skip = {k for k, at in self.user_touch.items() if now - at < 86400}
+        skip = set()                             # your circle bounds it: the fit works inside where you put it
         self._autofit_busy = True
 
         def run():
@@ -1344,12 +1347,10 @@ class Dashboard:
                         cur = self.map_load()
                         edits = []
                         for n in cur.get('nodes', []):
-                            if n['key'] in moved and not n.get('placed') and time.time() - self.user_touch.get(n['key'], 0) >= 86400:
+                            if n['key'] in moved and not n.get('placed'):
                                 x, y = moved[n['key']]
-                                r = min(3.0, n['hint'][2]) if n.get('hint') else 3.0
-                                self.autofit_state['moved'][n['key']] = round(math.dist((x, y), (n['hint'][0], n['hint'][1]) if n.get('hint') else (n['x'], n['y'])), 1)
-                                n.update(x=x, y=y, hint=[x, y, r])
-                                n.pop('auto', None)
+                                self.autofit_state['moved'][n['key']] = round(math.dist((x, y), (n['x'], n['y'])), 1)
+                                n.update(x=x, y=y, fit=[round(x, 2), round(y, 2)])   # the Pi's spot; your hint stays yours
                                 edits.append('node:' + n['key'])
                         if edits:
                             self._merge_auto = True
@@ -2305,6 +2306,10 @@ class Dashboard:
                         (n.get('placed') and (ex['x'], ex['y']) != (n['x'], n['y']))):
                     if not getattr(self, '_merge_auto', False):
                         self.user_touch[n['key']] = time.time()    # you moved it: the automatic fit leaves it a day
+                if ex is not None and ex.get('fit') and 'fit' not in n:   # the Pi's fitted spot: kept unless you moved it
+                    moved_by_you = (ex.get('hint') != n.get('hint') or ex.get('placed') != n.get('placed'))
+                    if not moved_by_you or getattr(self, '_merge_auto', False):
+                        n = dict(n, fit=ex['fit'])
                 nodes[n['key']] = n
         out['nodes'] = list(nodes.values())[:64]
         return out
@@ -2764,6 +2769,9 @@ def clean_map(m):
             h = n.get('hint')                    # a rough spot: [x, y, radius in m]
             if isinstance(h, list) and len(h) == 3:
                 c['hint'] = [_num(h[0], -10000, 10000), _num(h[1], -10000, 10000), _num(h[2], 1, 100)]
+            f = n.get('fit')                     # the Pi's fitted spot (autofit): [x, y]
+            if isinstance(f, list) and len(f) == 2:
+                c['fit'] = [_num(f[0], -10000, 10000), _num(f[1], -10000, 10000)]
             au = n.get('auto')                   # the map's estimate of an unplaced end: [a, b, rot] (metres, radians)
             if isinstance(au, list) and len(au) == 3:
                 c['auto'] = [_num(au[0], 0, 1000), _num(au[1], 0, 1000), _num(au[2], -7, 7)]
