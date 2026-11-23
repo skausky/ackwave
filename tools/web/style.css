@@ -657,3 +657,8 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 
 .hs-board.breath i { background: var(--blue, #6aa8ff); animation: breathe 4s ease-in-out infinite; }
 @keyframes breathe { 0%, 100% { transform: scale(.8); opacity: .6; } 50% { transform: scale(1.25); opacity: 1; } }
+
+/* the everyday view: only what matters; Advanced shows every page, tool and setting */
+body.simple [data-adv] { display: none !important; }
+body.simple .map-card > .cap { display: none; }                 /* the map's long explanation */
+body.simple .map-link > div.muted.small { display: none; }       /* per-link technical lines (dBm, distances) */

@@ -29,13 +29,13 @@
 <nav class="nav" id="nav" aria-label="Pages">
   <a href="#/home" data-route="home"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg><span>Home</span></a>
   <a href="#/graphs" data-route="graphs" data-adv><svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 4 4-7 5 6"/><path d="M3 21h18"/></svg><span>Graphs</span></a>
-  <a href="#/activity" data-route="activity"><svg viewBox="0 0 24 24"><circle cx="13" cy="4.5" r="2"/><path d="M8 21l3-6 3 2v4M11 15l1-6 4 3h3M12 9l-4 2-1 4"/></svg><span>Activity</span></a>
-  <a href="#/stats" data-route="stats"><svg viewBox="0 0 24 24"><path d="M5 21V11M10 21V5M15 21v-7M20 21V9"/></svg><span>Stats</span></a>
+  <a href="#/activity" data-route="activity" data-adv><svg viewBox="0 0 24 24"><circle cx="13" cy="4.5" r="2"/><path d="M8 21l3-6 3 2v4M11 15l1-6 4 3h3M12 9l-4 2-1 4"/></svg><span>Activity</span></a>
+  <a href="#/stats" data-route="stats" data-adv><svg viewBox="0 0 24 24"><path d="M5 21V11M10 21V5M15 21v-7M20 21V9"/></svg><span>Stats</span></a>
   <a href="#/links" data-route="links" data-adv><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M7.3 11l9.4-4M7.3 13l9.4 4"/></svg><span>Links</span></a>
   <a href="#/map" data-route="map"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg><span>Map</span></a>
   <a href="#/debug" data-route="debug" data-adv><svg viewBox="0 0 24 24"><path d="M8 6l-5 6 5 6M16 6l5 6-5 6M14 4l-4 16"/></svg><span>Debug</span></a>
   <a href="#/settings" data-route="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg><span>Settings</span></a>
-  <button type="button" id="btn-adv" class="nav-adv" aria-pressed="false" title="Advanced mode: also show Graphs, Links and Debug"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span>Advanced</span></button>
+  <button type="button" id="btn-adv" class="nav-adv" aria-pressed="false" title="Advanced: every page and setting (Activity, Stats, Graphs, Links, Debug, the buzzer, LED and more)"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span>Advanced</span></button>
 </nav>
 
 <main>
@@ -267,16 +267,16 @@
           <h2>Where the board senses motion <span class="muted small" id="map-wave"></span></h2>
           <div class="tools">
             <div class="seg" id="map-unit"><button type="button" data-u="ft">ft</button><button type="button" data-u="m">m</button></div>
-            <select id="map-env" title="How fast the signal fades with distance indoors"></select>
+            <select id="map-env" data-adv title="How fast the signal fades with distance indoors"></select>
             <button type="button" id="map-fit">Fit</button>
-            <button type="button" id="map-auto" title="Place routers and devices from the signals your boards hear">Auto-place</button>
+            <button type="button" id="map-auto" data-adv title="Place routers and devices from the signals your boards hear">Auto-place</button>
             <button type="button" id="map-zone" title="Drag a rectangle on the map: a zone (an area to watch, to alert on, to switch the light)">Draw a zone</button>
             <button type="button" id="map-acc" title="How precisely each spot can be located with the boards where they are">Accuracy</button>
-            <button type="button" id="map-suggest" title="Try every spot for a board and show where it helps most">Suggest a spot</button>
-            <button type="button" id="map-walk" title="Walk around and tap where you really are: shows the real error">Walk check</button>
-            <button type="button" id="map-walkfit" title="Move the routers to where your walk-check taps say they fit best">Fit routers to my walk</button>
-            <button type="button" id="map-selffit" title="No walking needed: moves automatic and rough routers to where everyday movement fits best">Fit routers automatically</button>
-            <button type="button" id="map-reset" class="ghost">Reset</button>
+            <button type="button" id="map-suggest" data-adv title="Try every spot for a board and show where it helps most">Suggest a spot</button>
+            <button type="button" id="map-walk" data-adv title="Walk around and tap where you really are: shows the real error">Walk check</button>
+            <button type="button" id="map-walkfit" data-adv title="Move the routers to where your walk-check taps say they fit best">Fit routers to my walk</button>
+            <button type="button" id="map-selffit" data-adv title="No walking needed: moves automatic and rough routers to where everyday movement fits best">Fit routers automatically</button>
+            <button type="button" id="map-reset" data-adv class="ghost">Reset</button>
           </div>
         </div>
         <p class="cap">Every board (squares), router and poked device (dots), and each link between them. The glow is where a person changes that link's signal, an estimate: strongest inside the thin outline (the 1st Fresnel zone, drawn to scale), fading outward as reflections carry the change around the room, and strong right next to either end. It pulses red while that link sees motion. Walls and furniture bend it. While there is motion, a red haze with a dashed ring shows where it most likely is: every link votes by how strongly it sees motion (yes here, or not here), and a link whose far end is only estimated votes more vaguely, so the ring widens rather than guess. Place the hub and your boards (drag the squares) and aim each one: drag the arrow by its square to the way it faces (its antenna hears best ahead, least through the wall behind). Routers are optional: place any you know; the others are guessed roughly, and the tracking leans on the boards. Pinch or scroll to zoom, drag empty space to pan: the view stays where you leave it.</p>
@@ -454,7 +454,7 @@
       </div>
       <p class="muted small">Pick your own router: <b>Watch</b> uses every access point with that name on the board's channel. To combine several routers (any names), tick their access points instead. The board listens on one channel, so set those routers to the same 2.4 GHz channel in their own settings. The board only listens and never joins, so no password is needed. The choice is saved on the board, which restarts and recalibrates (about 15 s).</p>
     </section>
-    <section class="row2">
+    <section class="row2" data-adv>
       <article class="card">
         <div class="card-head"><h2>Detection</h2><span id="sens-state" class="muted small"></span></div>
         <div class="seg" id="sens-level">
@@ -464,7 +464,7 @@
         <p class="muted small">Sensitivity is the one threshold the board lets you change (the slow, 4 s window); it is saved on the board. The rest are shown for reference; changing them needs new firmware.</p>
         <table class="kv"><tbody id="thresholds"></tbody></table>
       </article>
-      <article class="card snd">
+      <article class="card snd" data-adv>
         <div class="snd-head"><h2>Buzzer</h2><span id="snd-state" class="muted small"></span></div>
         <div class="seg" id="snd-mode">
           <button type="button" data-m="off">Off</button><button type="button" data-m="beep">Beeps</button><button type="button" data-m="alarm">Alarm</button>
@@ -475,7 +475,7 @@
         <p class="muted small">Beeps: "di-di-DIIING" once motion has lasted 2 s (at most every 30 s), a sliding "dooooo" when it ends. Alarm: a siren while motion lasts. Every sound uses the volume set here. Saved on the board, so it keeps them unplugged from the PC too; hold BOOT for 5 s to put the board's settings back to the firmware's.</p>
       </article>
     </section>
-    <section class="card snd led" id="led-card">
+    <section data-adv class="card snd led" id="led-card">
       <div class="snd-head"><h2>Board LED</h2><span id="led-state" class="muted small"></span></div>
       <div class="seg" id="led-mode">
         <button type="button" data-m="status">Status</button><button type="button" data-m="motion">Motion only</button><button type="button" data-m="off">Off</button>
@@ -491,7 +491,7 @@
       <p class="muted small"><b>Status</b> shows everything: motion in your colour, amber fading for 30 s after it, a quick purple flash for a blip too faint to count, a slow blue pulse while calibrating, yellow while looking for the router, and dark when the room is still. <b>Motion only</b> lights it for motion and nothing else. Saved on the board, so it stays the same when the board runs on its own.</p>
     </section>
 
-    <section class="card" id="wiring-card">
+    <section data-adv class="card" id="wiring-card">
       <div class="card-head"><h2>Wiring a board</h2><span class="muted small">ESP32-S3: pins as printed on the board</span></div>
       <svg class="wiring" viewBox="0 0 520 210" role="img" aria-label="Buzzer: red wire to GPIO 4, black wire to GND. Light module: IN to GPIO 5, VCC to 5V, GND to GND.">
         <rect x="170" y="20" width="150" height="170" rx="10" class="w-board"/>
@@ -516,7 +516,7 @@
       <p class="small"><b>A light (next firmware):</b> never wire a light straight to a pin: a pin gives 3.3 V and a few milliamps. Put a switch module in between: <b>IN</b> to <b>GPIO 5</b>, <b>VCC</b> to <b>5V</b>, <b>GND</b> to <b>GND</b>, and the light's own red and black wires through the module's output. For a USB or 5–24 V DC light (LED strip, lamp with a DC plug), a <b>logic-level MOSFET module</b> (e.g. one built on an IRLZ44N or AO3400). For anything plugged into the wall, <b>don't wire mains yourself</b>: use a smart plug and the "Light or smart device on motion" card below.</p>
     </section>
 
-    <section class="card" id="out-card">
+    <section data-adv class="card" id="out-card">
       <div class="card-head"><h2>Light output <span class="muted small">GPIO 5, through a switch module</span></h2><span id="out-state" class="muted small"></span></div>
       <div class="led-row"><span>Board</span><div class="seg" id="out-board"></div></div>
       <div class="led-row"><span>Light</span><div class="seg" id="out-mode">
