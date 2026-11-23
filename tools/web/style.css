@@ -662,3 +662,19 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 body.simple [data-adv] { display: none !important; }
 body.simple .map-card > .cap { display: none; }                 /* the map's long explanation */
 body.simple .map-link > div.muted.small { display: none; }       /* per-link technical lines (dBm, distances) */
+
+/* motion history: one row per board, red where it saw motion; the stretches in words below */
+.hist-lanes { display: grid; gap: 6px; margin: 8px 0 12px; }
+.hist-row { display: grid; grid-template-columns: minmax(70px, 120px) 1fr; align-items: center; gap: 8px; }
+.hist-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-row.house .hist-name { font-weight: 700; }
+.hist-bar { position: relative; height: 16px; border-radius: 4px; background: rgba(127,127,127,0.13); overflow: hidden; }
+.hist-bar i { position: absolute; top: 0; bottom: 0; background: var(--motion); border-radius: 2px; }
+.hist-row.house .hist-bar i { background: var(--accent); }
+.hist-row.axis .hist-bar { background: none; height: 14px; overflow: visible; }
+.hist-row.axis b { position: absolute; transform: translateX(-50%); font-size: 11px; font-weight: 400; color: var(--muted); white-space: nowrap; }
+.hist-list { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; }
+.hist-ep { display: grid; grid-template-columns: 76px 1fr; gap: 8px; padding: 7px 2px; border-top: 1px solid rgba(127,127,127,0.15); }
+.hist-ep time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+.hist-ep.open .hist-what { color: var(--motion); font-weight: 600; }
+.hist-ep.house time { color: var(--accent); }

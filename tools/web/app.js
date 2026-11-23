@@ -557,10 +557,29 @@ function typeIn(node, text) {        // a new entry types itself in (not with re
     if (i >= text.length) clearInterval(iv);
   }, 16);
 }
+// Important: what you'd want a phone to say (the watched house, zones, alerts, the
+// light, a board gone or back); Everything: every link's flicker too
+let streamMode = 'imp';
+try { streamMode = localStorage.getItem('ackwave.stream') || 'imp'; } catch (e) { /* private mode */ }
+const importantEv = (e) => e.important || e.house || e.type === 'zone' || e.type === 'automation'
+  || (e.type === 'health' && /not heard| back| joined/.test(e.text));
+document.querySelectorAll('#stream-mode button').forEach((b) => {
+  b.classList.toggle('on', b.dataset.m === streamMode);
+  b.onclick = () => {
+    streamMode = b.dataset.m;
+    try { localStorage.setItem('ackwave.stream', streamMode); } catch (e) { /* private mode */ }
+    document.querySelectorAll('#stream-mode button').forEach((x) => x.classList.toggle('on', x === b));
+    for (const li of stream.nodes.values()) li.remove();
+    stream.nodes.clear(); renderStream();
+  };
+});
 function renderStream() {
   const list = $('#stream');
   if (!list || !slow || !slow.events) return;
-  const groups = streamGroups(slow.events), nowS = Date.now() / 1000, keep = new Set();
+  const evs = streamMode === 'imp' ? slow.events.filter(importantEv) : slow.events;
+  const groups = streamGroups(evs), nowS = Date.now() / 1000, keep = new Set();
+  if (!groups.length && !list.querySelector('.stream-empty'))
+    list.append(el('li', { className: 'stream-empty muted small', textContent: streamMode === 'imp' ? 'Nothing important yet (Everything shows every flicker).' : 'Waiting for something to happen…' }));
   if (groups.length) { const em = list.querySelector('.stream-empty'); if (em) em.remove(); }
   let prev = null;
   for (const g of groups) {
@@ -608,6 +627,84 @@ function renderStream() {
   const open = groups.filter((g) => g.open && g.type === 'motion').length;
   $('#stream-state').textContent = open ? `${open} moving now` : '';
 }
+
+// ---------------------------------------------------------------- motion history
+// One row per board (and the watched house) for the last hours, then the
+// stretches of motion in words: which boards saw it, which stayed quiet, how
+// long it was clear afterwards. Boards firing together = one episode.
+let histH = 3, histAt = 0, histData = null;
+document.querySelectorAll('#hist-range button').forEach((b) => {
+  b.onclick = () => { histH = +b.dataset.h; histAt = 0;
+    document.querySelectorAll('#hist-range button').forEach((x) => x.classList.toggle('on', x === b)); loadHist(); };
+});
+async function loadHist() {
+  if (Date.now() - histAt < 15000) return;
+  histAt = Date.now();
+  try { histData = await (await fetch(`api/timeline?hours=${histH}`)).json(); } catch (e) { return; }
+  renderHist();
+}
+const hhmm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+function histEpisodes(spans, keys) {
+  const ps = spans.filter((p) => keys.includes(p[2]) && p[1] - p[0] >= 2).sort((a, b) => a[0] - b[0]);
+  const eps = [];
+  for (const p of ps) {
+    const e = eps[eps.length - 1];
+    if (e && p[0] <= e.t1 + 20) { e.t1 = Math.max(e.t1, p[1]); e.on.add(p[2]); e.open = e.open || p[3]; }
+    else eps.push({ t0: p[0], t1: p[1], on: new Set([p[2]]), open: p[3] });
+  }
+  return eps;
+}
+function renderHist() {
+  const d = histData;
+  if (!d || !d.lanes) return;
+  const lanes = d.lanes.filter((l) => l.key === 'house' || l.key.startsWith('sat:'));
+  const boards = lanes.filter((l) => l.key.startsWith('sat:'));
+  const name = Object.fromEntries(lanes.map((l) => [l.key, l.key === 'house' ? 'Watched house' : l.name]));
+  const T0 = d.t0, T1 = d.t1, span = T1 - T0, pct = (t) => `${(100 * (t - T0) / span).toFixed(3)}%`;
+  const box = $('#hist-lanes'); box.textContent = '';
+  for (const l of lanes) {
+    const row = el('div', { className: 'hist-row' + (l.key === 'house' ? ' house' : '') },
+      el('span', { className: 'hist-name', textContent: name[l.key] }));
+    const bar = el('div', { className: 'hist-bar' });
+    for (const p of d.spans.filter((q) => q[2] === l.key)) {
+      const s = el('i', { title: `${hhmm(p[0])} – ${p[3] ? 'now' : hhmm(p[1])} · ${fmtSpan(p[1] - p[0])}` });
+      s.style.left = pct(Math.max(T0, p[0])); s.style.width = `max(2px, ${(100 * (p[1] - Math.max(T0, p[0])) / span).toFixed(3)}%)`;
+      bar.append(s);
+    }
+    row.append(bar); box.append(row);
+  }
+  const axis = el('div', { className: 'hist-row axis' }, el('span', { className: 'hist-name' }));
+  const ab = el('div', { className: 'hist-bar' });
+  const stepS = histH <= 1 ? 900 : histH <= 3 ? 1800 : 3600;
+  for (let t = Math.ceil(T0 / stepS) * stepS; t < T1; t += stepS) {
+    const k = el('b', { textContent: new Date(t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) });
+    k.style.left = pct(t); ab.append(k);
+  }
+  axis.append(ab); box.append(axis);
+  // the stretches, newest first, in words
+  const eps = histEpisodes(d.spans, boards.map((l) => l.key)), list = $('#hist-list');
+  list.textContent = '';
+  const houseSpans = d.spans.filter((p) => p[2] === 'house');
+  const zoneEv = ((slow && slow.events) || []).filter((e) => e.type === 'zone');
+  for (let i = eps.length - 1; i >= 0; i--) {
+    const e = eps[i], next = eps[i + 1];
+    const on = [...e.on].map((k) => name[k]), off = boards.filter((l) => !e.on.has(l.key)).map((l) => name[l.key]);
+    const inHouse = houseSpans.some((p) => p[0] <= e.t1 + 5 && p[1] >= e.t0 - 5);
+    const zones = [...new Set(zoneEv.filter((z) => z.t >= e.t0 - 5 && z.t <= e.t1 + 5).map((z) => z.text.replace(/^(Motion at|Someone in) /, '')))];
+    const where = zones.length ? `near ${zones.join(', ')}` : inHouse ? 'in the watched house'
+      : off.length ? `${on.join(' + ')}'s side only` : 'seen by every board';
+    const li = el('li', { className: 'hist-ep' + (e.open ? ' open' : '') + (inHouse ? ' house' : '') },
+      el('time', { textContent: hhmm(e.t0) }),
+      el('div', {},
+        el('div', { className: 'hist-what', textContent: `${on.join(' + ')} · ${e.open ? 'moving now' : fmtSpan(e.t1 - e.t0)} · ${where}` }),
+        el('div', { className: 'muted small', textContent: [off.length ? `quiet: ${off.join(', ')}` : '',
+          next ? `then clear ${fmtSpan(next.t0 - e.t1)}` : e.open ? '' : `clear since (${fmtSpan(T1 - e.t1)})`].filter(Boolean).join(' · ') })));
+    list.append(li);
+  }
+  if (!eps.length) list.append(el('li', { className: 'muted small', textContent: `No motion on the boards in the last ${histH} h.` }));
+  $('#hist-state').textContent = eps.length ? `${eps.length} stretch${eps.length > 1 ? 'es' : ''} of motion` : '';
+}
+setInterval(() => { if (page === 'home') loadHist(); }, 5000);
 
 function renderHome() {
   renderBoards();

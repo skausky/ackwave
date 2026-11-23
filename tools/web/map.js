@@ -541,7 +541,7 @@ window.AckMap = (() => {
   function fit() {
     // the hub, the boards, and what is placed or well located; a rough guess
     // (a ring from one board) or a picture never pulls the view far out
-    const wz = simple() && watchZone();
+    const wz = false;
     if (wz) {                                        // the Watch view: your boards and the watched house, nothing else
       const pw = [[wz.x, wz.y], [wz.x + wz.w, wz.y + wz.h]];
       for (const b of others) { const n = M.nodes.get(b.key); if (n && !offMap(n)) pw.push([n.x, n.y]); }
@@ -802,14 +802,12 @@ window.AckMap = (() => {
     labelBoxes = [];
     if (!loaded) return;                           // the saved layout first: guesses would set the view
     const cnt = links().length;                    // something new appeared: show it (a saved view stays at load)
-    if (!M.view || (cnt > nodeCount && (readOnly ? !homeTouched : autoFit && !viewByUser)) || (readOnly && !homeTouched && simple() && watchZone() && !watchFramed)) { fit(); watchFramed = readOnly && simple() && !!watchZone(); }   // never over a view you set
+    if (!M.view || (cnt > nodeCount && (readOnly ? !homeTouched : autoFit && !viewByUser))) fit();   // never over a view you set
     nodeCount = cnt;
     locate(t);
     stepTrack(t);
-    const watchOnly = simple() && !!watchZone();   // the Watch view: a clean diagram, no pictures
-    if (!watchOnly) drawPlans();
-    else drawYourSide();
-    if (!watchOnly && simple() && M.plans.some((p) => !p.hidden && p.img)) {   // the pictures a little darker: people and boards stand out
+    drawPlans();                                   // your satellite picture and floor plans, on Home too
+    if (simple() && M.plans.some((p) => !p.hidden && p.img)) {   // the pictures a little darker: people and boards stand out
       ctx.fillStyle = alpha(css('--bg') || '#000000', 0.28); ctx.fillRect(0, 0, W, H);
     }
     drawToday();
@@ -819,7 +817,7 @@ window.AckMap = (() => {
     // The Watch view (Home, with a watched area): beams from your boards into the
     // watched house that glow when they see motion, a cloud where they agree, and
     // nothing drawn for your own house. No pinpoint the data can't back.
-    const wz = watchZone(), wv = simple() && !!wz;
+    const wz = watchZone(), wv = false;            // Home shows the map you set up (the beams view is kept for later)
     const L = wv ? links().filter(({ a, n }) => (inZone(wz, a) || inZone(wz, n)) && !offMap(a) && !offMap(n)) : links();
     const lam = lambda(), motionC = css('--motion');
     const pulse = 0.5 + 0.5 * Math.sin(t / 260);

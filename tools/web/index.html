@@ -53,6 +53,12 @@
       <div class="home-map-slot" id="home-map-slot"></div>
       <div class="map-legend muted small"><span><i class="lg-person"></i>a person (dashed ring: how sure · steady halo: standing still)</span><span><i class="lg-board"></i>a board (red while it sees motion)</span><span><i class="lg-link"></i>a link lights up when it sees motion</span></div>
     </article>
+    <article class="card hist-card" id="hist-card">
+      <div class="card-head"><h2>Motion history <span class="muted small" id="hist-state"></span></h2>
+        <div class="seg" id="hist-range"><button type="button" data-h="1">1 h</button><button type="button" data-h="3" class="on">3 h</button><button type="button" data-h="8">8 h</button></div></div>
+      <div class="hist-lanes" id="hist-lanes"></div>
+      <ol class="hist-list" id="hist-list"><li class="muted small">Loading…</li></ol>
+    </article>
     <div class="home-grid">
       <article class="card hero" id="hero">
         <div class="hero-top"><span class="state-dot" id="home-dot"></span><span class="hero-word" id="home-word">WAITING</span></div>
@@ -81,7 +87,8 @@
         </div>
       </article>
         <article class="card stream-card">
-      <div class="card-head"><h2>Live <span class="muted small" id="stream-state"></span></h2></div>
+      <div class="card-head"><h2>Live <span class="muted small" id="stream-state"></span></h2>
+        <div class="seg" id="stream-mode"><button type="button" data-m="imp" class="on">Important</button><button type="button" data-m="all">Everything</button></div></div>
       <ol class="stream" id="stream"><li class="stream-empty muted small">Waiting for something to happen…</li></ol>
       </article>
     </div>
