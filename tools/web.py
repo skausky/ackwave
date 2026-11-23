@@ -459,7 +459,8 @@ class Dashboard:
 
     def _board_key(self, mac):
         mac = mac.lower()
-        return 'hub' if mac == (self.s.me or '').lower() else 'sat:' + mac
+        hubs = {(self.s.me or '').lower(), (self.cfg.get('hub') or '').lower()} - {''}
+        return 'hub' if mac in hubs else 'sat:' + mac
 
     def _ml_line(self, line):
         """ML,<board>,<moving>,<p empty>,<p still>,<p moving> / FEAT,<board>,<8 numbers>."""
