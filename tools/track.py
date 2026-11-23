@@ -188,10 +188,18 @@ class Tracker:
         weak = len(obs) >= 2 and top >= WEAK and bool(self.people)
         if not active and not weak:
             return True
-        if area is not None and active and self._your_side(obs, area, 1.1 if tripwire else self.OUTSIDE_WIN):
-            self.outside_at = t                           # movement on your side (near the boards): nobody placed over there
-            self.people = [p for p in self.people if t - p.seen < KEEP_S / 2]
-            return True
+        if area is not None and active:
+            boards = {o['key'].split('>')[0] for o in obs if o['a'] >= 0.6}
+            side = self._your_side(obs, area, 1.1 if tripwire else self.OUTSIDE_WIN)
+            if side and (tripwire or len(boards) >= 2):   # your side: a tripwire, or several boards agree
+                self.outside_at = t
+                self.people = [p for p in self.people if t - p.seen < KEEP_S / 2]
+                return True
+            if len(boards) < 2:                            # one board alone: somewhere along its wires, can't tell which end
+                self.unclear_at = t
+                self.unclear = sorted(o['key'] for o in obs if o['a'] >= 0.6)
+                self.people = [p for p in self.people if t - p.seen < KEEP_S / 2]
+                return True
         xs = [e.x for o in obs for pair in o['ends'] for e in pair] + [0.0]
         ys = [e.y for o in obs for pair in o['ends'] for e in pair] + [0.0]
         x0, y0 = math.floor(min(xs) - 2), math.floor(min(ys) - 2)

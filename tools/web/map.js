@@ -508,7 +508,7 @@ window.AckMap = (() => {
     track.ghosts = track.ghosts.filter((g) => t - g.end < TRAIL_MS).slice(-6);
   }
   let zoneIn = {};                                  // zone id -> people inside, from the Pi's tracking
-  let yourSide = false;                             // the Pi: this movement is on your side (near the boards), not over there
+  let yourSide = false, unclear = false;            // unclear: one board alone (which end of its wire, unknown)                             // the Pi: this movement is on your side (near the boards), not over there
   let breathing = {};                               // 'hub' / 'sat:<mac>' -> breathing near that board
   let learned = {};                                 // 'hub' / 'sat:<mac>' -> its learned model now: {motion, p: [empty, still, moving] %}
   let todayMap = null;                              // where people were today (the Pi's tracking): {cs, cells}
@@ -954,7 +954,8 @@ window.AckMap = (() => {
     personLabels = [];
     $('#map-msg').textContent = !watchZone() ? 'Draw the house you want to watch: Map page, Draw a zone, then drag a rectangle over it.'
       : !L.length ? 'Waiting for live links: the router appears once the board hears it.'
-      : yourSide ? 'Movement on your side (near the boards), not in the watched house' : '';
+      : yourSide ? 'Movement on your side (near the boards), not in the watched house'
+      : unclear ? 'One board alone sees it: somewhere along its wire (which end, unknown)' : '';
   }
   // A router: how sure you are of where it is. Exactly (placed), roughly
   // (a circle you drag: auto-placement and the tracking stay inside it), or
@@ -1128,7 +1129,7 @@ window.AckMap = (() => {
     track.at = t;
     const wz = watchZone();
     if (!wz) { track.people = []; track.near = null; return; }   // nothing to watch yet: draw the house first
-    if (yourSide) { track.people = track.people.filter((p) => t - p.seen < KEEP_MS / 2); track.cands = []; return; }   // movement on your side: nobody over there
+    if (yourSide || unclear) { track.people = track.people.filter((p) => t - p.seen < KEEP_MS / 2); track.cands = []; return; }   // movement on your side: nobody over there
     const L = links().filter(({ a, n, d, r }) => d >= 0.3 && !weak(r) && judged(r) && !offMap(a) && !offMap(n)
       && (inZone(wz, a) || inZone(wz, n)));
     const obs = L.map(({ a, n, r }) => ({ a: excess(r, t, trustOf(r)), ends: endSamples(a, n), A: a, N: n, ap: !!r.ap, key: r.key })).filter((o) => o.a !== null);
@@ -1491,8 +1492,8 @@ window.AckMap = (() => {
     const over = recent.filter((w) => w.side === 'over'), yours = recent.filter((w) => w.side === 'yours');
     const age = (ms) => (ms < 1500 ? 'now' : ms < 60000 ? `${Math.round(ms / 1000)} s ago` : `${Math.round(ms / 60000)} min ago`);
     const lines = [];
-    if (over.length) lines.push([`Over there · ${over.slice(0, 3).map((w) => w.label).join(', ')} · ${age(now - over[0].at)}`, css('--motion')]);
-    if (yours.length) lines.push([`Your side · ${yours[0].label} · ${age(now - yours[0].at)}`, WIRE_SIDE]);
+    if (over.length) lines.push([`Crossed · ${over.slice(0, 3).map((w) => w.label).join(', ')} · ${age(now - over[0].at)}`, css('--motion')]);
+    if (yours.length) lines.push([`Your side tripwire · ${yours[0].label} · ${age(now - yours[0].at)}`, WIRE_SIDE]);
     if (!lines.length) lines.push(['All wires quiet', 'rgba(255,255,255,0.7)']);
     ctx.save();
     ctx.font = '600 13px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
@@ -2839,7 +2840,7 @@ window.AckMap = (() => {
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
       if (slow && slow.tracked && slow.tracked.model_err) modelErr = slow.tracked.model_err;
-      if (slow && slow.tracked) { yourSide = !!slow.tracked.your_side; zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; todayMap = slow.tracked.today || null; learned = slow.tracked.learned || {}; }
+      if (slow && slow.tracked) { yourSide = !!slow.tracked.your_side; unclear = !!slow.tracked.unclear; zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; todayMap = slow.tracked.today || null; learned = slow.tracked.learned || {}; }
       if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPeople = slow.demo_people || []; if (slow.channel) channel = slow.channel; }
       if (header) {
         boardMotion = hubMoving(header);
