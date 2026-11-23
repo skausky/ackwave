@@ -48,6 +48,7 @@ from track import End, Tracker, in_zone
 from mlfeat import Shadow
 import mltrain
 import autofit
+import linkpick
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LED_MODES, LED_PATTERNS, LONG_C, MOTION_C,
                  SCAN_C, STILL_C, SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
 
@@ -255,6 +256,9 @@ class Dashboard:
         self.user_touch = {}             # node key -> when you last moved it (the automatic fit leaves it a day)
         self.autofit_state = dict(at=None, note='', moved={})   # the Pi's last automatic router fit
         self._autofit_busy = False
+        self.picker = linkpick.LinkPicker()      # which devices each board pings: learned over time
+        self.picker_off = {}                     # (board, device) -> when the picker dropped it
+        self._picker_loaded = False
         self.house = House()             # every board's verdict combined (boards.py)
         self.travel = Travel()           # someone walking from board to board (boards.py)
         self.travel_ev = None            # its live-stream entry while the path grows
@@ -1346,6 +1350,50 @@ class Dashboard:
                     autofit=dict(self.autofit_state, paused=sorted(k for k, at in self.user_touch.items() if now - at < 86400)),
                     today=dict(cs=0.5, cells=[[c[0], c[1], n] for c, n in cells]))
 
+    def _picker_step(self):
+        """Once a second: how each board -> device link behaved (over there, your
+        side, quiet); saved every 5 min next to the map."""
+        now = time.time()
+        last = getattr(self, '_picker_at', 0.0)
+        if now - last < 1.0:
+            return
+        dt = min(5.0, now - last) if last else 1.0
+        self._picker_at = now
+        p = self._map_path()
+        lp = os.path.join(os.path.dirname(p), 'links.json') if p else None
+        if not self._picker_loaded:
+            self._picker_loaded = True
+            try:
+                with open(lp) as f:
+                    self.picker.from_json(json.load(f))
+            except (OSError, ValueError, TypeError):
+                pass
+        m = self._layout()
+        wz = next((z for z in m.get('zones', []) if z.get('watch')), None)
+        if not wz:
+            return
+        mine = now - (getattr(self.tracker, 'outside_at', None) or 0) < 3
+        over = not mine and (self.zone_in.get(wz['id'], 0) > 0 or bool(self.tracker.people))
+        hub = (self.cfg['hub'] or self.s.me or '').lower()
+        links = {}
+        for sat, lk in self.sat_links.items():
+            off = self.picker_off.get(sat, {})
+            for dev, ln in lk.items():
+                if ln.flags & 2 or dev in self.sats or dev == hub or dev in off:
+                    continue                             # routers and boards always kept; dropped ones not 'dead'
+                fresh = ln.at is not None and now - ln.at <= SAT_GONE_S
+                links[(sat, dev)] = bool(ln.moving) if fresh else None
+        self.picker.observe(links, over, mine, dt)
+        if lp and now - getattr(self, '_picker_saved', 0.0) > 300:
+            self._picker_saved = now
+            try:
+                tmp = lp + '.tmp'
+                with open(tmp, 'w') as f:
+                    json.dump(self.picker.to_json(), f)
+                os.replace(tmp, lp)
+            except OSError:
+                pass
+
     AUTOFIT_EVERY_S = 900
 
     def _autofit_step(self):
@@ -1434,10 +1482,27 @@ class Dashboard:
             if c and c.get('state') in ('sent', 'queued') and now - c.get('at', 0) < 60:
                 continue                                 # one command at a time
             heard = self.surveys.get(sat, {})
-            if targets is not None:                      # a watched area: devices placed in it, not boards
-                cands = sorted((m for m, e in heard.items() if e['kind'] == 'device' and m in targets
-                                and now - e['at'] < 60 and e['rssi'] > PEER_MIN_RSSI), key=lambda m: -heard[m]['rssi'])
-                linked = {m for m in self.sat_links.get(sat, {}) if m in targets}
+            if targets is not None:                      # a watched area: every slot used, the devices worth it learned (linkpick)
+                devs = {m: e['rssi'] for m, e in heard.items() if e['kind'] == 'device' and now - e['at'] < 60
+                        and m not in boards and m not in self.sats}
+                lk = self.sat_links.get(sat, {})
+                linked = {m for m, ln in lk.items() if not (ln.flags & 2) and m not in boards and m not in self.sats
+                          and ln.at is not None and now - ln.at < 300 and m not in self.picker_off.get(sat, {})}
+                pinned = (set(self.s.devices.manual) if self.s.devices.mode == 'manual' else set()) & set(devs)   # your picks on the Devices page: on every board that hears them
+                act = self.picker.choose(sat, devs, linked, pinned)
+                if act:
+                    verb, dev = act
+                    off = self.picker_off.setdefault(sat, {})
+                    if verb == 'unpoke':
+                        off[dev] = now
+                    else:
+                        off.pop(dev, None)
+                    line = f"{'POKE' if verb == 'poke' else 'UNPOKE'},{dev}"
+                    self.s.outbox.append(f'SATCMD,{sat},{line}')
+                    self.sat_cmds[sat] = dict(line=line, state='sent', at=now)
+                    print(f"{self.board_label(sat)}: {'trying a link to' if verb == 'poke' else 'dropping its link to'} "
+                          f"{self.s.devices.name(dev) or 'a device'}", flush=True)
+                continue
             else:
                 cands = sorted((m for m, e in heard.items() if e['kind'] == 'board' and m in boards and m != sat
                                 and now - e['at'] < 60 and e['rssi'] > PEER_MIN_RSSI),
@@ -1519,6 +1584,7 @@ class Dashboard:
             self._follow_step()
             self._peer_step()
             self._autofit_step()
+            self._picker_step()
             try:
                 self._track_step()
             except Exception as e:           # tracking must never stop the dashboard
