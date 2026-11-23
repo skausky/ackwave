@@ -81,6 +81,8 @@ ROUTER_NAME_MAX, ROUTER_NAMES_MAX = 24, 32    # nicknames you give routers (by B
 BOARD_NAMES_MAX = 16                           # ...and other ackwave boards (by MAC), same length
 SAT_GONE_S = 10                                # another board not heard this long: gone
 SAT_MAX = 16
+PEER_POKE_MAX, PEER_MIN_RSSI = 3, -82          # each board pokes up to 3 other boards it hears this well
+PEER_RETRY_S, PEER_TRIES = 120, 3              # a poke that didn't take: tried again after 2 min, 3 times at most
 OUT_MODES = ('off', 'motion', 'on')
 
 
@@ -234,6 +236,7 @@ class Dashboard:
         self.sats = {}                   # other boards heard through ours: MAC -> latest report
         self.sat_cmds = {}               # MAC -> the last command sent to it through the hub, and its state
         self.follow = None               # a network switch waiting for the other boards to confirm
+        self.peer_tries = {}             # (board, other board) -> (pokes asked, when): links between the boards
         self.out = None                  # the hub's light output as it last said (OUT lines)
         self.breath = {}                 # 'hub' / 'sat:<mac>' -> its latest breathing reading (BREATH lines)
         self.mlb = {}                    # 'hub' / 'sat:<mac>' -> its learned model's last second (ML lines)
@@ -1275,6 +1278,42 @@ class Dashboard:
                     learned={k: dict(motion=v['motion'], p=v['p']) for k, v in self.mlb.items() if now - v['at'] <= 10},
                     today=dict(cs=0.5, cells=[[c[0], c[1], n] for c, n in cells]))
 
+    def _peer_step(self):
+        """Links between the boards: each satellite pokes up to PEER_POKE_MAX boards it
+        hears well (other satellites first, then the hub), asked through the hub one
+        command at a time. A board link has both ends exactly where you placed them:
+        the map's most trustworthy kind. Needs firmware that takes POKE from the air."""
+        if not self.send or not self.cfg.get('peer_links', True):
+            return
+        now = time.time()
+        if now - getattr(self, '_peer_at', 0.0) < 5:
+            return
+        self._peer_at = now
+        hub = (self.cfg['hub'] or self.s.me or '').lower()
+        live = {m for m, d in self.sats.items() if now - d['at'] <= SAT_GONE_S and d.get('via') != 'usb'}
+        boards = live | ({hub} if hub else set())
+        for sat in sorted(live):
+            if 'sat:' + sat in self.mlw_q:
+                continue                                 # a model is on its way: not now
+            c = self.sat_cmds.get(sat)
+            if c and c.get('state') in ('sent', 'queued') and now - c.get('at', 0) < 60:
+                continue                                 # one command at a time
+            heard = self.surveys.get(sat, {})
+            cands = sorted((m for m, e in heard.items() if e['kind'] == 'board' and m in boards and m != sat
+                            and now - e['at'] < 60 and e['rssi'] > PEER_MIN_RSSI),
+                           key=lambda m: (m == hub, -heard[m]['rssi']))
+            linked = {m for m in self.sat_links.get(sat, {}) if m in boards}
+            for other in [m for m in cands if m not in linked][:max(0, PEER_POKE_MAX - len(linked))]:
+                n, at = self.peer_tries.get((sat, other), (0, 0.0))
+                if n >= PEER_TRIES or now - at < PEER_RETRY_S:
+                    continue
+                self.peer_tries[(sat, other)] = (n + 1, now)
+                self.s.outbox.append(f'SATCMD,{sat},POKE,{other}')
+                self.sat_cmds[sat] = dict(line=f'POKE,{other}', state='sent', at=now)
+                print(f"{self.board_label(sat)}: asked to link with "
+                      f"{'the hub' if other == hub else self.board_label(other)}", flush=True)
+                break
+
     def _switch_network(self, line, what):
         """A new network for the hub: the other boards are told first (through
         the hub, from the air) and the hub switches once they confirmed, or
@@ -1337,6 +1376,7 @@ class Dashboard:
         with self.lock:
             self._sats_gone()
             self._follow_step()
+            self._peer_step()
             try:
                 self._track_step()
             except Exception as e:           # tracking must never stop the dashboard

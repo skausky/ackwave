@@ -285,6 +285,23 @@ def follow_network():
     ok, _ = d.command(dict(cmd='out', mode='on', secs=0))
     assert ok and sent[-1] == 'OUT,on,0', "the hub's own pin"
     assert not d.command(dict(cmd='out', mode='disco', secs=1))[0] and not d.command(dict(cmd='out', mode='on', secs=-1))[0]
+    # links between the boards: a satellite pokes the boards it hears well, one command at a time
+    d.sat_cmds.clear()
+    for S in (S1, S2):
+        d.feed(f'SAT,{S},-40,1,2,20,15,96,-57,2,60,{mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf1)},6\n')
+    d.feed(f'SURV,{S1},{S2}:1:-60,{FIRST}:1:-55\n')
+    sent.clear(); d._peer_at = 0; d.tick()
+    assert f'SATCMD,{S1},POKE,{S2}' in sent, sent          # the other satellite before the hub
+    sent.clear(); d._peer_at = 0; d.tick()
+    assert not any(c.startswith(f'SATCMD,{S1},') for c in sent), "one at a time"
+    d.feed(f'SATCMD,{S1},done,30\n')
+    d.feed(f'SATL,{S1},{S2}:4:22:21\n')                    # its report now has that link
+    sent.clear(); d._peer_at = 0; d.tick()
+    assert f'SATCMD,{S1},POKE,{FIRST}' in sent, sent        # then the hub
+    d.feed(f'SATCMD,{S1},done,31\n')
+    d.peer_tries[(S1, FIRST)] = (3, 0.0)                    # older firmware: never linked, given up after 3
+    sent.clear(); d._peer_at = 0; d.tick()
+    assert not any('POKE' in c for c in sent), sent
     d.feed('NETWORK,chosen,HomeNet\n')                # the other boards onto the hub's network; the hub stays
     sent.clear()
     ok, _ = d.command(dict(cmd='net_sync'))
