@@ -47,6 +47,7 @@ from notify import Notify, pushover_call
 from track import End, Tracker, in_zone
 from mlfeat import Shadow
 import mltrain
+import autofit
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LED_MODES, LED_PATTERNS, LONG_C, MOTION_C,
                  SCAN_C, STILL_C, SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
 
@@ -251,6 +252,9 @@ class Dashboard:
         self.zone_said = {}              # zone id -> when it last notified
         self.today = ('', {})            # (local date, {(ix, iy): steps someone was tracked there}) at 0.5 m
         self.snaps = deque(maxlen=300)   # moments of movement: every link's level (self-calibration's data)
+        self.user_touch = {}             # node key -> when you last moved it (the automatic fit leaves it a day)
+        self.autofit_state = dict(at=None, note='', moved={})   # the Pi's last automatic router fit
+        self._autofit_busy = False
         self.house = House()             # every board's verdict combined (boards.py)
         self.travel = Travel()           # someone walking from board to board (boards.py)
         self.travel_ev = None            # its live-stream entry while the path grows
@@ -1308,7 +1312,71 @@ class Dashboard:
                     zones={k: v for k, v in self.zone_in.items()}, breathing=still,
                     model_err=round(self.tracker.model_err, 2),
                     learned={k: dict(motion=v['motion'], p=v['p']) for k, v in self.mlb.items() if now - v['at'] <= 10},
+                    autofit=dict(self.autofit_state, paused=sorted(k for k, at in self.user_touch.items() if now - at < 86400)),
                     today=dict(cs=0.5, cells=[[c[0], c[1], n] for c, n in cells]))
+
+    AUTOFIT_EVERY_S = 900
+
+    def _autofit_step(self):
+        """Every 15 min, in the background: the routers that may move (roughly placed
+        or automatic, inside the watched area) go where signal strength and everyday
+        movement say they fit best. A router you moved in the last day is left alone."""
+        now = time.time()
+        if self._autofit_busy or not (self.send or self.demo) or now - getattr(self, '_autofit_at', 0.0) < self.AUTOFIT_EVERY_S:
+            return
+        self._autofit_at = now
+        layout = json.loads(json.dumps(self._layout()))
+        if not any(z.get('watch') for z in layout.get('zones', [])):
+            return
+        snaps, heard = list(self.snaps)[-120:], self._hearings()
+        skip = {k for k, at in self.user_touch.items() if now - at < 86400}
+        self._autofit_busy = True
+
+        def run():
+            try:
+                moved, note = autofit.fit(layout, snaps, lambda k, over: self._ends_for(layout, k, over), skip, heard)
+                with self.lock:
+                    self.autofit_state = dict(at=time.time(), note=note, moved={})
+                    if moved:
+                        cur = self.map_load()
+                        edits = []
+                        for n in cur.get('nodes', []):
+                            if n['key'] in moved and not n.get('placed') and time.time() - self.user_touch.get(n['key'], 0) >= 86400:
+                                x, y = moved[n['key']]
+                                r = n['hint'][2] if n.get('hint') else 3.0
+                                self.autofit_state['moved'][n['key']] = round(math.dist((x, y), (n['hint'][0], n['hint'][1]) if n.get('hint') else (n['x'], n['y'])), 1)
+                                n.update(x=x, y=y, hint=[x, y, r])
+                                n.pop('auto', None)
+                                edits.append('node:' + n['key'])
+                        if edits:
+                            self._merge_auto = True
+                            try:
+                                self.map_save(dict(cur, edits=edits), who='the automatic router fit')
+                            finally:
+                                self._merge_auto = False
+                            print(f"routers fitted automatically: {note}", flush=True)
+            except Exception as e:                       # never take the dashboard down
+                print(f"automatic router fit: {e}", file=sys.stderr)
+            finally:
+                self._autofit_busy = False
+        threading.Thread(target=run, daemon=True).start()
+
+    def _ends_for(self, layout, key, over):
+        """A link end's spots for the fit: a candidate spot when it's being tried, else as tracking uses it."""
+        if key in over:
+            return [End(*over[key], 0.0)]
+        nodes = {n['key']: n for n in layout.get('nodes', [])}
+        fh, hub_fl = layout.get('floor_h', 3.0), layout.get('hub_floor', 1)
+        if key == 'hub':
+            return [End(0, 0, 0, layout.get('hub_facing'))]
+        n = nodes.get(key)
+        if not n:
+            return None
+        z = ((n.get('floor') or hub_fl) - hub_fl) * fh
+        if n.get('placed') or key.startswith('sat:'):
+            return [End(n['x'], n['y'], z, n.get('facing'))]
+        cx, cy = (n['hint'][0], n['hint'][1]) if n.get('hint') else (n['x'], n['y'])
+        return [End(cx, cy, z)]
 
     def _peer_step(self):
         """Links between the boards: each satellite pokes up to PEER_POKE_MAX boards it
@@ -1421,6 +1489,7 @@ class Dashboard:
             self._sats_gone()
             self._follow_step()
             self._peer_step()
+            self._autofit_step()
             try:
                 self._track_step()
             except Exception as e:           # tracking must never stop the dashboard
@@ -2228,6 +2297,11 @@ class Dashboard:
             if ex is not None and mine(ex) and not mine(n) and ('node:' + n['key']) not in edits:
                 continue                                 # an automatic guess never beats your placement
             if ex is None or ('node:' + n['key']) in edits or (not mine(ex) and not mine(n)):
+                if ex is not None and ('node:' + n['key']) in edits and mine(n) and (
+                        ex.get('hint') != n.get('hint') or ex.get('placed') != n.get('placed') or
+                        (n.get('placed') and (ex['x'], ex['y']) != (n['x'], n['y']))):
+                    if not getattr(self, '_merge_auto', False):
+                        self.user_touch[n['key']] = time.time()    # you moved it: the automatic fit leaves it a day
                 nodes[n['key']] = n
         out['nodes'] = list(nodes.values())[:64]
         return out
