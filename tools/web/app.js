@@ -421,6 +421,7 @@ function renderNotify(n) {
   pick('#notify-hours', n.hours ? `${n.hours[0]}-${n.hours[1]}` : 'always');
   if (!keep('#notify-urgent')) $('#notify-urgent').checked = n.urgent;
   if (!keep('#notify-offline')) $('#notify-offline').checked = n.offline;
+  if (!keep('#notify-zones')) $('#notify-zones').checked = !!n.zones_only;
   $('#notify-test').disabled = !(n.has_token && n.has_user);
   $('#notify-state').textContent = !n.enabled ? '' : n.live === false ? '· sends only while the board is connected'
     : `· ${n.sent_today} sent today` + (n.left !== null && n.left !== undefined ? ` · ${n.left} left this month` : '');
@@ -450,6 +451,7 @@ $('#notify-hours').onchange = (e) => {
 };
 $('#notify-urgent').onchange = (e) => cmd({ cmd: 'notify', urgent: e.target.checked });
 $('#notify-offline').onchange = (e) => cmd({ cmd: 'notify', offline: e.target.checked });
+$('#notify-zones').onchange = (e) => cmd({ cmd: 'notify', zones_only: e.target.checked });
 
 // Recent motion as short sentences: when, what, how long, where
 function renderRecent(rows) {

@@ -1887,7 +1887,7 @@ class Dashboard:
                     always = c.get('hours') == 'always'
                     self.notify.set(**{k: (None if k == 'hours' and always else c.get(k))
                                        for k in ('enabled', 'token', 'user', 'quiet_min', 'max_day',
-                                                 'hours', 'urgent', 'offline')}, clear_hours=always)
+                                                 'hours', 'urgent', 'offline', 'zones_only')}, clear_hours=always)
                 except (ValueError, TypeError) as e:
                     return False, str(e) if isinstance(e, ValueError) else 'bad notification setting'
                 self._save_settings()

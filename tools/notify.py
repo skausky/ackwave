@@ -24,7 +24,7 @@ import urllib.request
 API = 'https://api.pushover.net/1/messages.json'
 KEY_RE = re.compile(r'[A-Za-z0-9]{20,40}')
 DEFAULTS = dict(enabled=False, token='', user='', quiet_min=10, max_day=50, hours=None,
-                urgent=False, offline=True)
+                urgent=False, offline=True, zones_only=False)
 QUIET_MIN = (0, 240)
 MAX_DAY = (1, 500)
 TIMEOUT_S = 10.0
@@ -85,7 +85,7 @@ class Notify:
 
     # ---------- settings ----------
     def set(self, enabled=None, token=None, user=None, quiet_min=None, max_day=None, hours=None,
-            urgent=None, offline=None, clear_hours=False):
+            urgent=None, offline=None, clear_hours=False, zones_only=None):
         new = dict(self.cfg)
         for k, v in (('token', token), ('user', user)):
             if v is not None:
@@ -106,7 +106,7 @@ class Notify:
                     any(isinstance(h, bool) or not isinstance(h, int) or not 0 <= h <= 23 for h in hours)):
                 raise ValueError('bad hours')
             new['hours'] = None if hours[0] == hours[1] else [hours[0], hours[1]]
-        for k, v in (('urgent', urgent), ('offline', offline), ('enabled', enabled)):
+        for k, v in (('urgent', urgent), ('offline', offline), ('enabled', enabled), ('zones_only', zones_only)):
             if v is not None:
                 new[k] = bool(v)
         if new['enabled'] and not (new['token'] and new['user']):
@@ -126,7 +126,7 @@ class Notify:
     def update(self, motion, where=''):
         """The house verdict, often. Sends when motion starts after a quiet
         stretch, inside the hours. Returns the text sent, or None."""
-        if not self.cfg['enabled']:
+        if not self.cfg['enabled'] or self.cfg['zones_only']:   # zones only: their own messages (zone())
             self.motion = motion
             return None
         now = self.clock()
@@ -201,6 +201,6 @@ class Notify:
             c = self.cfg
             return dict(enabled=c['enabled'], has_token=bool(c['token']), has_user=bool(c['user']),
                         quiet_min=c['quiet_min'], max_day=c['max_day'], hours=c['hours'],
-                        urgent=c['urgent'], offline=c['offline'],
+                        urgent=c['urgent'], offline=c['offline'], zones_only=c['zones_only'],
                         sent_today=self.sent_day if self.day == time.strftime('%Y-%m-%d', self.localtime(self.clock())) else 0,
                         left=self.left, last=dict(self.last) if self.last else None)

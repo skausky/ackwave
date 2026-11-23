@@ -67,6 +67,11 @@ def test_settings_and_view():
     n2, sent, now = make(urgent=True)
     n2.update(True)
     check('high priority sent as 1', sent and sent[0][1] == 1)
+    n3, sent3, now3 = make(zones_only=True)
+    n3.update(True, 'board 2')
+    check('zones only: no message for motion elsewhere', not sent3)
+    n3.zone('Someone in Target house')
+    check('zones only: a zone still notifies', len(sent3) == 1)
 
 
 def test_dashboard_keeps_keys_private():
