@@ -123,7 +123,7 @@ class Tracker:
 
     OUTSIDE_WIN = 0.75               # outside the watched area must explain the links this much better
 
-    def _your_side(self, obs, area):
+    def _your_side(self, obs, area, win=None):
         """Is this movement better explained outside the watched area (your own
         house, near the boards) than anywhere inside it? Then it isn't over there:
         the inside-only fit would squeeze it onto the near edge. A coarse grid over
@@ -163,9 +163,9 @@ class Tracker:
             return False
         r_in, r_out = float(R[inside].min()), float(R[~inside].min())
         self.side_fit = dict(inside=round(r_in, 3), outside=round(r_out, 3))
-        return r_out < self.OUTSIDE_WIN * r_in
+        return r_out < (self.OUTSIDE_WIN if win is None else win) * r_in
 
-    def step(self, links, t, area=None):
+    def step(self, links, t, area=None, tripwire=False):
         """area: the watched area (a zone {x, y, w, h}) or None: people are placed
         only inside it, and the router end is kept (map.js watchZone())."""
         if self.at is not None and t - self.at < 0.5:
@@ -188,7 +188,7 @@ class Tracker:
         weak = len(obs) >= 2 and top >= WEAK and bool(self.people)
         if not active and not weak:
             return True
-        if area is not None and active and self._your_side(obs, area):
+        if area is not None and active and self._your_side(obs, area, 1.1 if tripwire else self.OUTSIDE_WIN):
             self.outside_at = t                           # movement on your side (near the boards): nobody placed over there
             self.people = [p for p in self.people if t - p.seen < KEEP_S / 2]
             return True

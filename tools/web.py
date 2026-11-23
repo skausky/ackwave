@@ -1193,6 +1193,24 @@ class Dashboard:
             out = [l for l in out if any(inside(k) for k in l['end_keys'])]
         return out, m
 
+    def _tripwire(self, m, area, now):
+        """A link between two of your boards, both outside the watched area, seeing
+        motion right now: movement on your side (not over there)."""
+        hub = (self.cfg['hub'] or self.s.me or '').lower()
+        where = {n['key']: (n['x'], n['y']) for n in m.get('nodes', [])}
+        off = set(m.get('track_off', []))
+        pos = lambda mac: (0.0, 0.0) if mac == hub else where.get('sat:' + mac)
+        for sat, lk in self.sat_links.items():
+            for o, ln in lk.items():
+                if not ln.moving or ln.flags & 2 or ln.at is None or now - ln.at > 5:
+                    continue
+                if not (o == hub or o in self.sats) or (o == hub and 'hub' in off):
+                    continue
+                a, b = pos(sat), pos(o)
+                if a and b and not in_zone(area, *a) and not in_zone(area, *b):
+                    return True
+        return False
+
     def _track_step(self):
         if not (self.send or self.demo):
             return
@@ -1205,7 +1223,7 @@ class Dashboard:
         if area is None:                         # nothing to watch yet: the house is drawn first
             self.tracker.people, self.tracker.near = [], None
             return
-        if not self.tracker.step(links, now, area):
+        if not self.tracker.step(links, now, area, tripwire=self._tripwire(m, area, now)):
             return
         lv = {l['key']: l['level'] for l in links if l['level'] is not None}
         self._track_log(now, lv)
@@ -1489,6 +1507,24 @@ class Dashboard:
                 lk = self.sat_links.get(sat, {})
                 linked = {m for m, ln in lk.items() if not (ln.flags & 2) and m not in boards and m not in self.sats
                           and ln.at is not None and now - ln.at < 300 and m not in self.picker_off.get(sat, {})}
+                # a link to another board with both boards outside the watched area only sees
+                # your side: its slot (the 4 are shared) goes to a device over there instead
+                where = {n['key']: (n['x'], n['y']) for n in m.get('nodes', [])}
+                me_in = in_zone(wz, *where.get('sat:' + sat, (1e9, 1e9)))
+                spare = [o for o, ln in lk.items() if (o in boards or o in self.sats) and not (ln.flags & 2)
+                         and ln.at is not None and now - ln.at < 300 and o not in self.picker_off.get(sat, {})
+                         and not me_in and not in_zone(wz, *((0.0, 0.0) if o == hub else where.get('sat:' + o, (1e9, 1e9))))]
+                spare.sort(key=lambda o: (o == hub, -(heard.get(o, {}).get('rssi') or -100)))
+                spare = spare[1:]                        # one stays: your side's tripwire (it firing = movement here)
+                if spare:
+                    o = spare[-1]
+                    self.picker_off.setdefault(sat, {})[o] = now
+                    self.s.outbox.append(f'SATCMD,{sat},UNPOKE,{o}')
+                    self.sat_cmds[sat] = dict(line=f'UNPOKE,{o}', state='sent', at=now)
+                    self.peer_tries[(sat, o)] = (PEER_TRIES, now)        # and not asked for again
+                    print(f"{self.board_label(sat)}: freeing the slot of its link to "
+                          f"{'the hub' if o == hub else self.board_label(o)} (keeps one board link as your side's tripwire)", flush=True)
+                    continue
                 pinned = (set(self.s.devices.manual) if self.s.devices.mode == 'manual' else set()) & set(devs)   # your picks on the Devices page: on every board that hears them
                 act = self.picker.choose(sat, devs, linked, pinned)
                 if act:
