@@ -121,7 +121,9 @@ class Tracker:
         self.base[key] = b
         return max(0.0, st - b) / max(0.3, 1 - b)
 
-    def step(self, links, t):
+    def step(self, links, t, area=None):
+        """area: the watched area (a zone {x, y, w, h}) or None: people are placed
+        only inside it, and the router end is kept (map.js watchZone())."""
         if self.at is not None and t - self.at < 0.5:
             return False
         dt = min(5.0, t - self.at) if self.at is not None else 0.5
@@ -134,7 +136,8 @@ class Tracker:
                             end_keys=ln.get('end_keys', ())))
         self.base_at = t
         self._near(obs, t)
-        self._router_shared(obs)
+        if area is None:
+            self._router_shared(obs)
         top = max((o['a'] for o in obs), default=0.0)
         active = len(obs) >= 2 and top >= 0.6
         self.people = [p for p in self.people if t - p.seen < KEEP_S and t - p.walked < HOLD_S]
@@ -145,6 +148,9 @@ class Tracker:
         ys = [e.y for o in obs for pair in o['ends'] for e in pair] + [0.0]
         x0, y0 = math.floor(min(xs) - 2), math.floor(min(ys) - 2)
         x1, y1 = math.ceil(max(xs) + 2), math.ceil(max(ys) + 2)
+        if area is not None:                              # people only in there
+            x0, y0 = math.floor(area['x']), math.floor(area['y'])
+            x1, y1 = math.ceil(area['x'] + area['w']), math.ceil(area['y'] + area['h'])
         cs = CELL
         gw, gh = math.ceil((x1 - x0) / cs), math.ceil((y1 - y0) / cs)
         while gw * gh > MAX_CELLS:
@@ -158,7 +164,19 @@ class Tracker:
         px = x0 + (np.arange(gw) + 0.5) * cs
         py = y0 + (np.arange(gh) + 0.5) * cs
         PX, PY = np.meshgrid(px, py)                       # (gh, gw)
-        S = np.stack([np.mean([sensitivity(PX, PY, a, n, self.lam) for a, n in o['ends']], axis=0) for o in obs])
+        # each link's sensitivity grid, kept while its ends and the grid stay the same (map.js does the same)
+        if getattr(self, '_s_grid', None) != g:
+            self._s_grid, self._s_cache = g, {}
+
+        def sens_of(o):
+            sig = tuple((a.x, a.y, a.z, a.facing, n.x, n.y, n.z, n.facing) for a, n in o['ends'])
+            hit = self._s_cache.get(o['key'])
+            if hit is not None and hit[0] == sig:
+                return hit[1]
+            arr = np.mean([sensitivity(PX, PY, a, n, self.lam) for a, n in o['ends']], axis=0)
+            self._s_cache[o['key']] = (sig, arr)
+            return arr
+        S = np.stack([sens_of(o) for o in obs])
         S = S.reshape(len(obs), -1)                         # (K, N)
         w = np.array([1 / (SIG0 + SIG1 * o['a']) ** 2 for o in obs])
         act = np.array([o['a'] for o in obs])

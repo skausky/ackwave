@@ -1151,6 +1151,12 @@ class Dashboard:
                     continue
                 out.append(dict(key=f"{b['key']}>{l['key']}", ends=[(x, y) for x in a for y in n],
                                 end_keys=(b['key'], l['key']), level=q(l['level'] * trust(b['key']))))
+        wz = next((z for z in m.get('zones', []) if z.get('watch')), None)
+        if wz:                                   # only links with an end in the watched area
+            pos = {k: (n['x'], n['y']) for k, n in nodes.items()}
+            pos['hub'] = (0.0, 0.0)
+            inside = lambda k: k in pos and in_zone(wz, *pos[k])
+            out = [l for l in out if any(inside(k) for k in l['end_keys'])]
         return out, m
 
     def _track_step(self):
@@ -1161,7 +1167,8 @@ class Dashboard:
             self._walk_err()
         links, m = self._track_links()
         now = time.time()
-        if not self.tracker.step(links, now):
+        area = next((z for z in m.get('zones', []) if z.get('watch')), None)
+        if not self.tracker.step(links, now, area):
             return
         lv = {l['key']: l['level'] for l in links if l['level'] is not None}
         self._track_log(now, lv)
@@ -1317,6 +1324,12 @@ class Dashboard:
         hub = (self.cfg['hub'] or self.s.me or '').lower()
         live = {m for m, d in self.sats.items() if now - d['at'] <= SAT_GONE_S and d.get('via') != 'usb'}
         boards = live | ({hub} if hub else set())
+        m = self._layout()
+        wz = next((z for z in m.get('zones', []) if z.get('watch')), None)
+        targets = None
+        if wz:                                           # devices you placed inside the watched area
+            targets = {n['key'] for n in m.get('nodes', []) if MAC_RE.fullmatch(n['key'])    # placed, rough or auto:
+                       and in_zone(wz, *(n['hint'][:2] if n.get('hint') else (n['x'], n['y'])))}  # in that house is enough
         for sat in sorted(live):
             if 'sat:' + sat in self.mlw_q:
                 continue                                 # a model is on its way: not now
@@ -1324,10 +1337,15 @@ class Dashboard:
             if c and c.get('state') in ('sent', 'queued') and now - c.get('at', 0) < 60:
                 continue                                 # one command at a time
             heard = self.surveys.get(sat, {})
-            cands = sorted((m for m, e in heard.items() if e['kind'] == 'board' and m in boards and m != sat
-                            and now - e['at'] < 60 and e['rssi'] > PEER_MIN_RSSI),
-                           key=lambda m: (m == hub, -heard[m]['rssi']))
-            linked = {m for m in self.sat_links.get(sat, {}) if m in boards}
+            if targets is not None:                      # a watched area: devices placed in it, not boards
+                cands = sorted((m for m, e in heard.items() if e['kind'] == 'device' and m in targets
+                                and now - e['at'] < 60 and e['rssi'] > PEER_MIN_RSSI), key=lambda m: -heard[m]['rssi'])
+                linked = {m for m in self.sat_links.get(sat, {}) if m in targets}
+            else:
+                cands = sorted((m for m, e in heard.items() if e['kind'] == 'board' and m in boards and m != sat
+                                and now - e['at'] < 60 and e['rssi'] > PEER_MIN_RSSI),
+                               key=lambda m: (m == hub, -heard[m]['rssi']))
+                linked = {m for m in self.sat_links.get(sat, {}) if m in boards}
             for other in [m for m in cands if m not in linked][:max(0, PEER_POKE_MAX - len(linked))]:
                 n, at = self.peer_tries.get((sat, other), (0, 0.0))
                 if n >= PEER_TRIES or now - at < PEER_RETRY_S:
@@ -1336,7 +1354,8 @@ class Dashboard:
                 self.s.outbox.append(f'SATCMD,{sat},POKE,{other}')
                 self.sat_cmds[sat] = dict(line=f'POKE,{other}', state='sent', at=now)
                 print(f"{self.board_label(sat)}: asked to link with "
-                      f"{'the hub' if other == hub else self.board_label(other)}", flush=True)
+                      f"{'the hub' if other == hub else self.board_label(other) if other in boards else self.s.devices.name(other) or 'a device'}",
+                      flush=True)
                 break
 
     def _switch_network(self, line, what):
@@ -2650,6 +2669,8 @@ def clean_map(m):
             else:
                 c.update(x=_num(z.get('x'), -10000, 10000), y=_num(z.get('y'), -10000, 10000),
                          w=_num(z.get('w'), 0.3, 1000), h=_num(z.get('h'), 0.3, 1000))
+            if z.get('watch') and 'near' not in c:
+                c['watch'] = True                    # the watched area: people placed only in here
             out['zones'].append(c)
     if 'plans' in m:                            # picture layers: where each sits, in metres
         plans = m['plans']

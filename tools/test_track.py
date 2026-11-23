@@ -111,6 +111,16 @@ def main():
     assert dd.map_save({'nodes': [dict(key='r:x', name='r', x=5.0, y=0.0, placed=True)]})[0]
     dd._layout_at = -9
     assert len(dd._track_links()[0]) == 1, "back in once ticked again"
+    # a watched area: people only inside it, from the links with an end in it
+    trw = Tracker()
+    tw = 9000.0
+    for _ in range(130):
+        trw.step([dict(l, level=0.05) for l in links(3, 3)], tw, dict(x=4.5, y=4.5, w=3, h=3)); tw += 0.5
+    for i in range(12):
+        trw.step(links(5.5, 5.5), tw, dict(x=4.5, y=4.5, w=3, h=3)); tw += 0.5
+    assert trw.people, "someone in the watched area"
+    pw = trw.people[0].est
+    assert 4.5 <= pw['x'] <= 7.5 and 4.5 <= pw['y'] <= 7.5, pw
     z = dict(x=1, y=1, w=2, h=2)
     assert in_zone(z, 2, 2) and not in_zone(z, 3.5, 2)
     # the map keeps zones (checked), and refuses bad ones

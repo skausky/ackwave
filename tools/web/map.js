@@ -1018,15 +1018,24 @@ window.AckMap = (() => {
       name: best.m === HUB ? 'the hub' : best.router ? (best.m.name || 'the router') : boardWord(best.m.name || '') };
     else if (track.near && t - track.near.at > 2500) track.near = null;
   }
+  // The watched area (a zone with "watch only here"): people are placed only
+  // inside it, from the links with an end inside it (the boards' links to the
+  // routers and devices over there); the router end isn't taken out, since
+  // motion there is what's watched. Movement around the boards themselves
+  // (your own house) then never makes a person.
+  const watchZone = () => (M.zones || []).find((z) => z.watch && !z.near) || null;
+  const inZone = (z, m) => !!m && m.x >= z.x && m.x <= z.x + z.w && m.y >= z.y && m.y <= z.y + z.h;
   function stepTrack(t) {
     if (t - track.at < 500) return;
     const dt = Math.min(5, (t - track.at) / 1000);
     track.at = t;
-    const L = links().filter(({ a, n, d, r }) => d >= 0.3 && !weak(r) && judged(r) && !offMap(a) && !offMap(n));
-    const obs = L.map(({ a, n, r }) => ({ a: excess(r, t, trustOf(r)), ends: endSamples(a, n), A: a, N: n, ap: !!r.ap })).filter((o) => o.a !== null);
+    const wz = watchZone();
+    const L = links().filter(({ a, n, d, r }) => d >= 0.3 && !weak(r) && judged(r) && !offMap(a) && !offMap(n)
+      && (!wz || inZone(wz, a) || inZone(wz, n)));
+    const obs = L.map(({ a, n, r }) => ({ a: excess(r, t, trustOf(r)), ends: endSamples(a, n), A: a, N: n, ap: !!r.ap, key: r.key })).filter((o) => o.a !== null);
     track.baseAt = t;
     nearEnd(obs, t);
-    routerShared(obs);
+    if (!wz) routerShared(obs);
     const top = obs.reduce((m, o) => Math.max(m, o.a), 0), active = obs.length >= 2 && top >= 0.6;
     // tracks with no evidence lately end (and anyone held HOLD_MS without walking)
     { const before = track.people; track.people = track.people.filter((p) => t - p.seen < KEEP_MS && t - p.walked < HOLD_MS); keepGhosts(before, track.people, t); }
@@ -1037,23 +1046,34 @@ window.AckMap = (() => {
       x0 = Math.min(x0, m.x); x1 = Math.max(x1, m.x); y0 = Math.min(y0, m.y); y1 = Math.max(y1, m.y);
     }
     x0 = Math.floor(x0 - 2); y0 = Math.floor(y0 - 2); x1 = Math.ceil(x1 + 2); y1 = Math.ceil(y1 + 2);
+    if (wz) { x0 = Math.floor(wz.x); y0 = Math.floor(wz.y); x1 = Math.ceil(wz.x + wz.w); y1 = Math.ceil(wz.y + wz.h); }   // people only in there
     let cs = CELL, gw = Math.ceil((x1 - x0) / cs), gh = Math.ceil((y1 - y0) / cs);
     while (gw * gh > 12000) { cs *= 1.5; gw = Math.ceil((x1 - x0) / cs); gh = Math.ceil((y1 - y0) / cs); }
     const g = track.grid, same = g && g.x0 === x0 && g.y0 === y0 && g.gw === gw && g.gh === gh;
     if (!same) { track.grid = { x0, y0, gw, gh, cs }; for (const p of [...track.people, ...track.cands]) p.post = null; }
     const N = gw * gh, lam = lambda(), K = obs.length;
-    const S = obs.map(() => new Float32Array(N));          // 1. sensitivities
-    for (let j = 0; j < gh; j++) {
-      const wy = y0 + (j + 0.5) * cs;
-      for (let i = 0; i < gw; i++) {
-        const wx = x0 + (i + 0.5) * cs, c = j * gw + i;
-        obs.forEach((o, k) => {
+    // 1. sensitivities: each link's over the grid, computed once and kept while
+    // its ends, the grid and the channel stay the same (the heavy part: a phone
+    // redid it twice a second)
+    const gsig = `${x0},${y0},${gw},${gh},${cs},${lam.toFixed(4)}`;
+    const endSig = (o) => o.ends.map(([ea, en]) => `${ea.x.toFixed(2)},${ea.y.toFixed(2)},${zOf(ea)},${facingOf(ea)},${en.x.toFixed(2)},${en.y.toFixed(2)},${zOf(en)},${facingOf(en)}`).join(';');
+    if (track.sGrid !== gsig) { track.sCache = new Map(); track.sGrid = gsig; }
+    const S = obs.map((o) => {
+      const sig = endSig(o), hit = track.sCache.get(o.key);
+      if (hit && hit.sig === sig) return hit.S;
+      const arr = new Float32Array(N);
+      for (let j = 0; j < gh; j++) {
+        const wy = y0 + (j + 0.5) * cs;
+        for (let i = 0; i < gw; i++) {
+          const wx = x0 + (i + 0.5) * cs;
           let v = 0;
           for (const [ea, en] of o.ends) v += sensitivity(wx, wy, ea, en, dist3(ea, en), lam);
-          S[k][c] = v / o.ends.length;
-        });
+          arr[j * gw + i] = v / o.ends.length;
+        }
       }
-    }
+      track.sCache.set(o.key, { sig, S: arr });
+      return arr;
+    });
     const w = obs.map((o) => 1 / (SIG0 + SIG1 * o.a) ** 2);
     const G0 = 1.2, WG = 1 / 1.5 ** 2;
     // misfit of "one person at c" for these activities: [R per cell, g per cell]
@@ -1329,7 +1349,7 @@ window.AckMap = (() => {
       ctx.setLineDash([]);
       ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
       ctx.fillStyle = occ ? css('--motion') : css('--accent');
-      ctx.fillText(z.name + (occ ? ' · someone here' : '') + (z.light ? ' 💡' : '') + (z.notify ? ' 🔔' : ''), x + 6, y + 5);
+      ctx.fillText(z.name + (z.watch ? ' · watched' : '') + (occ ? ' · someone here' : '') + (z.light ? ' 💡' : '') + (z.notify ? ' 🔔' : ''), x + 6, y + 5);
       if (!readOnly) {                               // the corner to resize it
         ctx.beginPath(); ctx.arc(x + w, y + h, 6, 0, Math.PI * 2);
         ctx.fillStyle = css('--accent'); ctx.fill();
@@ -1714,7 +1734,7 @@ window.AckMap = (() => {
         if (!k || seenE.has(k) || !(k === 'hub' || k.startsWith('sat:') || k.startsWith('r:'))) continue;
         seenE.add(k); ends.push([k, nm]);
       }
-    const sig = JSON.stringify([(M.zones || []).map((z) => [z.id, z.name, z.notify, z.night, z.light, z.near]), ends]);
+    const sig = JSON.stringify([(M.zones || []).map((z) => [z.id, z.name, z.notify, z.night, z.light, z.near, z.watch]), ends]);
     if (zonesEl && sig === zonesSig) return zonesEl;
     zonesSig = sig;
     const det = el('details', { className: 'map-floors', open: zonesOpen });
@@ -1730,8 +1750,14 @@ window.AckMap = (() => {
       };
       const del = el('button', { type: 'button', className: 'ghost small', textContent: 'Remove' });
       del.onclick = () => { M.zones = M.zones.filter((q) => q !== z); dirty = true; zonesEl = null; renderList(); scheduleSave(); };
+      let watchBox = null;
+      if (!z.near) {                                 // one watched area at most: ticking one unticks the others
+        const cb = el('input', { type: 'checkbox', checked: !!z.watch });
+        cb.onchange = () => { for (const q of M.zones) q.watch = false; z.watch = cb.checked; dirty = true; zonesEl = null; track.people = []; renderList(); scheduleSave(); };
+        watchBox = el('label', { className: 'check small', title: 'Place people only in this area (e.g. the house with the routers); movement elsewhere is ignored' }, cb, 'watch only here');
+      }
       det.append(el('div', { className: 'map-zone-row' }, name, z.near ? el('span', { className: 'muted small', textContent: 'near it' }) : null,
-        box('turns on the light', 'light'), box('notify me', 'notify'), box('only at night', 'night'), del));
+        watchBox, box('turns on the light', 'light'), box('notify me', 'notify'), box('only at night', 'night'), del));
     }
     const add = el('button', { type: 'button', textContent: 'Add a zone' });
     add.onclick = () => {
@@ -1880,7 +1906,7 @@ window.AckMap = (() => {
     if (typeof M.hubFacing === 'number') body.hub_facing = M.hubFacing;
     body.track_off = [...M.trackOff];
     body.zones = (M.zones || []).map((z) => Object.assign({ id: z.id, name: String(z.name).slice(0, 32),
-      notify: !!z.notify, night: !!z.night, light: !!z.light }, z.near ? { near: z.near } : { x: z.x, y: z.y, w: z.w, h: z.h }));
+      notify: !!z.notify, night: !!z.night, light: !!z.light, watch: !!z.watch && !z.near }, z.near ? { near: z.near } : { x: z.x, y: z.y, w: z.w, h: z.h }));
     if (M.view && viewByUser) body.view = M.view;
     body.plans = M.plans.map((p) => ({ id: p.id, name: String(p.name).slice(0, 64), x: p.x, y: p.y, w: p.w,
       rot: p.rot, opacity: p.opacity, hidden: !!p.hidden }));
