@@ -228,7 +228,13 @@ window.AckMap = (() => {
       const a = anchorOf(by);
       if (a && a !== n) obs.push([a, heardAvg.get(key + '|' + by), zOf(a), floorOf(a)]);
     }
-    const hint = n.hint;                         // a rough spot: only inside it
+    let hint = n.hint;                           // a rough spot: only inside it
+    // a router in the watched house: automatic means somewhere in that house, never outside it
+    const wz0 = watchZone();
+    const inHouse = wz0 && key.startsWith('r:') && (n.inHouse || inZone(wz0, n.hint || n));
+    if (inHouse) n.inHouse = true;
+    const box = inHouse ? { x0: wz0.x, x1: wz0.x + wz0.w, y0: wz0.y, y1: wz0.y + wz0.h } : null;
+    if (inHouse && !hint) hint = { x: wz0.x + wz0.w / 2, y: wz0.y + wz0.h / 2, r: Math.hypot(wz0.w, wz0.h) / 2 };
     if (!obs.length) return hint ? { x: hint.x, y: hint.y, a: hint.r * 0.7, b: hint.r * 0.7, rot: 0, heardBy: 0, floor: n.floor || M.hubFloor } : null;
     // its floor: the one you chose, else every floor the anchors are on (and the ground), best fit wins
     const floors = n.floor ? [n.floor] : [...new Set([1, M.hubFloor, ...obs.map(([a]) => floorOf(a))])];
@@ -249,6 +255,7 @@ window.AckMap = (() => {
       for (let gy = y0; gy <= y1; gy += step)
         for (let gx = x0; gx <= x1; gx += step) {
           if (hint && Math.hypot(gx - hint.x, gy - hint.y) > hint.r) continue;
+          if (box && (gx < box.x0 || gx > box.x1 || gy < box.y0 || gy > box.y1)) continue;   // inside the watched house
           let sp = 0;
           const ls = obs.map(([a, r, az, af]) => {
             const l = nn * Math.log10(Math.max(0.5, Math.hypot(gx - a.x, gy - a.y, gz - az))) + lf * Math.abs(fl - af)
@@ -778,9 +785,15 @@ window.AckMap = (() => {
     drawAcc();
     drawZones();
     if (!simple()) { grid(); drawLikely(); drawHints(); }
-    const L = links(), lam = lambda(), motionC = css('--motion');
+    // The Watch view (Home, with a watched area): beams from your boards into the
+    // watched house that glow when they see motion, a cloud where they agree, and
+    // nothing drawn for your own house. No pinpoint the data can't back.
+    const wz = watchZone(), wv = simple() && !!wz;
+    const L = wv ? links().filter(({ a, n }) => (inZone(wz, a) || inZone(wz, n)) && !offMap(a) && !offMap(n)) : links();
+    const lam = lambda(), motionC = css('--motion');
     const pulse = 0.5 + 0.5 * Math.sin(t / 260);
-    const hv = heat(L, t);                         // where each link is sensitive (estimate)
+    if (wv) drawWatchArea(wz, t);
+    const hv = wv ? null : heat(L, t);             // where each link is sensitive (estimate)
     ctx.imageSmoothingEnabled = true;
     if (hv) {                                      // drawn where it was computed, moved with the view
       const k = M.view.s / hv.s;
@@ -792,7 +805,8 @@ window.AckMap = (() => {
       ctx.globalAlpha = 1;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
-    for (const { r, a: e, n, color, d } of L) {    // zones first, dots on top
+    if (wv) drawBeams(L, t);
+    for (const { r, a: e, n, color, d } of (wv ? [] : L)) {    // zones first, dots on top
       if (d < 0.05) continue;
       const rot = Math.atan2(n.y - e.y, n.x - e.x), cx = (e.x + n.x) / 2, cy = (e.y + n.y) / 2;
       const mv = moving(r), wk = weak(r) && !mv;
@@ -818,7 +832,7 @@ window.AckMap = (() => {
       if (!readOnly) { ctx.fillStyle = css('--fg'); ctx.fillText(fmtLen(d), 0, -4); }   // Home: no lengths
       ctx.restore();
     }
-    particles(L, t, motionC);
+    if (!wv) particles(L, t, motionC);
     drawTrack(t);
     drawBreathing(t);
     drawNear(t);
@@ -1338,6 +1352,42 @@ window.AckMap = (() => {
       || `Zone ${M.zones.length + 1}`;
     M.zones.push({ id: Math.random().toString(36).slice(2, 10), name, x, y, w, h, notify: false, night: false, light: false });
     zonesOpen = true; zonesEl = null; dirty = true; renderList(); scheduleSave();
+  }
+  // The watched house: a soft outline and its name
+  function drawWatchArea(z, t) {
+    const x = X(z.x), y = Y(z.y), w = z.w * M.view.s, h = z.h * M.view.s, occ = zoneIn[z.id] > 0;
+    ctx.save();
+    ctx.fillStyle = occ ? alpha(css('--motion'), 0.08) : 'rgba(255,255,255,0.03)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = occ ? alpha(css('--motion'), 0.9) : 'rgba(255,255,255,0.45)'; ctx.lineWidth = occ ? 2.5 : 1.5;
+    ctx.setLineDash(occ ? [] : [8, 6]); ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
+    ctx.font = '700 14px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+    ctx.fillStyle = occ ? css('--motion') : 'rgba(255,255,255,0.8)';
+    ctx.fillText(occ ? `${z.name} · movement` : `${z.name} · quiet`, x + 4, y - 6);
+    ctx.restore();
+  }
+  // A beam per link into the watched house: from the board to the router or
+  // device, wider at the far end (where it is only roughly known), glowing with
+  // how much that link reacts right now
+  function drawBeams(L, t) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const { r, a, n } of L) {
+      const s0 = strength(r), lvl = s0 === null ? 0 : Math.min(1, s0 / 1.5);
+      const ax = X(a.x), ay = Y(a.y), nx = X(n.x), ny = Y(n.y);
+      const len = Math.hypot(nx - ax, ny - ay) || 1, ux = (nx - ax) / len, uy = (ny - ay) / len;
+      const far = Math.max(6, ((n.hint && n.hint.r) || (n.placed ? 0.8 : 2.5)) * M.view.s * 0.8);   // its end: as unsure as the device's spot
+      const g = ctx.createLinearGradient(ax, ay, nx, ny);
+      const c = lvl > 0.5 ? '255, 90, 79' : '120, 200, 255';
+      const op = 0.05 + 0.5 * lvl * (0.75 + 0.25 * Math.sin(t / 240));
+      g.addColorStop(0, `rgba(${c}, ${op * 0.6})`); g.addColorStop(1, `rgba(${c}, ${op})`);
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(ax - uy * 2, ay + ux * 2); ctx.lineTo(nx - uy * far, ny + ux * far);
+      ctx.lineTo(nx + uy * far, ny - ux * far); ctx.lineTo(ax + uy * 2, ay - ux * 2); ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
   }
   function drawZones() {
     if (drag && drag.zdraw) {                        // the rectangle being drawn
