@@ -484,6 +484,7 @@ window.AckMap = (() => {
     track.ghosts = track.ghosts.filter((g) => t - g.end < TRAIL_MS).slice(-6);
   }
   let zoneIn = {};                                  // zone id -> people inside, from the Pi's tracking
+  let yourSide = false;                             // the Pi: this movement is on your side (near the boards), not over there
   let breathing = {};                               // 'hub' / 'sat:<mac>' -> breathing near that board
   let learned = {};                                 // 'hub' / 'sat:<mac>' -> its learned model now: {motion, p: [empty, still, moving] %}
   let todayMap = null;                              // where people were today (the Pi's tracking): {cs, cells}
@@ -930,7 +931,8 @@ window.AckMap = (() => {
     for (const pl of personLabels) label(...pl);    // people's names last: they find room around everything else
     personLabels = [];
     $('#map-msg').textContent = !watchZone() ? 'Draw the house you want to watch: Map page, Draw a zone, then drag a rectangle over it.'
-      : L.length ? '' : 'Waiting for live links: the router appears once the board hears it.';
+      : !L.length ? 'Waiting for live links: the router appears once the board hears it.'
+      : yourSide ? 'Movement on your side (near the boards), not in the watched house' : '';
   }
   // A router: how sure you are of where it is. Exactly (placed), roughly
   // (a circle you drag: auto-placement and the tracking stay inside it), or
@@ -1104,6 +1106,7 @@ window.AckMap = (() => {
     track.at = t;
     const wz = watchZone();
     if (!wz) { track.people = []; track.near = null; return; }   // nothing to watch yet: draw the house first
+    if (yourSide) { track.people = track.people.filter((p) => t - p.seen < KEEP_MS / 2); track.cands = []; return; }   // movement on your side: nobody over there
     const L = links().filter(({ a, n, d, r }) => d >= 0.3 && !weak(r) && judged(r) && !offMap(a) && !offMap(n)
       && (inZone(wz, a) || inZone(wz, n)));
     const obs = L.map(({ a, n, r }) => ({ a: excess(r, t, trustOf(r)), ends: endSamples(a, n), A: a, N: n, ap: !!r.ap, key: r.key })).filter((o) => o.a !== null);
@@ -2763,7 +2766,7 @@ window.AckMap = (() => {
     // slow payload (once a second) and the header (the board's verdict)
     update(slow, header) {
       if (slow && slow.tracked && slow.tracked.model_err) modelErr = slow.tracked.model_err;
-      if (slow && slow.tracked) { zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; todayMap = slow.tracked.today || null; learned = slow.tracked.learned || {}; }
+      if (slow && slow.tracked) { yourSide = !!slow.tracked.your_side; zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; todayMap = slow.tracked.today || null; learned = slow.tracked.learned || {}; }
       if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPeople = slow.demo_people || []; if (slow.channel) channel = slow.channel; }
       if (header) {
         boardMotion = hubMoving(header);

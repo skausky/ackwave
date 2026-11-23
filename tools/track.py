@@ -121,6 +121,50 @@ class Tracker:
         self.base[key] = b
         return max(0.0, st - b) / max(0.3, 1 - b)
 
+    OUTSIDE_WIN = 0.75               # outside the watched area must explain the links this much better
+
+    def _your_side(self, obs, area):
+        """Is this movement better explained outside the watched area (your own
+        house, near the boards) than anywhere inside it? Then it isn't over there:
+        the inside-only fit would squeeze it onto the near edge. A coarse grid over
+        everything (1.5 m), one person, the same misfit as the fit below."""
+        xs = [e.x for o in obs for pair in o['ends'] for e in pair]
+        ys = [e.y for o in obs for pair in o['ends'] for e in pair]
+        if not xs:
+            return False
+        cs = 1.5
+        x0, y0 = math.floor(min(xs + [area['x']]) - 3), math.floor(min(ys + [area['y']]) - 3)
+        x1, y1 = math.ceil(max(xs + [area['x'] + area['w']]) + 3), math.ceil(max(ys + [area['y'] + area['h']]) + 3)
+        while ((x1 - x0) / cs) * ((y1 - y0) / cs) > MAX_CELLS:
+            cs *= 1.5
+        px = np.arange(x0 + cs / 2, x1, cs)
+        py = np.arange(y0 + cs / 2, y1, cs)
+        PX, PY = np.meshgrid(px, py)
+        g = (x0, y0, len(px), len(py), cs)
+        if getattr(self, '_w_grid', None) != g:
+            self._w_grid, self._w_cache = g, {}
+        rows = []
+        for o in obs:
+            sig = tuple((a.x, a.y, a.z, a.facing, n.x, n.y, n.z, n.facing) for a, n in o['ends'])
+            hit = self._w_cache.get(o['key'])
+            if hit is None or hit[0] != sig:
+                hit = (sig, np.mean([sensitivity(PX, PY, a, n, self.lam) for a, n in o['ends']], axis=0).ravel())
+                self._w_cache[o['key']] = hit
+            rows.append(hit[1])
+        S = np.stack(rows)
+        act = np.array([o['a'] for o in obs])
+        w = 1 / (SIG0 + SIG1 * act) ** 2
+        num = G0 * WG + (w * act) @ S
+        den = WG + (w[:, None] * S * S).sum(0)
+        gg = np.maximum(0, num / den)
+        R = (gg - G0) ** 2 * WG + (w[:, None] * (act[:, None] - gg[None, :] * S) ** 2).sum(0)
+        inside = ((PX >= area['x']) & (PX <= area['x'] + area['w']) & (PY >= area['y']) & (PY <= area['y'] + area['h'])).ravel()
+        if not inside.any() or inside.all():
+            return False
+        r_in, r_out = float(R[inside].min()), float(R[~inside].min())
+        self.side_fit = dict(inside=round(r_in, 3), outside=round(r_out, 3))
+        return r_out < self.OUTSIDE_WIN * r_in
+
     def step(self, links, t, area=None):
         """area: the watched area (a zone {x, y, w, h}) or None: people are placed
         only inside it, and the router end is kept (map.js watchZone())."""
@@ -143,6 +187,10 @@ class Tracker:
         self.people = [p for p in self.people if t - p.seen < KEEP_S and t - p.walked < HOLD_S]
         weak = len(obs) >= 2 and top >= WEAK and bool(self.people)
         if not active and not weak:
+            return True
+        if area is not None and active and self._your_side(obs, area):
+            self.outside_at = t                           # movement on your side (near the boards): nobody placed over there
+            self.people = [p for p in self.people if t - p.seen < KEEP_S / 2]
             return True
         xs = [e.x for o in obs for pair in o['ends'] for e in pair] + [0.0]
         ys = [e.y for o in obs for pair in o['ends'] for e in pair] + [0.0]

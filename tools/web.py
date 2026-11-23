@@ -1339,6 +1339,7 @@ class Dashboard:
                  for k, b in self.breath.items() if now - b['at'] <= 10 and b['level'] != 'none'}
         cells = sorted(self.today[1].items(), key=lambda kv: -kv[1])[:2000]
         return dict(people=[p.view() for p in self.tracker.people if p.est], near=nk,
+                    your_side=now - (getattr(self.tracker, 'outside_at', None) or 0) < 4,
                     zones={k: v for k, v in self.zone_in.items()}, breathing=still,
                     model_err=round(self.tracker.model_err, 2),
                     learned={k: dict(motion=v['motion'], p=v['p']) for k, v in self.mlb.items() if now - v['at'] <= 10},

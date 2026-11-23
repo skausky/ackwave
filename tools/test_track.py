@@ -171,6 +171,24 @@ def main():
     d._light_rule()
     assert d.zone_in.get('n1') == 0 and d.light.on is False, (d.zone_in, d.light.on)
     print(f'tracking median error {np.median(errs):.2f} m')
+    # watched house over there, boards on your side: movement at a board is your side
+    import track as T
+    tr = T.Tracker()
+    boards = [(-3.0, 0.0), (0.0, 0.5), (4.0, 0.0)]
+    routers = [(-1.0, -15.0), (5.0, -16.0)]
+    area = dict(x=-6, y=-21, w=16, h=10)
+    lk = [dict(key=f'b{i}>r{j}', ends=[(T.End(*b), T.End(*r))]) for i, b in enumerate(boards) for j, r in enumerate(routers)]
+
+    def levels(px, py):
+        return [dict(lk[k], level=1.0 + 2.2 * float(T.sensitivity(np.array([px]), np.array([py]), *lk[k]['ends'][0], tr.lam)[0]))
+                for k in range(len(lk))]
+    for i in range(30):                       # a quiet baseline first
+        tr.step([dict(l, level=1.0) for l in lk], 100 + i, area)
+    obs = [dict(a=max(0.0, l['level'] - 1.0), ends=l['ends'], key=l['key']) for l in levels(0.2, 0.8)]
+    assert tr._your_side(obs, area), tr.side_fit
+    obs = [dict(a=max(0.0, l['level'] - 1.0), ends=l['ends'], key=l['key']) for l in levels(2.0, -15.5)]
+    assert not tr._your_side(obs, area), tr.side_fit
+    print('your side vs over there: ok')
     print('TRACK TESTS PASSED')
 
 
