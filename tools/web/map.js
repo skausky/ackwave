@@ -222,6 +222,11 @@ window.AckMap = (() => {
     const n = M.nodes.get(by);
     return n && n.placed ? n : null;
   }
+  // A router your boards link to: one of the watched house's (others: a neighbour's,
+  // or elsewhere on the property, are left out)
+  function targetRouter(key) {
+    return others.some((b) => (b.links || []).some((l) => l.key === key && l.router)) || radio.some((r) => r.ap && r.node === key);
+  }
   function solveOne(key, n) {
     const obs = [];
     for (const [by] of hearings[key] || []) {
@@ -231,7 +236,7 @@ window.AckMap = (() => {
     let hint = n.hint;                           // a rough spot: only inside it
     // a router in the watched house: automatic means somewhere in that house, never outside it
     const wz0 = watchZone();
-    const inHouse = wz0 && key.startsWith('r:') && (n.inHouse || inZone(wz0, n.hint || n));
+    const inHouse = wz0 && key.startsWith('r:') && targetRouter(key);
     if (inHouse) n.inHouse = true;
     const box = inHouse ? { x0: wz0.x, x1: wz0.x + wz0.w, y0: wz0.y, y1: wz0.y + wz0.h } : null;
     if (inHouse && !hint) hint = { x: wz0.x + wz0.w / 2, y: wz0.y + wz0.h / 2, r: Math.hypot(wz0.w, wz0.h) / 2 };
@@ -893,13 +898,27 @@ window.AckMap = (() => {
     ripples(t, keys);
     for (const pl of personLabels) label(...pl);    // people's names last: they find room around everything else
     personLabels = [];
-    $('#map-msg').textContent = L.length ? '' : 'Waiting for live links: the router appears once the board hears it.';
+    $('#map-msg').textContent = !watchZone() ? 'Draw the house you want to watch: Map page, Draw a zone, then drag a rectangle over it.'
+      : L.length ? '' : 'Waiting for live links: the router appears once the board hears it.';
   }
   // A router: how sure you are of where it is. Exactly (placed), roughly
   // (a circle you drag: auto-placement and the tracking stay inside it), or
   // not at all (auto, anywhere its signals fit).
   const SURE = [['auto', 0], ['r5', 1.524], ['r10', 3], ['r30', 9], ['r60', 18], ['exact', -1]];
   const DRAG_HINT = 1.524;                          // a router you drag: within 5 ft of where you put it
+  // A router's spot: automatic (inside the watched house, from how loudly each
+  // board hears it), or where you dragged it (within 5 ft), with a way back
+  function routerWhere(n) {
+    const wz = watchZone();
+    if (!wz) return el('span', { className: 'muted small', textContent: 'Draw the house to watch first (Draw a zone): routers are placed inside it.' });
+    if (!targetRouter(n.key)) return el('span', { className: 'muted small', textContent: 'Not linked by your boards: left out (a neighbour\'s, or elsewhere).' });
+    if (n.hint || n.placed) {
+      const b = el('button', { type: 'button', className: 'ghost small', textContent: 'back to automatic' });
+      b.onclick = () => { n.hint = null; n.placed = false; n.auto = null; locAt = 0; heatKey = ''; dirty = true; renderList(); scheduleSave(); };
+      return el('div', { className: 'map-floor-row' }, el('span', { className: 'small', textContent: 'Placed by you (within 5 ft) · ' }), b);
+    }
+    return el('span', { className: 'small', textContent: `Placed automatically in ${wz.name}, from how loudly each board hears it. Drag it if you know better.` });
+  }
   function whereSure(n) {
     const sel = el('select', { className: 'small', title: 'How sure you are of where this router is' });
     for (const [v, r] of SURE)
@@ -1044,8 +1063,9 @@ window.AckMap = (() => {
     const dt = Math.min(5, (t - track.at) / 1000);
     track.at = t;
     const wz = watchZone();
+    if (!wz) { track.people = []; track.near = null; return; }   // nothing to watch yet: draw the house first
     const L = links().filter(({ a, n, d, r }) => d >= 0.3 && !weak(r) && judged(r) && !offMap(a) && !offMap(n)
-      && (!wz || inZone(wz, a) || inZone(wz, n)));
+      && (inZone(wz, a) || inZone(wz, n)));
     const obs = L.map(({ a, n, r }) => ({ a: excess(r, t, trustOf(r)), ends: endSamples(a, n), A: a, N: n, ap: !!r.ap, key: r.key })).filter((o) => o.a !== null);
     track.baseAt = t;
     nearEnd(obs, t);
@@ -1348,9 +1368,11 @@ window.AckMap = (() => {
     setZoneDraw(false);
     const x = Math.min(d.wx0, d.wx1), y = Math.min(d.wy0, d.wy1), w = Math.abs(d.wx1 - d.wx0), h = Math.abs(d.wy1 - d.wy0);
     if (w < 0.5 || h < 0.5) return;                  // a tap, not a rectangle
-    const name = (prompt('A name for this zone (e.g. Other house, Front door, Stairs)', `Zone ${M.zones.length + 1}`) || '').slice(0, 32)
+    const name = (prompt(watchZone() ? 'A name for this zone (e.g. Front door, Stairs)' : 'A name for the house you watch (e.g. Other house)',
+      watchZone() ? `Zone ${M.zones.length + 1}` : 'Watched house') || '').slice(0, 32)
       || `Zone ${M.zones.length + 1}`;
-    M.zones.push({ id: Math.random().toString(36).slice(2, 10), name, x, y, w, h, notify: false, night: false, light: false });
+    const first = !watchZone();                      // the first zone is the house you watch
+    M.zones.push({ id: Math.random().toString(36).slice(2, 10), name, x, y, w, h, notify: first, night: false, light: false, watch: first });
     zonesOpen = true; zonesEl = null; dirty = true; renderList(); scheduleSave();
   }
   // The watched house: a soft outline and its name
@@ -1689,7 +1711,7 @@ window.AckMap = (() => {
           : diff < 0 ? `${-diff} dB weaker than open air would give here (${Math.round(exp)} dBm): walls, furniture or people in between`
             : `${diff} dB stronger than expected here (${Math.round(exp)} dBm): it may be closer than placed, or a strong device`);
       }
-      if (n !== HUB && r.ap && !n.board) rows.push(whereSure(n));
+      if (n !== HUB && r.ap && !n.board) rows.push(routerWhere(n));
       if (n !== HUB && !n.placed && !n.hint) {
         const au = n.auto;
         rows.push(au ? `Placed automatically from ${au.heardBy} board${au.heardBy > 1 ? 's' : ''} that hear it, within about ${fmtLen(au.a)}`

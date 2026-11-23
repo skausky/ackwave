@@ -1172,6 +1172,9 @@ class Dashboard:
         links, m = self._track_links()
         now = time.time()
         area = next((z for z in m.get('zones', []) if z.get('watch')), None)
+        if area is None:                         # nothing to watch yet: the house is drawn first
+            self.tracker.people, self.tracker.near = [], None
+            return
         if not self.tracker.step(links, now, area):
             return
         lv = {l['key']: l['level'] for l in links if l['level'] is not None}
@@ -1343,7 +1346,7 @@ class Dashboard:
                         for n in cur.get('nodes', []):
                             if n['key'] in moved and not n.get('placed') and time.time() - self.user_touch.get(n['key'], 0) >= 86400:
                                 x, y = moved[n['key']]
-                                r = n['hint'][2] if n.get('hint') else 3.0
+                                r = min(3.0, n['hint'][2]) if n.get('hint') else 3.0
                                 self.autofit_state['moved'][n['key']] = round(math.dist((x, y), (n['hint'][0], n['hint'][1]) if n.get('hint') else (n['x'], n['y'])), 1)
                                 n.update(x=x, y=y, hint=[x, y, r])
                                 n.pop('auto', None)

@@ -115,11 +115,24 @@ def _fit(layout, snaps, ends_of, skip=(), hearings=None):
     if area is None:
         return {}, 'no watched area'
     nodes = {n['key']: n for n in layout.get('nodes', [])}
-    movable = [k for k, n in nodes.items() if k.startswith('r:') and not n.get('placed') and k not in skip
-               and in_zone(area, *(n['hint'][:2] if n.get('hint') else (n['x'], n['y'])))]
-    if not movable:
-        return {}, 'no router to fit (set one to roughly here or automatic, inside the watched area)'
     snaps = [s['links'] for s in snaps if s.get('links')]
+    linked = {k.split('>', 1)[-1] for s in snaps for k in s}
+    # the routers your boards link to belong to the watched house: one that sits
+    # outside it (an old guess) starts from the middle, free to go anywhere inside
+    movable = []
+    for k, n in nodes.items():
+        if not k.startswith('r:') or n.get('placed') or k in skip:
+            continue
+        here = n['hint'][:2] if n.get('hint') else (n['x'], n['y'])
+        if in_zone(area, *here):
+            movable.append(k)
+        elif k in linked:
+            n = nodes[k] = dict(n, x=area['x'] + area['w'] / 2, y=area['y'] + area['h'] / 2,
+                                hint=[area['x'] + area['w'] / 2, area['y'] + area['h'] / 2,
+                                      math.hypot(area['w'], area['h']) / 2])
+            movable.append(k)
+    if not movable:
+        return {}, 'no router to fit (none your boards link to, or all placed by you)'
     if len(snaps) < 15:
         return {}, f'not enough movement yet ({len(snaps)} moments)'
     PX, PY = _grid(area)

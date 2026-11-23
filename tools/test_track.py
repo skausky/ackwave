@@ -157,7 +157,8 @@ def main():
     d = Dashboard(State(60), send=lambda c: None, sessions_dir=tmp, settings=os.path.join(tmp, 'dashboard.json'), light_call=lambda url: (calls.append(url) or (True, 'ok')),
                   light_run=lambda f: f())
     assert d.command(dict(cmd='light', enabled=True, on_url='http://plug.invalid/on', off_url='http://plug.invalid/off', off_after=0))[0]
-    assert d.map_save({'zones': [dict(id='n1', name='Near router', near='r:aa:bb', light=True)]})[0]
+    assert d.map_save({'zones': [dict(id='hh', name='Watched house', x=-50, y=-50, w=100, h=100, watch=True),
+                                 dict(id='n1', name='Near router', near='r:aa:bb', light=True)]})[0]
     d._layout_at = -9
     d.tracker.near = dict(key='r:aa:bb', t=_t.time())
     d._track_step()
