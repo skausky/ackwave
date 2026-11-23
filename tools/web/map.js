@@ -60,6 +60,7 @@ window.AckMap = (() => {
   const fx = { seen: new Map(), quality: 2, dtAvg: 16, lastT: 0, skip: false, waves: [], lightWas: null, by: [],
     walk: null, walkSeen: '' };   // walk: someone walking board to board {keys, t0}
   let lightInfo = null;                     // the light hook (header.light): a node on the map when switched on
+  let watchFramed = false;                  // Home's Watch view framed once (boards + the house)
   let autoFit = true;                       // refit as things appear, until you pan, zoom or drag
   let viewByUser = false;                   // only a view you set is saved
   let nodeCount = 0;
@@ -241,6 +242,10 @@ window.AckMap = (() => {
     const box = inHouse ? { x0: wz0.x, x1: wz0.x + wz0.w, y0: wz0.y, y1: wz0.y + wz0.h } : null;
     if (inHouse && !hint) hint = { x: wz0.x + wz0.w / 2, y: wz0.y + wz0.h / 2, r: Math.hypot(wz0.w, wz0.h) / 2 };
     if (!obs.length) return hint ? { x: hint.x, y: hint.y, a: hint.r * 0.7, b: hint.r * 0.7, rot: 0, heardBy: 0, floor: n.floor || M.hubFloor } : null;
+    // in the watched house with every board outside it: signal can't say where inside, so
+    // the middle of your circle (or of the house) until the Pi's fit has an answer
+    if (box && !obs.some(([a]) => inZone(wz0, a)))
+      return { x: hint.x, y: hint.y, a: Math.min(hint.r, wz0.w / 2), b: Math.min(hint.r, wz0.h / 2), rot: 0, heardBy: obs.length, floor: n.floor || M.hubFloor };
     // its floor: the one you chose, else every floor the anchors are on (and the ground), best fit wins
     const floors = n.floor ? [n.floor] : [...new Set([1, M.hubFloor, ...obs.map(([a]) => floorOf(a))])];
     const kind = key.startsWith('sat:') ? BOARD.txDbm : (key.startsWith('ap:') || key.startsWith('r:')) ? EIRP.ap : EIRP.device;
@@ -536,6 +541,17 @@ window.AckMap = (() => {
   function fit() {
     // the hub, the boards, and what is placed or well located; a rough guess
     // (a ring from one board) or a picture never pulls the view far out
+    const wz = simple() && watchZone();
+    if (wz) {                                        // the Watch view: your boards and the watched house, nothing else
+      const pw = [[wz.x, wz.y], [wz.x + wz.w, wz.y + wz.h]];
+      for (const b of others) { const n = M.nodes.get(b.key); if (n && !offMap(n)) pw.push([n.x, n.y]); }
+      if (!offMap(HUB)) pw.push([0, 0]);
+      const x0 = Math.min(...pw.map((p) => p[0])), x1 = Math.max(...pw.map((p) => p[0]));
+      const y0 = Math.min(...pw.map((p) => p[1])), y1 = Math.max(...pw.map((p) => p[1]));
+      const sx = (Math.max(W, 200) - 90) / Math.max(x1 - x0, 2), sy = (Math.max(H, 200) - 110) / Math.max(y1 - y0, 2);
+      M.view = { x: (x0 + x1) / 2, y: (y0 + y1) / 2, s: Math.min(2000, Math.max(2, Math.min(sx, sy))) };
+      dirty = true; return;
+    }
     const sure = (n) => n === HUB || n.board || n.placed || (n.auto && n.auto.a < 6);
     const pts = [[0, 0], ...links().flatMap(({ a, n }) => [a, n]).filter(sure).map((n) => [n.x, n.y])];
     for (const b of others) { const n = M.nodes.get(b.key); if (n) pts.push([n.x, n.y]); }
@@ -786,12 +802,14 @@ window.AckMap = (() => {
     labelBoxes = [];
     if (!loaded) return;                           // the saved layout first: guesses would set the view
     const cnt = links().length;                    // something new appeared: show it (a saved view stays at load)
-    if (!M.view || (cnt > nodeCount && (readOnly ? !homeTouched : autoFit && !viewByUser))) fit();   // never over a view you set
+    if (!M.view || (cnt > nodeCount && (readOnly ? !homeTouched : autoFit && !viewByUser)) || (readOnly && !homeTouched && simple() && watchZone() && !watchFramed)) { fit(); watchFramed = readOnly && simple() && !!watchZone(); }   // never over a view you set
     nodeCount = cnt;
     locate(t);
     stepTrack(t);
-    drawPlans();
-    if (simple() && M.plans.some((p) => !p.hidden && p.img)) {   // the pictures a little darker: people and boards stand out
+    const watchOnly = simple() && !!watchZone();   // the Watch view: a clean diagram, no pictures
+    if (!watchOnly) drawPlans();
+    else drawYourSide();
+    if (!watchOnly && simple() && M.plans.some((p) => !p.hidden && p.img)) {   // the pictures a little darker: people and boards stand out
       ctx.fillStyle = alpha(css('--bg') || '#000000', 0.28); ctx.fillRect(0, 0, W, H);
     }
     drawToday();
@@ -1391,6 +1409,20 @@ window.AckMap = (() => {
     const first = !watchZone();                      // the first zone is the house you watch
     M.zones.push({ id: Math.random().toString(36).slice(2, 10), name, x, y, w, h, notify: first, night: false, light: false, watch: first });
     zonesOpen = true; zonesEl = null; dirty = true; renderList(); scheduleSave();
+  }
+  // Your side in the Watch view: a faint outline round your boards
+  function drawYourSide() {
+    const pts = others.map((b) => M.nodes.get(b.key)).filter((n) => n && !offMap(n));
+    if (!offMap(HUB)) pts.push(HUB);
+    if (!pts.length) return;
+    const x0 = Math.min(...pts.map((n) => n.x)) - 1.5, x1 = Math.max(...pts.map((n) => n.x)) + 1.5;
+    const y0 = Math.min(...pts.map((n) => n.y)) - 1.5, y1 = Math.max(...pts.map((n) => n.y)) + 1.5;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 1; ctx.setLineDash([3, 5]);
+    ctx.strokeRect(X(x0), Y(y0), (x1 - x0) * M.view.s, (y1 - y0) * M.view.s); ctx.setLineDash([]);
+    ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillText('Your boards', X(x0) + 4, Y(y1) + 4);
+    ctx.restore();
   }
   // The watched house: a soft outline and its name
   function drawWatchArea(z, t) {
