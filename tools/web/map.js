@@ -225,8 +225,34 @@ window.AckMap = (() => {
   }
   // A router your boards link to: one of the watched house's (others: a neighbour's,
   // or elsewhere on the property, are left out)
-  function targetRouter(key) {
-    return others.some((b) => (b.links || []).some((l) => l.key === key && l.router)) || radio.some((r) => r.ap && r.node === key);
+  function targetRouter(key) {                     // a router or device a satellite links to (not a board, not the hub)
+    if (key === 'hub' || key === 'light' || key.startsWith('sat:')) return false;
+    return others.some((b) => (b.links || []).some((l) => l.key === key)) || radio.some((r) => r.ap && r.node === key);
+  }
+  // The devices over there on one line through the middle of the watched house,
+  // left to right in the order the boards hear them: each board's level for a
+  // device, less what that board usually hears (its own facing and walls out),
+  // weights the boards' positions; only the order is used, spread evenly.
+  let lineAt = 0, lineX = new Map();
+  function lineOrder(wz) {
+    const now = Date.now();
+    if (now - lineAt < 5000 && lineX.size) return lineX;
+    lineAt = now;
+    const keys = [...M.nodes.keys()].filter((k) => targetRouter(k) && !M.nodes.get(k).placed && !M.nodes.get(k).hint);
+    const lv = new Map();                             // board -> [levels]
+    const rows = keys.map((k) => {
+      const obs = (hearings[k] || []).map(([by]) => [by, heardAvg.get(k + '|' + by)]).filter(([by, v]) => v !== undefined && anchorOf(by) && by !== 'hub');
+      for (const [by, v] of obs) { if (!lv.has(by)) lv.set(by, []); lv.get(by).push(v); }
+      return [k, obs];
+    });
+    const mean = new Map([...lv].map(([by, vs]) => [by, vs.reduce((a, b) => a + b, 0) / vs.length]));
+    const est = rows.map(([k, obs]) => {
+      let sw = 0, sx = 0;
+      for (const [by, v] of obs) { const w = 10 ** ((v - mean.get(by)) / 10); sw += w; sx += w * anchorOf(by).x; }
+      return [k, sw ? sx / sw : wz.x + wz.w / 2];
+    }).sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1));
+    lineX = new Map(est.map(([k], i) => [k, wz.x + (i + 1) * wz.w / (est.length + 1)]));
+    return lineX;
   }
   function solveOne(key, n) {
     const obs = [];
@@ -237,7 +263,7 @@ window.AckMap = (() => {
     let hint = n.hint;                           // a rough spot: only inside it
     // a router in the watched house: automatic means somewhere in that house, never outside it
     const wz0 = watchZone();
-    const inHouse = wz0 && key.startsWith('r:') && targetRouter(key);
+    const inHouse = wz0 && targetRouter(key);
     if (inHouse) n.inHouse = true;
     const box = inHouse ? { x0: wz0.x, x1: wz0.x + wz0.w, y0: wz0.y, y1: wz0.y + wz0.h } : null;
     if (inHouse && !hint) hint = { x: wz0.x + wz0.w / 2, y: wz0.y + wz0.h / 2, r: Math.hypot(wz0.w, wz0.h) / 2 };
@@ -245,13 +271,11 @@ window.AckMap = (() => {
     // in the watched house with every board outside it: signal can't say where inside, so
     // the middle of your circle (or of the house) until the Pi's fit has an answer
     if (box && !obs.some(([a]) => inZone(wz0, a))) {
-      let dx = 0;                                // several automatic routers: side by side in the middle, not on top of each other
-      if (!n.hint) {
-        const auto = [...M.nodes.values()].filter((m) => m.key.startsWith('r:') && !m.placed && !m.hint && targetRouter(m.key)).map((m) => m.key).sort();
-        const i = auto.indexOf(key);
-        if (auto.length > 1 && i >= 0) dx = (i - (auto.length - 1) / 2) * Math.min(5, wz0.w / (auto.length + 1));
+      if (!n.hint) {                             // automatic: on the line, in the boards' left-to-right order
+        const lx = lineOrder(wz0).get(key);
+        if (lx !== undefined) return { x: lx, y: wz0.y + wz0.h / 2, a: wz0.w / 4, b: wz0.h / 2, rot: 0, heardBy: obs.length, floor: n.floor || M.hubFloor, line: true };
       }
-      return { x: hint.x + dx, y: hint.y, a: Math.min(hint.r, wz0.w / 2), b: Math.min(hint.r, wz0.h / 2), rot: 0, heardBy: obs.length, floor: n.floor || M.hubFloor };
+      return { x: hint.x, y: hint.y, a: Math.min(hint.r, wz0.w / 2), b: Math.min(hint.r, wz0.h / 2), rot: 0, heardBy: obs.length, floor: n.floor || M.hubFloor };
     }
     // its floor: the one you chose, else every floor the anchors are on (and the ground), best fit wins
     const floors = n.floor ? [n.floor] : [...new Set([1, M.hubFloor, ...obs.map(([a]) => floorOf(a))])];
@@ -957,7 +981,7 @@ window.AckMap = (() => {
         el('span', { className: 'small', textContent: ' · the Pi fine-tunes inside that · ' }), b);
     }
     return el('span', { className: 'small', textContent: n.fit ? `Placed automatically in ${wz.name} (fitted by the Pi from signal and movement). Drag it if you know better.`
-      : `Placed automatically in ${wz.name}; the Pi fine-tunes it once it has seen some movement. Drag it if you know better.` });
+      : `On the line through ${wz.name}: left to right as your boards hear it (only the order is known). Drag it if you know better.` });
   }
   function whereSure(n) {
     const sel = el('select', { className: 'small', title: 'How sure you are of where this router is' });
@@ -1817,14 +1841,14 @@ window.AckMap = (() => {
           : diff < 0 ? `${-diff} dB weaker than open air would give here (${Math.round(exp)} dBm): walls, furniture or people in between`
             : `${diff} dB stronger than expected here (${Math.round(exp)} dBm): it may be closer than placed, or a strong device`);
       }
-      if (n !== HUB && r.ap && !n.board) rows.push(routerWhere(n));
-      if (n !== HUB && !n.placed && !n.hint && !(r.ap && watchZone())) {
+      if (n !== HUB && !n.board && targetRouter(n.key)) rows.push(routerWhere(n));
+      if (n !== HUB && !n.placed && !n.hint && !(targetRouter(n.key) && watchZone())) {
         const au = n.auto;
         rows.push(au ? `Placed automatically from ${au.heardBy} board${au.heardBy > 1 ? 's' : ''} that hear it, within about ${fmtLen(au.a)}`
           + (au.heardBy === 1 ? ' (one board gives only a distance: place more boards to pin it down)' : au.heardBy === 2 ? ' (two boards: it could be the mirror spot)' : '')
           + '. Drag it if you know better.'
           : 'Placed from its signal (rough): drag it to where it really is, or place the boards that hear it.');
-      } else if (n !== HUB && n.placed && !n.board && !r.ap) {
+      } else if (n !== HUB && n.placed && !n.board && !r.ap && !(targetRouter(n.key) && watchZone())) {
         const b = el('button', { type: 'button', className: 'ghost small', textContent: 'Place automatically' });
         b.onclick = () => unplace(n.key);
         rows.push(b);
