@@ -2203,12 +2203,45 @@ class Dashboard:
         except (OSError, ValueError, TypeError):
             return {}
 
+    MAP_SECTIONS = {'zones': ('zones',), 'track_off': ('track_off',), 'plans': ('plans',), 'unit': ('unit',),
+                    'env': ('env',), 'view': ('view',), 'hub': ('hub_floor', 'floor_h', 'hub_facing')}
+
+    def _map_merge(self, new, edits):
+        """Several open pages each save the whole layout: merge instead of the last
+        writer winning. Only what this page changed (edits) replaces what is stored;
+        a node placed by you is never replaced by another page's automatic guess."""
+        old = self.map_load()
+        if not old:
+            return new
+        out = dict(old)
+        for sec, keys in self.MAP_SECTIONS.items():
+            if sec in edits:
+                for k in keys:
+                    if k in new:
+                        out[k] = new[k]
+                    else:
+                        out.pop(k, None)
+        mine = lambda n: bool(n.get('placed') or n.get('hint'))
+        nodes = {n['key']: n for n in old.get('nodes', [])}
+        for n in new.get('nodes', []):
+            ex = nodes.get(n['key'])
+            if ex is not None and mine(ex) and not mine(n) and ('node:' + n['key']) not in edits:
+                continue                                 # an automatic guess never beats your placement
+            if ex is None or ('node:' + n['key']) in edits or (not mine(ex) and not mine(n)):
+                nodes[n['key']] = n
+        out['nodes'] = list(nodes.values())[:64]
+        return out
+
     def map_save(self, m):
-        """Validate and store a layout; (ok, message). Written atomically."""
+        """Validate and store a layout; (ok, message). Written atomically. With
+        'edits' (what this page changed), merged into what is stored (_map_merge)."""
+        edits = m.pop('edits', None) if isinstance(m, dict) else None
         try:
             m = clean_map(m)
         except ValueError as e:
             return False, str(e)
+        if isinstance(edits, list) and len(edits) <= 200 and all(isinstance(e, str) for e in edits):
+            m = self._map_merge(m, set(edits))
         p = self._map_path()
         if not p:
             return False, 'nowhere to save the map (no sessions folder)'
@@ -2825,7 +2858,7 @@ def make_handler(dash, allowed_hosts):
                 except ValueError:
                     return self._reply(400, {'ok': False, 'msg': 'bad request'})
                 ok, msg = dash.map_save(m)
-                return self._reply(200 if ok else 400, {'ok': ok, 'msg': msg})
+                return self._reply(200 if ok else 400, dict(ok=ok, msg=msg, map=dash.map_load() if ok else None))
             if path == '/api/plan':                   # a map picture: raw bytes, empty = remove
                 try:
                     n = int(self.headers.get('Content-Length') or 0)

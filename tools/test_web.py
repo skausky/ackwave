@@ -502,6 +502,24 @@ AP0, AP1, AP2 = (_mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf0 + i) for i in range(3))
 DEV_A, DEV_B = _mac(0x11, 0x22, 0x33, 0x44, 0x55, 0x66), _mac(0x11, 0x22, 0x33, 0x44, 0x55, 0x77)
 
 
+def map_merges(tmp):
+    """Several open pages: only what a page changed replaces what is stored."""
+    d = Dashboard(State(60), settings=os.path.join(tmp, 'merge', 'dashboard.json'))
+    light = lambda x, placed=True: dict(key='light', name='Light', x=x, y=0.0, placed=placed)
+    r = lambda x: dict(key='r:x', name='R', x=x, y=1.0, placed=False)
+    assert d.map_save({'nodes': [light(5.0), r(1.0)]})[0]
+    assert d.map_save({'nodes': [light(9.0), r(2.0)], 'edits': ['node:r:x']})[0]   # a stale page
+    xs = lambda: {n['key']: n['x'] for n in d.map_load()['nodes']}
+    assert xs() == {'light': 5.0, 'r:x': 2.0}, xs()
+    assert d.map_save({'nodes': [light(7.0), r(3.0)], 'edits': ['node:light']})[0]
+    assert xs() == {'light': 7.0, 'r:x': 3.0}, xs()
+    assert d.map_save({'nodes': [light(1.0, placed=False)], 'edits': []})[0]       # a guess never beats a placement
+    assert xs()['light'] == 7.0
+    assert d.map_save({'zones': [dict(id='z1', name='A', x=0, y=0, w=1, h=1)], 'edits': ['zones']})[0]
+    assert d.map_save({'zones': [], 'edits': []})[0]                              # another page's stale (empty) zones
+    assert [z['id'] for z in d.map_load()['zones']] == ['z1']
+
+
 def routers_named(d, tmp):
     """Routers have names everywhere ('Router 1', or the nickname you gave
     its BSSID), and each device says which router it talks through."""
@@ -698,6 +716,7 @@ def pages_and_debug(tmp):
     assert r0['node'] == 'r:' + d.s.nodes[0].lower() and r0['node'] in sl['hearings'], (r0, sl['hearings'])
     assert [(g['node'], g['state']) for g in sl['gates']] == [(0, 'ok'), (1, 'far')]
     routers_named(d, tmp)
+    map_merges(tmp)
     other_boards(tmp)
     assert sl['thresholds']['on_short'] == 2.8 and sl['thresholds']['short_gate'] == 1.2
     assert set(sl['today']) == {'periods', 'blips', 'motion_s'}

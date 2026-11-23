@@ -1322,7 +1322,30 @@ window.AckMap = (() => {
     }
     ctx.restore();
   }
+  // Draw a zone: the button, then a drag on the map is the zone's rectangle
+  let zoneDraw = false;
+  function setZoneDraw(on) {
+    zoneDraw = on;
+    const b = document.getElementById('map-zone');
+    if (b) { b.classList.toggle('on', on); b.textContent = on ? 'Drag on the map…' : 'Draw a zone'; }
+    accNote(on ? 'Drag a rectangle over the area (e.g. the house with the routers). Then name it and tick its options in the Zones list.' : '');
+  }
+  function finishZone(d) {
+    setZoneDraw(false);
+    const x = Math.min(d.wx0, d.wx1), y = Math.min(d.wy0, d.wy1), w = Math.abs(d.wx1 - d.wx0), h = Math.abs(d.wy1 - d.wy0);
+    if (w < 0.5 || h < 0.5) return;                  // a tap, not a rectangle
+    const name = (prompt('A name for this zone (e.g. Other house, Front door, Stairs)', `Zone ${M.zones.length + 1}`) || '').slice(0, 32)
+      || `Zone ${M.zones.length + 1}`;
+    M.zones.push({ id: Math.random().toString(36).slice(2, 10), name, x, y, w, h, notify: false, night: false, light: false });
+    zonesOpen = true; zonesEl = null; dirty = true; renderList(); scheduleSave();
+  }
   function drawZones() {
+    if (drag && drag.zdraw) {                        // the rectangle being drawn
+      const x = X(Math.min(drag.wx0, drag.wx1)), y = Y(Math.min(drag.wy0, drag.wy1));
+      const w = Math.abs(drag.wx1 - drag.wx0) * M.view.s, h = Math.abs(drag.wy1 - drag.wy0) * M.view.s;
+      ctx.save(); ctx.setLineDash([6, 4]); ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
+      ctx.fillStyle = alpha(css('--accent'), 0.1); ctx.fillRect(x, y, w, h); ctx.restore();
+    }
     for (const z of M.zones || []) {
       if (z.near) {                                  // around its router or board
         const m = z.near === 'hub' ? HUB : M.nodes.get(z.near);
@@ -1759,12 +1782,8 @@ window.AckMap = (() => {
       det.append(el('div', { className: 'map-zone-row' }, name, z.near ? el('span', { className: 'muted small', textContent: 'near it' }) : null,
         watchBox, box('turns on the light', 'light'), box('notify me', 'notify'), box('only at night', 'night'), del));
     }
-    const add = el('button', { type: 'button', textContent: 'Add a zone' });
-    add.onclick = () => {
-      const v = M.view || { x: 0, y: 0 }, id = Math.random().toString(36).slice(2, 10);
-      M.zones.push({ id, name: `Zone ${M.zones.length + 1}`, x: v.x - 1.5, y: v.y - 1.5, w: 3, h: 3, notify: false, night: false });
-      zonesOpen = true; dirty = true; zonesEl = null; renderList(); scheduleSave();
-    };
+    const add = el('button', { type: 'button', textContent: 'Draw a zone on the map' });
+    add.onclick = () => setZoneDraw(true);
     const nearSel = el('select', { className: 'small' });
     nearSel.append(el('option', { value: '', textContent: 'Add a zone near…' }));
     for (const [k, nm] of ends) nearSel.append(el('option', { value: k, textContent: nm }));
@@ -1809,6 +1828,11 @@ window.AckMap = (() => {
       drag = { pan: true, x0: x, y0: y, vx: M.view.x, vy: M.view.y };
       return;
     }
+    if (zoneDraw) {                                  // drawing a zone: this drag is its rectangle
+      const [wx, wy] = toWorld(x, y);
+      drag = { zdraw: true, wx0: wx, wy0: wy, wx1: wx, wy1: wy };
+      return;
+    }
     if (tool && tool.kind === 'move') {
       const p = plan(tool.id);
       drag = { layer: p, x0: x, y0: y, lx: p.x, ly: p.y };
@@ -1847,6 +1871,9 @@ window.AckMap = (() => {
       const [a, b] = [...ptrs.values()], dist = Math.hypot(a.x - b.x, a.y - b.y);
       if (drag.dist > 0) zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, dist / drag.dist);
       drag.dist = dist;
+    } else if (drag.zdraw) {
+      [drag.wx1, drag.wy1] = toWorld(x, y);
+      dirty = true;
     } else if (drag.zone) {
       const [wx, wy] = toWorld(x, y), z = drag.zone;
       if (drag.corner) { z.w = Math.max(0.5, drag.zw + wx - drag.wx); z.h = Math.max(0.5, drag.zhh + wy - drag.wy); }
@@ -1887,6 +1914,7 @@ window.AckMap = (() => {
     ptrs.delete(e.pointerId);
     if (drag && drag.pan && drag.tap && tool && e.type === 'pointerup') toolTap(...toWorld(...pos(e)));
     else if (drag && drag.pan && drag.tap && walk && e.type === 'pointerup') walkMark(...toWorld(...pos(e)));
+    if (drag && drag.zdraw) finishZone(drag);
     if (!readOnly && drag && (drag.key || drag.pan || drag.layer || drag.board || drag.facing || drag.zone)) { scheduleSave(); if (drag.facing) renderList(); }
     drag = ptrs.size === 1 ? { pan: true, x0: [...ptrs.values()][0].x, y0: [...ptrs.values()][0].y, vx: M.view.x, vy: M.view.y } : null;
   }
@@ -1896,23 +1924,88 @@ window.AckMap = (() => {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(save, 1000);
   }
+  // Several pages can be open (a phone, a PC): each sends only what changed on
+  // it since it last heard from the Pi (edits), the Pi merges, and every page
+  // takes up the others' changes every few seconds (pollMap). Baseline: each
+  // item as the Pi last had it, to tell what changed here.
+  const nodeSer = (n) => Object.assign({ key: n.key, name: String(n.name).slice(0, 64), x: n.x, y: n.y, placed: !!n.placed },
+    n.floor ? { floor: n.floor } : {}, typeof n.facing === 'number' ? { facing: n.facing } : {},
+    n.hint ? { hint: [n.hint.x, n.hint.y, n.hint.r] } : {},
+    !n.placed && n.auto ? { auto: [Math.min(1000, n.auto.a), Math.min(1000, n.auto.b), n.auto.rot] } : {});
+  const sections = () => ({
+    zones: (M.zones || []).map((z) => Object.assign({ id: z.id, name: String(z.name).slice(0, 32),
+      notify: !!z.notify, night: !!z.night, light: !!z.light, watch: !!z.watch && !z.near }, z.near ? { near: z.near } : { x: z.x, y: z.y, w: z.w, h: z.h })),
+    track_off: [...M.trackOff].sort(),
+    plans: M.plans.map((p) => ({ id: p.id, name: String(p.name).slice(0, 64), x: p.x, y: p.y, w: p.w, rot: p.rot, opacity: p.opacity, hidden: !!p.hidden })),
+    unit: M.unit, env: M.env, hub: [M.hubFloor, M.floorH, typeof M.hubFacing === 'number' ? M.hubFacing : null],
+    view: M.view && viewByUser ? M.view : null,
+  });
+  const base = { nodes: new Map(), secs: {} };
+  // what a saved layout says, in the same shapes as above (to compare)
+  function baselineFrom(m) {
+    base.nodes = new Map((m.nodes || []).map((n) => [n.key, JSON.stringify(nodeSer(Object.assign({ placed: false }, n,
+      { hint: Array.isArray(n.hint) ? { x: n.hint[0], y: n.hint[1], r: n.hint[2] } : null,
+        auto: Array.isArray(n.auto) ? { a: n.auto[0], b: n.auto[1], rot: n.auto[2] } : null })))]));
+    base.secs = {
+      zones: JSON.stringify((m.zones || []).map((z) => Object.assign({ id: z.id, name: String(z.name).slice(0, 32),
+        notify: !!z.notify, night: !!z.night, light: !!z.light, watch: !!z.watch && !z.near }, z.near ? { near: z.near } : { x: z.x, y: z.y, w: z.w, h: z.h }))),
+      track_off: JSON.stringify([...(m.track_off || [])].sort()),
+      plans: JSON.stringify((m.plans || []).map((p) => ({ id: p.id, name: String(p.name || p.id).slice(0, 64), x: p.x, y: p.y, w: p.w, rot: p.rot || 0, opacity: p.opacity === undefined ? 1 : p.opacity, hidden: !!p.hidden }))),
+      unit: JSON.stringify(m.unit || M.unit), env: JSON.stringify(m.env || M.env),
+      hub: JSON.stringify([m.hub_floor || 1, m.floor_h || 3.0, typeof m.hub_facing === 'number' ? m.hub_facing : null]),
+      view: JSON.stringify(m.view || null),
+    };
+  }
+  function localEdits() {
+    const edits = [];
+    for (const n of M.nodes.values()) if (JSON.stringify(nodeSer(n)) !== base.nodes.get(n.key)) edits.push('node:' + n.key);
+    const sc = sections();
+    for (const [k, v] of Object.entries(sc)) if (JSON.stringify(v) !== base.secs[k]) edits.push(k);
+    return edits;
+  }
   async function save() {
-    const body = { unit: M.unit, env: M.env, nodes: [...M.nodes.values()].slice(0, 64).map((n) =>
-      Object.assign({ key: n.key, name: String(n.name).slice(0, 64), x: n.x, y: n.y, placed: !!n.placed },
-        n.floor ? { floor: n.floor } : {}, typeof n.facing === 'number' ? { facing: n.facing } : {},
-        n.hint ? { hint: [n.hint.x, n.hint.y, n.hint.r] } : {},
-        !n.placed && n.auto ? { auto: [Math.min(1000, n.auto.a), Math.min(1000, n.auto.b), n.auto.rot] } : {})),
-      hub_floor: M.hubFloor, floor_h: M.floorH };
+    const sc = sections();
+    const body = { unit: M.unit, env: M.env, nodes: [...M.nodes.values()].slice(0, 64).map(nodeSer),
+      hub_floor: M.hubFloor, floor_h: M.floorH, track_off: sc.track_off, zones: sc.zones, plans: sc.plans, edits: localEdits() };
     if (typeof M.hubFacing === 'number') body.hub_facing = M.hubFacing;
-    body.track_off = [...M.trackOff];
-    body.zones = (M.zones || []).map((z) => Object.assign({ id: z.id, name: String(z.name).slice(0, 32),
-      notify: !!z.notify, night: !!z.night, light: !!z.light, watch: !!z.watch && !z.near }, z.near ? { near: z.near } : { x: z.x, y: z.y, w: z.w, h: z.h }));
-    if (M.view && viewByUser) body.view = M.view;
-    body.plans = M.plans.map((p) => ({ id: p.id, name: String(p.name).slice(0, 64), x: p.x, y: p.y, w: p.w,
-      rot: p.rot, opacity: p.opacity, hidden: !!p.hidden }));
+    if (sc.view) body.view = sc.view;
     try {
-      await fetch('api/map', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ackwave': '1' }, body: JSON.stringify(body) });
+      const r = await fetch('api/map', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ackwave': '1' }, body: JSON.stringify(body) });
+      const j = await r.json().catch(() => null);
+      if (j && j.map) takeRemote(j.map);
     } catch (e) { /* the next change tries again */ }
+  }
+  // Another page's changes: taken where this page hasn't changed the same item
+  function takeRemote(m) {
+    if (drag) return;                                  // never under your finger
+    const edits = new Set(localEdits());
+    for (const n of m.nodes || []) {
+      if (edits.has('node:' + n.key)) continue;
+      const loc = M.nodes.get(n.key);
+      const hint = Array.isArray(n.hint) && n.hint.length === 3 ? { x: n.hint[0], y: n.hint[1], r: n.hint[2] } : null;
+      if (!loc) { M.nodes.set(n.key, { key: n.key, name: n.name || n.key, x: n.x, y: n.y, placed: !!n.placed, floor: n.floor || 0,
+        facing: typeof n.facing === 'number' ? n.facing : undefined, hint }); continue; }
+      if (n.placed || hint || loc.placed || loc.hint) {   // a placement: as the Pi has it
+        Object.assign(loc, { x: n.x, y: n.y, placed: !!n.placed, floor: n.floor || 0, hint,
+          facing: typeof n.facing === 'number' ? n.facing : undefined });
+      }
+    }
+    if (!edits.has('zones')) M.zones = Array.isArray(m.zones) ? m.zones.map((z) => ({ ...z })) : [];
+    if (!edits.has('track_off')) M.trackOff = new Set(Array.isArray(m.track_off) ? m.track_off : []);
+    if (!edits.has('hub')) {
+      if (m.hub_floor) M.hubFloor = m.hub_floor;
+      if (m.floor_h) M.floorH = m.floor_h;
+      M.hubFacing = typeof m.hub_facing === 'number' ? m.hub_facing : null;
+    }
+    baselineFrom(m);
+    floorsEl = null; zonesEl = null; locAt = 0; heatKey = ''; dirty = true;
+  }
+  async function pollMap() {
+    if (!loaded || !visible || drag) return;
+    try {
+      const r = await fetch('api/map', { headers: { 'X-Ackwave': '1' } });
+      if (r.ok) { takeRemote(await r.json()); renderList(); }
+    } catch (e) { /* next time */ }
   }
   function apply(m) {
     if (m.unit) M.unit = m.unit;
@@ -2395,6 +2488,7 @@ window.AckMap = (() => {
       const r = await fetch('api/map', { headers: { 'X-Ackwave': '1' } });
       saved = r.ok ? await r.json() : {};
       apply(saved);
+      baselineFrom(saved);
     } catch (e) { /* start fresh */ }
     if (!saved.view) { M.view = null; autoFit = true; viewByUser = false; }   // fit to the real layout, not first guesses
     else if (readOnly && !homeTouched) {        // Home: its own fit; the saved view is the Map page's
@@ -2412,12 +2506,14 @@ window.AckMap = (() => {
     $('#map-env').value = M.env;
   }
   function init() {
+    setInterval(pollMap, 8000);                       // other open pages' changes (a phone and a PC at once)
     cv = $('#map-cv'); ctx = cv.getContext('2d');
     for (const [k, v] of Object.entries(ENVS)) $('#map-env').append(el('option', { value: k, textContent: v.label }));
     $('#map-env').onchange = (e) => { M.env = e.target.value; dirty = true; renderList(); scheduleSave(); };
     for (const b of $('#map-unit').children) b.onclick = () => { M.unit = b.dataset.u; syncControls(); dirty = true; renderList(); scheduleSave(); };
     $('#map-fit').onclick = () => { fit(); viewByUser = true; scheduleSave(); };
     $('#map-walk').onclick = walkToggle;
+    $('#map-zone').onclick = () => setZoneDraw(!zoneDraw);
     $('#map-walkfit').onclick = async () => { $('#map-walkfit').disabled = true; try { await fitWalk(false); } finally { $('#map-walkfit').disabled = false; } };
     $('#map-selffit').onclick = async () => { $('#map-selffit').disabled = true; try { await fitWalk(true); } finally { $('#map-selffit').disabled = false; } };
     $('#map-acc').onclick = () => { toggleAcc(); $('#map-acc').classList.toggle('on', !!acc); };
