@@ -1394,6 +1394,17 @@ int main(void) {
             CHECK(order_open(of, ORDER_MAX_LEN, B1, aes128_block, &ak, &o) && strlen(o.line) == ORDER_LINE_MAX);
             CHECK(build_order(of, HUBM, B1, 6, 7, 1, "CAL\nKEY,x", aes128_block, &ak) == 0);
             CHECK(build_order(of, HUBM, B1, 6, 7, 1, "", aes128_block, &ak) == 0);
+            {   // the hub's command line for one board: the MAC, then the command after its comma
+                uint8_t sm[6]; const char *sc;
+                char sl[96];
+                snprintf(sl, sizeof sl, "SATCMD,%02x:%02x:%02x:%02x:%02x:%02x,USE,My Net", B1[0], B1[1], B1[2], B1[3], B1[4], B1[5]);
+                CHECK(parse_satcmd(sl, sm, &sc) && memcmp(sm, B1, 6) == 0 && strcmp(sc, "USE,My Net") == 0);
+                snprintf(sl, sizeof sl, "SATCMD,%02X:%02X:%02X:%02X:%02X:%02X,SOUND,test", B1[0], B1[1], B1[2], B1[3], B1[4], B1[5]);
+                CHECK(parse_satcmd(sl, sm, &sc) && strcmp(sc, "SOUND,test") == 0);
+                snprintf(sl, sizeof sl, "SATCMD,%02x:%02x:%02x:%02x:%02x:%02x,", B1[0], B1[1], B1[2], B1[3], B1[4], B1[5]);
+                CHECK(!parse_satcmd(sl, sm, &sc));                      // no command
+                CHECK(!parse_satcmd("SATCMD,zz,CAL", sm, &sc) && !parse_satcmd("SATCMD", sm, &sc));
+            }
             // what a board takes from the air
             CHECK(order_allowed("USE,Net") && order_allowed("USE_DEFAULT") && order_allowed("APS,clear") &&
                   order_allowed("CAL") && order_allowed("SENS,150") && order_allowed("SENS") &&

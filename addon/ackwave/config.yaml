@@ -1,5 +1,5 @@
 name: ackwave
-version: "0.3.9"
+version: "0.3.13"
 slug: ackwave
 description: Wi-Fi motion sensing with ESP32-S3 boards that never join your network
 url: https://github.com/skausky/ackwave

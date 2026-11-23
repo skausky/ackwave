@@ -1515,11 +1515,11 @@ static void ord_tx_task(void *arg) {
 // Answers SATCMD,<board>,queued,<n> / done,<n> / failed,<n> / error,<why>.
 static void sat_cmd(const char *line) {
     uint8_t mac[6];
-    if (strlen(line) < 7 + 17 + 2 || !parse_mac(line + 7, mac) || line[7 + 17] != ',') {
+    const char *cmd;
+    if (!parse_satcmd(line, mac, &cmd)) {
         printf("SATCMD,error,bad-command\n");
         return;
     }
-    const char *cmd = line + 7 + 18;
     static uint8_t f[ORDER_MAX_LEN];
     xSemaphoreTake(key_lock, portMAX_DELAY);
     int ki = peer_key_find(&pkeys, mac);

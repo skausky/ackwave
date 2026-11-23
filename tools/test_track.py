@@ -1,5 +1,6 @@
 """track.py: the Pi's tracker finds a person from link reactions; zones; the map keeps zones."""
 import math
+import tempfile
 import os
 import sys
 
@@ -97,6 +98,19 @@ def main():
     assert tr2.people, "someone near board a"
     pe = tr2.people[0].est
     assert math.hypot(pe['x'] - 6, pe['y'] - 6) > 2.5, f"not dragged to the router: {pe}"
+    # a board left out of the map: none of its links place people (the Pi's links)
+    from web import Dashboard as _D, State as _S
+    tmp2 = tempfile.mkdtemp()
+    dd = _D(_S(60), send=lambda c: None, sessions_dir=tmp2, settings=os.path.join(tmp2, 'dashboard.json'))
+    assert dd.map_save({'nodes': [dict(key='r:x', name='r', x=5.0, y=0.0, placed=True)], 'track_off': ['hub']})[0]
+    dd._layout_at = -9
+    dd._radio = lambda: [dict(key='ap:0', src=0, node='r:x', rssi=-50, activity=2.0)]
+    dd._map_boards = lambda: []
+    links_now, _m = dd._track_links()
+    assert links_now == [], links_now
+    assert dd.map_save({'nodes': [dict(key='r:x', name='r', x=5.0, y=0.0, placed=True)]})[0]
+    dd._layout_at = -9
+    assert len(dd._track_links()[0]) == 1, "back in once ticked again"
     z = dict(x=1, y=1, w=2, h=2)
     assert in_zone(z, 2, 2) and not in_zone(z, 3.5, 2)
     # the map keeps zones (checked), and refuses bad ones
@@ -111,7 +125,6 @@ def main():
             pass
     # the walk check: a tap is compared with the Pi's tracking and saved with the link levels
     import json
-    import tempfile
     from web import Dashboard, State
     tmp = tempfile.mkdtemp()
     d = Dashboard(State(60), sessions_dir=tmp)

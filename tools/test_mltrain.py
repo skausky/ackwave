@@ -74,6 +74,10 @@ def main():
     for i in range(n_hub - 1):                      # the board confirms each order through the hub
         d.feed(f'SATCMD,{SAT},done,{i + 1}\n')
     assert any(c.startswith(f'SATCMD,{SAT},MLW,commit,') for c in sent) and not d.mlw_q, d.mlw_q
+    sent.clear()
+    ok, msg = d.command(dict(cmd='teach_send'))       # the saved model again, without recording
+    assert ok and sent[0] == 'MLW,begin,0,3' and 'sat:' + SAT in d.mlw_q, (msg, sent)
+    assert d._teach_view()['sent']['done'] is False
     assert not d.command(dict(cmd='teach', which='sat:nope', label='moving'))[0]
     print('MLTRAIN TESTS PASSED')
 

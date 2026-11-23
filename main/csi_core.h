@@ -1215,6 +1215,16 @@ static inline bool parse_mac_at(const char *p, uint8_t mac[6]) {
     return !(mac[0] & 1);
 }
 
+// SATCMD,<board MAC>,<command>: the hub's command for another board. True with
+// the board's MAC and where the command starts (anything after the MAC's comma).
+static inline bool parse_satcmd(const char *line, uint8_t mac[6], const char **cmd) {
+    if (!line || strncmp(line, "SATCMD,", 7) != 0 || strlen(line) < 7 + 17 + 2) return false;
+    if (!parse_mac_at(line + 7, mac) || line[7 + 17] != ',') return false;
+    *cmd = line + 7 + 18;
+    return **cmd != '\0' && **cmd != '\r' && **cmd != '\n';
+}
+
+
 static inline bool parse_hex16(const char *p, uint8_t key[16]) {
     uint8_t any = 0;
     for (int i = 0; i < 16; i++) {
