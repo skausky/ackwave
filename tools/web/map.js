@@ -830,7 +830,8 @@ window.AckMap = (() => {
     const lam = lambda(), motionC = css('--motion');
     const pulse = 0.5 + 0.5 * Math.sin(t / 260);
     if (wv) drawWatchArea(wz, t);
-    const hv = wv ? null : heat(L, t);             // where each link is sensitive (estimate)
+    const tw = simple();                           // Home: the tripwire view (wires that light when crossed, no person dot)
+    const hv = wv || tw ? null : heat(L, t);       // where each link is sensitive (estimate)
     ctx.imageSmoothingEnabled = true;
     if (hv) {                                      // drawn where it was computed, moved with the view
       const k = M.view.s / hv.s;
@@ -847,11 +848,7 @@ window.AckMap = (() => {
       if (d < 0.05) continue;
       const rot = Math.atan2(n.y - e.y, n.x - e.x), cx = (e.x + n.x) / 2, cy = (e.y + n.y) / 2;
       const mv = moving(r), wk = weak(r) && !mv;
-      if (simple()) {                              // the clean view: a thin line, lit while it sees motion
-        ctx.strokeStyle = mv ? motionC : alpha(color, wk ? 0.18 : 0.35); ctx.lineWidth = mv ? 2.5 : 1;
-        ctx.beginPath(); ctx.moveTo(X(e.x), Y(e.y)); ctx.lineTo(X(n.x), Y(n.y)); ctx.stroke();
-        continue;
-      }
+      if (tw) { drawWire(r, e, n, mv, wk, t); continue; }
       const A = (d + lam / 2) / 2, b = Math.sqrt(Math.max(A * A - d * d / 4, 0));
       const a = Math.max(A * Math.hypot(n.x - e.x, n.y - e.y) / d, b);   // seen from above
       ellipse(cx, cy, a, b, rot);                  // the first Fresnel zone: a thin outline
@@ -869,8 +866,9 @@ window.AckMap = (() => {
       if (!readOnly) { ctx.fillStyle = css('--fg'); ctx.fillText(fmtLen(d), 0, -4); }   // Home: no lengths
       ctx.restore();
     }
-    if (!wv) particles(L, t, motionC);
-    drawTrack(t);
+    if (!wv && !tw) particles(L, t, motionC);
+    if (!simple()) drawTrack(t);
+    else drawWireHeadline(t);
     drawBreathing(t);
     drawNear(t);
     drawWalkCheck();
@@ -1430,6 +1428,57 @@ window.AckMap = (() => {
     ctx.strokeRect(X(x0), Y(y0), (x1 - x0) * M.view.s, (y1 - y0) * M.view.s); ctx.setLineDash([]);
     ctx.font = '600 12px system-ui, sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
     ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillText('Your boards', X(x0) + 4, Y(y1) + 4);
+    ctx.restore();
+  }
+  // ---------- the tripwire view (Home) ----------
+  // Each link is a wire: over there (a board to a router or device in the watched
+  // house) or your side (between two of your boards). Crossed: it lights up, then
+  // fades over WIRE_FADE_MS, so the order of what just happened stays readable.
+  const WIRE_FADE_MS = 10000, wireAt = new Map();
+  const WIRE_SIDE = '#4da3ff';
+  function wireSide(e, n) {
+    const wz = watchZone();
+    return wz && (inZone(wz, e) || inZone(wz, n)) ? 'over' : 'yours';
+  }
+  function drawWire(r, e, n, mv, wk, t) {
+    if (offMap(e) || offMap(n)) return;
+    const now = Date.now();
+    if (mv) wireAt.set(r.key, { at: now, label: r.label, side: wireSide(e, n) });
+    const w = wireAt.get(r.key), glow = mv ? 1 : w ? Math.max(0, 1 - (now - w.at) / WIRE_FADE_MS) : 0;
+    const side = wireSide(e, n), hot = side === 'over' ? css('--motion') : WIRE_SIDE;
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = alpha(side === 'over' ? '#ffffff' : WIRE_SIDE, wk ? 0.12 : 0.28); ctx.lineWidth = 1;
+    ctx.setLineDash(side === 'over' ? [] : [5, 5]);
+    ctx.beginPath(); ctx.moveTo(X(e.x), Y(e.y)); ctx.lineTo(X(n.x), Y(n.y)); ctx.stroke();
+    ctx.setLineDash([]);
+    if (glow > 0.01) {
+      const pl = mv ? 0.75 + 0.25 * Math.sin(t / 180) : 1;
+      if (fx.quality > 0) { ctx.shadowColor = hot; ctx.shadowBlur = 14 * glow; }
+      ctx.strokeStyle = alpha(hot, Math.min(1, 0.25 + 0.75 * glow) * pl); ctx.lineWidth = 1.5 + 3.5 * glow;
+      ctx.beginPath(); ctx.moveTo(X(e.x), Y(e.y)); ctx.lineTo(X(n.x), Y(n.y)); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  // What was crossed last, in words, top left
+  function drawWireHeadline(t) {
+    const now = Date.now();
+    const recent = [...wireAt.values()].filter((w) => now - w.at < 120000).sort((a, b) => b.at - a.at);
+    const over = recent.filter((w) => w.side === 'over'), yours = recent.filter((w) => w.side === 'yours');
+    const age = (ms) => (ms < 1500 ? 'now' : ms < 60000 ? `${Math.round(ms / 1000)} s ago` : `${Math.round(ms / 60000)} min ago`);
+    const lines = [];
+    if (over.length) lines.push([`Over there · ${over.slice(0, 3).map((w) => w.label).join(', ')} · ${age(now - over[0].at)}`, css('--motion')]);
+    if (yours.length) lines.push([`Your side · ${yours[0].label} · ${age(now - yours[0].at)}`, WIRE_SIDE]);
+    if (!lines.length) lines.push(['All wires quiet', 'rgba(255,255,255,0.7)']);
+    ctx.save();
+    ctx.font = '600 13px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    let y = 10;
+    for (const [txt, c] of lines) {
+      const wd = ctx.measureText(txt).width;
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(8, y - 3, wd + 12, 21);
+      ctx.fillStyle = c; ctx.fillText(txt, 14, y);
+      y += 24;
+    }
     ctx.restore();
   }
   // The watched house: a soft outline and its name
