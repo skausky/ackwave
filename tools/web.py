@@ -1163,6 +1163,7 @@ class Dashboard:
         if not self.tracker.step(links, now):
             return
         lv = {l['key']: l['level'] for l in links if l['level'] is not None}
+        self._track_log(now, lv)
         if len(lv) >= 3 and max(lv.values()) >= 0.8 and (not self.snaps or now - self.snaps[-1]['t'] >= 3):
             self.snaps.append(dict(t=round(now, 1), links=lv))   # someone moving: a moment to fit routers on
         day = time.strftime('%Y-%m-%d')
@@ -1263,6 +1264,29 @@ class Dashboard:
         r = f"{e['r'] / 0.3048:.0f} ft" if unit == 'ft' else f"{e['r']:.0f} m"
         many = f"{len(ppl)} people · " if len(ppl) > 1 else ''
         return f"{many}someone {'near' if d < 3 else 'closest to'} {name} (within {r})"
+
+    TRACK_LOG_MAX = 40 * 1024 * 1024             # the tracking log rolls over at this size (one .old kept)
+
+    def _track_log(self, now, lv):
+        """Once a second, what the tracking saw and decided (sessions/track.jsonl): the
+        links' levels, the boards' learned verdicts, where people were put. For tuning
+        the tracking on this house's own data; private, kept on the Pi."""
+        if not self.sessions_dir or now - getattr(self, '_tlog_at', 0.0) < 1.0:
+            return
+        self._tlog_at = now
+        p = os.path.join(self.sessions_dir, 'track.jsonl')
+        rec = dict(t=round(now, 2), links={k: round(v, 3) for k, v in lv.items()},
+                   ml={k: v['p'] for k, v in self.mlb.items() if now - v['at'] <= 10},
+                   people=[[round(q.est['x'], 2), round(q.est['y'], 2), round(q.est['r'], 2)] for q in self.tracker.people if q.est],
+                   near=self.tracker.near['key'] if self.tracker.near else None,
+                   house=bool(self.house_now[0]) if getattr(self, 'house_now', None) else None)
+        try:
+            if os.path.exists(p) and os.path.getsize(p) > self.TRACK_LOG_MAX:
+                os.replace(p, p + '.old')
+            with open(p, 'a') as f:
+                f.write(json.dumps(rec, separators=(',', ':')) + '\n')
+        except OSError:
+            pass
 
     def _people(self):
         """For the page: the Pi's tracking (works with no page open), the zones, and
