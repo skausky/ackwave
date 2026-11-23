@@ -457,9 +457,24 @@ class Dashboard:
     def _event_name(self, key, name):
         if key == 'board':
             return 'Hub' if self.sats else 'Board'
-        if key.startswith('sat:'):
+        if key.startswith('sat:') and '>' not in key:
             return self.board_label(key[4:])
         return name or key
+
+    def _paths_now(self, most=3):
+        """The links seeing motion right now, as paths: '4 → kartik front, 3 → Sonos'
+        (the board you know, the far end it watches). The strongest first."""
+        now = time.time()
+        rows = []
+        for mac, links in self.sat_links.items():
+            for tmac, ln in links.items():
+                if ln.moving and ln.at is not None and now - ln.at <= SAT_GONE_S:
+                    tkey, tname = self._target_key(tmac, ln.flags)
+                    if tkey == 'hub' and 'hub' in set(self._layout().get('track_off', [])):
+                        continue
+                    rows.append((ln.level(), f"{self.board_label(mac)} → {tname}"))
+        rows.sort(reverse=True)
+        return [t for _, t in rows[:most]]
 
     def _board_key(self, mac):
         mac = mac.lower()
@@ -547,7 +562,7 @@ class Dashboard:
         (open: 'now'; closed: its length)."""
         if on and key not in self._open:
             self._open[key] = [wall, name]
-            mk = 'hub' if key == 'board' else None if key == 'house' else key
+            mk = 'hub' if key == 'board' else None if key == 'house' else key.split('>')[0]
             e = self._event('motion', self._event_name(key, name), mk, t=wall)
             e['open'], e['house'] = True, key == 'house'
             self._open_ev = getattr(self, '_open_ev', {})
@@ -814,7 +829,12 @@ class Dashboard:
                         continue
                     ln = links[e['mac']] = SatLink(e['flags'])
                 ln.flags = e['flags']
+                was = bool(ln.moving)
                 ln.feed(e['ks'], e['kl'], now)
+                if bool(ln.moving) != was:               # each link's own history: which path saw it
+                    tkey, tname = self._target_key(e['mac'], ln.flags)
+                    self._period(f"sat:{d['mac']}>{tkey}", bool(ln.moving), now,
+                                 f"{self.board_label(d['mac'])} → {tname}")
         else:
             self.surveys[d['mac']] = {e['mac']: dict(kind=e['kind'], rssi=e['rssi'], at=now) for e in d['seen'][:40]}
 
@@ -836,6 +856,8 @@ class Dashboard:
         for mac, d in self.sats.items():
             if now - d['at'] > SAT_GONE_S:
                 self._period('sat:' + mac, False, d['at'])
+                for k in [k for k in self._open if k.startswith(f'sat:{mac}>')]:
+                    self._period(k, False, d['at'])
                 if not d.get('gone_said'):
                     d['gone_said'] = True
                     self._event('health', f"{self.board_label(mac)} not heard", 'sat:' + mac, important=True)
@@ -1206,7 +1228,9 @@ class Dashboard:
                 self._event('zone', f"Motion at {z['name']}" if 'near' in z else f"Someone in {z['name']}", None,
                             important=bool(z.get('notify') or z.get('light')))
                 if z.get('notify') and self.send and now - self.zone_said.get(z['id'], 0) >= 60 * self.notify.cfg['quiet_min']:
-                    if self.notify.zone(f"Someone in {z['name']}" + (f" · {n} people home" if n > 1 else ''), z.get('night')):
+                    paths = self._paths_now()
+                    if self.notify.zone(f"Movement in {z['name']}" + (f" · seen on {', '.join(paths)}" if paths else '')
+                                        + (f" · {n} people" if n > 1 else ''), z.get('night')):
                         self.zone_said[z['id']] = now
 
     def _walk_err(self):
@@ -1556,6 +1580,10 @@ class Dashboard:
             self.light.update(motion or ext)
         names = board_words
         where = (self._where_words() if motion or ext else '') or ', '.join(names) or ('a device link' if ext else '')
+        if motion or ext:
+            paths = self._paths_now()
+            if paths:
+                where = (where + ' · ' if where else '') + 'seen on ' + ', '.join(paths)
         if self.notify.update(motion or ext, where):
             self._event('automation', 'Phone notified · motion', 'notify')
         if self.light.on != was and self.light.on is not None and self.light.cfg.get('enabled'):
@@ -2411,11 +2439,11 @@ class Dashboard:
             for k in names:                          # today's names win (a router renamed since)
                 if k.startswith('ap:'):
                     names[k] = self._router_name(int(k[3:]))
-                elif k.startswith('sat:'):
+                elif k.startswith('sat:') and '>' not in k:
                     names[k] = self.board_label(k[4:])
                 elif k != 'board' and k in self.s.devices.devs:
                     names[k] = self.s.devices.name(k) or names[k]
-            order = lambda k: (-1 if k == 'house' else 0 if k == 'board' else 1 if k.startswith('sat:')
+            order = lambda k: (-1 if k == 'house' else 0 if k == 'board' else 1.5 if '>' in k else 1 if k.startswith('sat:')
                                else 2 if k == 'activity' else 3 if k.startswith('ap:') else 4, k)
             lanes = [dict(key=k, name='Board' if k == 'board' else names[k])
                      for k in sorted(names, key=order)]

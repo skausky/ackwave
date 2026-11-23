@@ -657,13 +657,19 @@ function histEpisodes(spans, keys) {
 function renderHist() {
   const d = histData;
   if (!d || !d.lanes) return;
-  const lanes = d.lanes.filter((l) => l.key === 'house' || l.key.startsWith('sat:'));
-  const boards = lanes.filter((l) => l.key.startsWith('sat:'));
-  const name = Object.fromEntries(lanes.map((l) => [l.key, l.key === 'house' ? 'Watched house' : l.name]));
+  const isBoard = (k) => k.startsWith('sat:') && !k.includes('>');
+  const hadMotion = new Set(d.spans.map((p) => p[2]));
+  const boards = d.lanes.filter((l) => isBoard(l.key));
+  const lanes = [...d.lanes.filter((l) => l.key === 'house')];
+  for (const b of boards) {                     // each board, then its links that saw something (which path)
+    lanes.push(b);
+    lanes.push(...d.lanes.filter((l) => l.key.startsWith(b.key + '>') && hadMotion.has(l.key) && !/→ Hub$/.test(l.name)));
+  }
+  const name = Object.fromEntries(lanes.map((l) => [l.key, l.key === 'house' ? 'Watched house' : l.key.includes('>') ? '→ ' + l.name.split('→').pop().trim() : l.name]));
   const T0 = d.t0, T1 = d.t1, span = T1 - T0, pct = (t) => `${(100 * (t - T0) / span).toFixed(3)}%`;
   const box = $('#hist-lanes'); box.textContent = '';
   for (const l of lanes) {
-    const row = el('div', { className: 'hist-row' + (l.key === 'house' ? ' house' : '') },
+    const row = el('div', { className: 'hist-row' + (l.key === 'house' ? ' house' : l.key.includes('>') ? ' link' : '') },
       el('span', { className: 'hist-name', textContent: name[l.key] }));
     const bar = el('div', { className: 'hist-bar' });
     for (const p of d.spans.filter((q) => q[2] === l.key)) {
@@ -691,12 +697,14 @@ function renderHist() {
     const on = [...e.on].map((k) => name[k]), off = boards.filter((l) => !e.on.has(l.key)).map((l) => name[l.key]);
     const inHouse = houseSpans.some((p) => p[0] <= e.t1 + 5 && p[1] >= e.t0 - 5);
     const zones = [...new Set(zoneEv.filter((z) => z.t >= e.t0 - 5 && z.t <= e.t1 + 5).map((z) => z.text.replace(/^(Motion at|Someone in) /, '')))];
+    const paths = [...new Set(d.spans.filter((p) => p[2].includes('>') && !/→ Hub$/.test(p[4]) && p[0] <= e.t1 + 3 && p[1] >= e.t0 - 3).map((p) => p[4]))];
     const where = zones.length ? `near ${zones.join(', ')}` : inHouse ? 'in the watched house'
       : off.length ? `${on.join(' + ')}'s side only` : 'seen by every board';
     const li = el('li', { className: 'hist-ep' + (e.open ? ' open' : '') + (inHouse ? ' house' : '') },
       el('time', { textContent: hhmm(e.t0) }),
       el('div', {},
         el('div', { className: 'hist-what', textContent: `${on.join(' + ')} · ${e.open ? 'moving now' : fmtSpan(e.t1 - e.t0)} · ${where}` }),
+        paths.length ? el('div', { className: 'small hist-paths', textContent: `paths: ${paths.join(' · ')}` }) : '',
         el('div', { className: 'muted small', textContent: [off.length ? `quiet: ${off.join(', ')}` : '',
           next ? `then clear ${fmtSpan(next.t0 - e.t1)}` : e.open ? '' : `clear since (${fmtSpan(T1 - e.t1)})`].filter(Boolean).join(' · ') })));
     list.append(li);

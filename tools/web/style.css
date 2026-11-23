@@ -678,3 +678,7 @@ body.simple .map-link > div.muted.small { display: none; }       /* per-link tec
 .hist-ep time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
 .hist-ep.open .hist-what { color: var(--motion); font-weight: 600; }
 .hist-ep.house time { color: var(--accent); }
+.hist-row.link .hist-name { font-size: 12px; color: var(--muted); padding-left: 12px; }
+.hist-row.link .hist-bar { height: 9px; }
+.hist-row.link .hist-bar i { background: #ff9f43; }
+.hist-paths { color: #ff9f43; }

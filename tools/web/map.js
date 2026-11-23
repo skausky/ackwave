@@ -244,8 +244,15 @@ window.AckMap = (() => {
     if (!obs.length) return hint ? { x: hint.x, y: hint.y, a: hint.r * 0.7, b: hint.r * 0.7, rot: 0, heardBy: 0, floor: n.floor || M.hubFloor } : null;
     // in the watched house with every board outside it: signal can't say where inside, so
     // the middle of your circle (or of the house) until the Pi's fit has an answer
-    if (box && !obs.some(([a]) => inZone(wz0, a)))
-      return { x: hint.x, y: hint.y, a: Math.min(hint.r, wz0.w / 2), b: Math.min(hint.r, wz0.h / 2), rot: 0, heardBy: obs.length, floor: n.floor || M.hubFloor };
+    if (box && !obs.some(([a]) => inZone(wz0, a))) {
+      let dx = 0;                                // several automatic routers: side by side in the middle, not on top of each other
+      if (!n.hint) {
+        const auto = [...M.nodes.values()].filter((m) => m.key.startsWith('r:') && !m.placed && !m.hint && targetRouter(m.key)).map((m) => m.key).sort();
+        const i = auto.indexOf(key);
+        if (auto.length > 1 && i >= 0) dx = (i - (auto.length - 1) / 2) * Math.min(5, wz0.w / (auto.length + 1));
+      }
+      return { x: hint.x + dx, y: hint.y, a: Math.min(hint.r, wz0.w / 2), b: Math.min(hint.r, wz0.h / 2), rot: 0, heardBy: obs.length, floor: n.floor || M.hubFloor };
+    }
     // its floor: the one you chose, else every floor the anchors are on (and the ground), best fit wins
     const floors = n.floor ? [n.floor] : [...new Set([1, M.hubFloor, ...obs.map(([a]) => floorOf(a))])];
     const kind = key.startsWith('sat:') ? BOARD.txDbm : (key.startsWith('ap:') || key.startsWith('r:')) ? EIRP.ap : EIRP.device;
@@ -1759,7 +1766,7 @@ window.AckMap = (() => {
             : `${diff} dB stronger than expected here (${Math.round(exp)} dBm): it may be closer than placed, or a strong device`);
       }
       if (n !== HUB && r.ap && !n.board) rows.push(routerWhere(n));
-      if (n !== HUB && !n.placed && !n.hint) {
+      if (n !== HUB && !n.placed && !n.hint && !(r.ap && watchZone())) {
         const au = n.auto;
         rows.push(au ? `Placed automatically from ${au.heardBy} board${au.heardBy > 1 ? 's' : ''} that hear it, within about ${fmtLen(au.a)}`
           + (au.heardBy === 1 ? ' (one board gives only a distance: place more boards to pin it down)' : au.heardBy === 2 ? ' (two boards: it could be the mirror spot)' : '')
