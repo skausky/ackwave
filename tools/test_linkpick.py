@@ -41,6 +41,12 @@ def main():
     pk2 = L.LinkPicker()
     pk2.from_json(j)
     assert abs(pk2.stats[('b', 'd5')].score() - pk.stats[('b', 'd5')].score()) < 1e-6
+    # asked once, not again while it comes up; never came: rested
+    pk3 = L.LinkPicker(clock=lambda: t[0])
+    a1 = pk3.choose('x', {'z': -60}, set())
+    assert a1 == ('poke', 'z') and pk3.choose('x', {'z': -60}, set()) is None
+    t[0] += L.PENDING_S + 1
+    assert pk3.choose('x', {'z': -60}, set()) is None and pk3.rest[('x', 'z')] > t[0]
     print('LINKPICK TESTS PASSED')
 
 

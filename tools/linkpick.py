@@ -19,6 +19,8 @@ EXPLORE_S = 600                  # a trial link: 10 min, then kept or swapped
 MIN_RSSI = -82                   # too faint to give a steady link
 MIN_EVIDENCE_S = 20              # seconds of 'over there' before a score means much
 PRIOR = 0.25                     # an untried link: worth a try
+PENDING_S = 120                  # a link asked for: counted as there while it comes up
+REST_S = 1800                    # one that never came: left alone 30 min
 
 
 class Stat:
@@ -47,6 +49,8 @@ class LinkPicker:
         self.clock = clock
         self.stats = {}               # (board, device) -> Stat
         self.trial = {}               # board -> (device, since)
+        self.asked = {}               # (board, device) -> when we asked for it (pending until it shows up)
+        self.rest = {}                # (board, device) -> until when it is left alone (never answered)
 
     def _st(self, board, dev):
         st = self.stats.get((board, dev))
@@ -78,8 +82,21 @@ class LinkPicker:
         heard: {device: rssi} it hears; linked: the devices it pings now."""
         now = self.clock()
         pinned = set(pinned)
+        linked = set(linked)
+        for (b, d), at in list(self.asked.items()):
+            if b != board:
+                continue
+            if d in linked:
+                self.asked.pop((b, d))               # it took
+            elif now - at < PENDING_S:
+                linked.add(d)                        # on its way: counts as linked
+            else:
+                self.asked.pop((b, d))               # never answered: rest it
+                self.rest[(b, d)] = now + REST_S
+        heard = {d: r for d, r in heard.items() if self.rest.get((board, d), 0) <= now}
         for d in sorted(pinned - set(linked)):   # your picks first: on every board that hears them
             if len(linked) < SLOTS:
+                self.asked[(board, d)] = now
                 return ('poke', d)
             free = [x for x in linked if x not in pinned]
             if free:
@@ -96,6 +113,7 @@ class LinkPicker:
                 if not tr:
                     self.trial[board] = (fresh[0], now)
                 self._st(board, fresh[0]).tried += 1
+                self.asked[(board, fresh[0])] = now
                 return ('poke', fresh[0])
         if tr and now - tr[1] >= EXPLORE_S:      # the trial is over: kept if it beats the worst keeper
             self.trial.pop(board, None)

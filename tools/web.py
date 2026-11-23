@@ -18,6 +18,7 @@ naming this server (no DNS rebinding).
 """
 import argparse
 import json
+import zlib
 import math
 import os
 import queue
@@ -1500,8 +1501,11 @@ class Dashboard:
                     line = f"{'POKE' if verb == 'poke' else 'UNPOKE'},{dev}"
                     self.s.outbox.append(f'SATCMD,{sat},{line}')
                     self.sat_cmds[sat] = dict(line=line, state='sent', at=now)
-                    print(f"{self.board_label(sat)}: {'trying a link to' if verb == 'poke' else 'dropping its link to'} "
-                          f"{self.s.devices.name(dev) or 'a device'}", flush=True)
+                    tag = lambda m: f"{self.s.devices.name(m) or 'device'}#{zlib.crc32(m.encode()) % 1000:03d}"
+                    print(f"{self.board_label(sat)}: {'trying a link to' if verb == 'poke' else 'dropping its link to'} {tag(dev)} "
+                          f"(links now: {', '.join(sorted(tag(m) for m in linked)) or 'none'}; reporting: "
+                          f"{', '.join(sorted(tag(m) + ('/r' if ln.flags & 2 else '') + ('' if ln.at and now - ln.at < 300 else '/old') for m, ln in lk.items()))})",
+                          flush=True)
                 continue
             else:
                 cands = sorted((m for m, e in heard.items() if e['kind'] == 'board' and m in boards and m != sat
