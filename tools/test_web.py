@@ -404,7 +404,7 @@ def main():
         ok, msg = dash.plan_save('p3', b'\xff\xd8\xff' + b'\0' * (12 * 1024 * 1024))
         assert not ok and 'too big' in msg
         layer = {'id': 'p1', 'name': 'satellite', 'x': -20, 'y': -15.5, 'w': 60, 'rot': 0.1, 'opacity': 0.8}
-        st, body = request(port, 'POST', '/api/map', json.dumps(dict(got, plans=[layer])), hdr)
+        st, body = request(port, 'POST', '/api/map', json.dumps(dict(got, plans=[layer], edits=['plans'])), hdr)
         assert st == 200, body
         st, body = request(port, 'GET', '/api/map', headers={'X-Ackwave': '1'})
         assert json.loads(body)['plans'] == [dict(layer, hidden=False)]
@@ -518,6 +518,8 @@ def map_merges(tmp):
     assert d.map_save({'zones': [dict(id='z1', name='A', x=0, y=0, w=1, h=1)], 'edits': ['zones']})[0]
     assert d.map_save({'zones': [], 'edits': []})[0]                              # another page's stale (empty) zones
     assert [z['id'] for z in d.map_load()['zones']] == ['z1']
+    assert d.map_save({'zones': [], 'track_off': [], 'nodes': [light(2.0)]})[0]   # an old page (no edits at all)
+    assert [z['id'] for z in d.map_load()['zones']] == ['z1'] and xs()['light'] == 7.0, "an old page changes nothing"
 
 
 def routers_named(d, tmp):

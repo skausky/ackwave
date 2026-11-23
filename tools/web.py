@@ -2242,6 +2242,10 @@ class Dashboard:
             return False, str(e)
         if isinstance(edits, list) and len(edits) <= 200 and all(isinstance(e, str) for e in edits):
             m = self._map_merge(m, set(edits))
+        elif edits is None and self.map_load():
+            # a page from before the merge (still open somewhere): it may only add what's new,
+            # never replace your zones, settings or placements with its old copy
+            m = self._map_merge(m, set())
         p = self._map_path()
         if not p:
             return False, 'nowhere to save the map (no sessions folder)'

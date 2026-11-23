@@ -108,7 +108,7 @@ def main():
     dd._map_boards = lambda: []
     links_now, _m = dd._track_links()
     assert links_now == [], links_now
-    assert dd.map_save({'nodes': [dict(key='r:x', name='r', x=5.0, y=0.0, placed=True)]})[0]
+    assert dd.map_save({'nodes': [dict(key='r:x', name='r', x=5.0, y=0.0, placed=True)], 'edits': ['track_off']})[0]
     dd._layout_at = -9
     assert len(dd._track_links()[0]) == 1, "back in once ticked again"
     # a watched area: people only inside it, from the links with an end in it
