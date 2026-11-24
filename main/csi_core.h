@@ -527,6 +527,45 @@ static inline int parse_sens(const char *line, int *x100) {
     return SENS_SET;
 }
 
+// ---------- Device poke rate (DEVHZ) ----------
+// DEVHZ, DEVHZ,default or DEVHZ,<pokes/s shared by the device links, 25-400>.
+// The router keeps its POKE_HZ whatever this is. Default: 200 on a satellite
+// (nothing it hears goes over USB), the hub's POKE_HZ on the hub (its USB
+// carries every CSI line and tops out near 200 lines/s).
+enum { DEVHZ_BAD = -1, DEVHZ_QUERY = 0, DEVHZ_SET, DEVHZ_DEFAULT };
+#define DEVHZ_MIN 25
+#define DEVHZ_MAX 400
+static inline int parse_devhz(const char *line, int *hz) {
+    *hz = 0;
+    if (!line || strncmp(line, "DEVHZ", 5) != 0) return DEVHZ_BAD;
+    const char *s = line + 5;
+#define DH_END(c) ((c) == '\0' || (c) == '\r' || (c) == '\n')
+    if (DH_END(*s)) return DEVHZ_QUERY;
+    if (*s++ != ',') return DEVHZ_BAD;
+    if (strncmp(s, "default", 7) == 0 && DH_END(s[7])) return DEVHZ_DEFAULT;
+    int v = 0, digits = 0;
+    while (*s >= '0' && *s <= '9' && digits < 4) { v = v * 10 + (*s++ - '0'); digits++; }
+    if (!digits || !DH_END(*s) || v < DEVHZ_MIN || v > DEVHZ_MAX) return DEVHZ_BAD;
+#undef DH_END
+    *hz = v;
+    return DEVHZ_SET;
+}
+
+// The poke schedule, one 1 ms tick at a time: 0 = an access point's turn,
+// 1 = a device slot's turn (a device, a hello or a report), -1 = rest. Each
+// side gets its own rate exactly (a 1000 Hz Bresenham), the APs first. After
+// a pause (the report hop to the hub's channel) at most 2 of each catch up.
+typedef struct { uint32_t ap, dev; } poke_sched_t;
+static inline int poke_sched_step(poke_sched_t *p, int ap_hz, int dev_hz) {
+    p->ap += (uint32_t)(ap_hz > 0 ? ap_hz : 0);
+    p->dev += (uint32_t)(dev_hz > 0 ? dev_hz : 0);
+    if (p->ap > 2000) p->ap = 2000;
+    if (p->dev > 2000) p->dev = 2000;
+    if (p->ap >= 1000) { p->ap -= 1000; return 0; }
+    if (p->dev >= 1000) { p->dev -= 1000; return 1; }
+    return -1;
+}
+
 // ---------- The light output (OUT) ----------
 // A pin that switches a light module (a logic-level MOSFET or relay module, its
 // IN on the pin): off, on with motion, or always on. "motion" is the board's own
@@ -1100,7 +1139,7 @@ static inline bool order_open(const uint8_t *f, int len, const uint8_t me[6], ae
 // devices or boards it pokes (it still refuses one it hasn't heard). Never keys, the
 // hub or a settings reset: those need its USB cable.
 static inline bool order_allowed(const char *line) {
-    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE", "OUT", "MLW", "POKE,", "UNPOKE," };
+    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE", "OUT", "MLW", "POKE,", "UNPOKE,", "DEVHZ" };
     for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++) {
         size_t k = strlen(ok[i]);
         if (strncmp(line, ok[i], k) == 0 && (ok[i][k - 1] == ',' || line[k] == '\0' || line[k] == ',')) return true;

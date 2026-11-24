@@ -39,6 +39,9 @@
 #ifndef POKE_HZ
 #define POKE_HZ        100       // Null frames/s sent to the AP for ACK CSI; 0 = off
 #endif
+#ifndef SAT_DEV_HZ
+#define SAT_DEV_HZ     200       // a satellite's device pokes/s (DEVHZ changes it; the hub: POKE_HZ)
+#endif
 #ifndef CSI_PROBE
 #define CSI_PROBE      0         // 1 = log every CSI/ACK callback (hardware bring-up)
 #endif
@@ -446,6 +449,14 @@ static bool nvs_take(const char *key, void *v, size_t n) {
     return ok;
 }
 static int saved_sens;                         // SENS saved on the board, 0 = none (print_task applies it)
+static volatile int devhz_saved;               // DEVHZ saved on the board, 0 = the default
+// Device pokes/s now: what you set, else 200 on a satellite and POKE_HZ on the
+// hub or a board on its own (its USB carries every CSI line)
+static int devhz_now(void) {
+    if (devhz_saved) return devhz_saved;
+    return have_hub && memcmp(hub_mac, my_mac, 6) != 0 ? SAT_DEV_HZ : POKE_HZ;
+}
+static void print_devhz(void) { printf("DEVHZ,%d,%s\n", devhz_now(), devhz_saved ? "set" : "default"); }
 typedef struct { int8_t mode; uint8_t vol; uint16_t hz; } snd_saved_t;
 
 // Rising = something started, falling = it ended, low = a problem.
@@ -933,23 +944,25 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info) {
 // ---------------- Tasks ----------------
 #if POKE_HZ > 0
 // Polite Wi-Fi: Null frame to the AP at 6 Mbps; its OFDM ACK gives us CSI.
-// Two interleaved slots: APs get POKE_HZ/s whatever happens, and devices
-// share another POKE_HZ/s (a slot with no device to poke stays silent).
+// Two schedules on one 1 ms tick (poke_sched_step): APs get POKE_HZ/s whatever
+// happens, and the device links share their own DEVHZ/s (200 on a satellite,
+// so 4 links get ~50 answers/s each instead of ~23); a slot with no device to
+// poke stays silent. Hellos and reports ride on device turns.
 static void poke_task(void *arg) {
     uint8_t frame[NULL_FRAME_LEN];
     static uint8_t hello[REPORT_MAX_LEN];
     static rep_extra_t ext;
     int n_reports = 0;
     uint32_t next_report = HELLO_EVERY_MS / 2;     // between hellos
-    int rr[2] = {0, 0}, slot = 0;
+    int rr[2] = {0, 0};
     uint32_t next_hello = 0;
+    poke_sched_t sched = {0, 0};
     TickType_t wake = xTaskGetTickCount();
-    TickType_t period = pdMS_TO_TICKS(500 / POKE_HZ);
-    if (period == 0) period = 1;
+    const TickType_t period = 1;                   // 1 ms (CONFIG_FREERTOS_HZ=1000): the schedule decides
     for (;;) {
         vTaskDelayUntil(&wake, period);
-        int devs = slot;
-        slot ^= 1;
+        int devs = poke_sched_step(&sched, POKE_HZ, devhz_now());   // APs: POKE_HZ; devices: DEVHZ
+        if (devs < 0) continue;
         if (scanning) continue;
         // Twice a second a device slot says hello to the other boards, on our
         // channel; between those, a report goes to the hub on its channel.
@@ -1159,6 +1172,7 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
+    int dhc, dhv;
     int snd, smode, svol, shz, sens, sx, na, ledc, ext, kc, pk, hc, oc, omode, osecs, mlc, mla, mlb, mln;
     float mlv[MLW_VALS_MAX];
     uint8_t newkey[16], pmac[6];
@@ -1312,6 +1326,16 @@ static void run_cmd(const char *line) {
             nvs_put("sens", NULL, 0);
         }
         print_sens();
+    } else if ((dhc = parse_devhz(line, &dhv)) != DEVHZ_BAD) {
+        if (dhc == DEVHZ_SET && dhv != devhz_saved) {
+            int16_t v = (int16_t)dhv;
+            nvs_put("devhz", &v, sizeof v);
+            devhz_saved = dhv;
+        } else if (dhc == DEVHZ_DEFAULT) {
+            nvs_put("devhz", NULL, 0);
+            devhz_saved = 0;
+        }
+        print_devhz();
     } else if (cmd == CMD_SCAN) {
         // Commands wait in the USB buffer while a scan runs, so a SCAN sent
         // during one arrives just after it: that scan already answered it.
@@ -1477,6 +1501,8 @@ static void settings_reset(void) {
     nvs_put("sens", NULL, 0);
     nvs_put("devs", NULL, 0);
     nvs_put("out", NULL, 0);
+    nvs_put("devhz", NULL, 0);
+    devhz_saved = 0;
     led_save(NULL);
     snd_mode = MOTION_ALARM ? SND_ALARM : SND_BEEP;
     snd_vol = BUZZER_VOL;
@@ -1988,6 +2014,8 @@ void app_main(void) {
     }
     int16_t ss;
     if (nvs_take("sens", &ss, sizeof ss) && ss >= SENS_MIN && ss <= SENS_MAX) saved_sens = ss;
+    int16_t dh;
+    if (nvs_take("devhz", &dh, sizeof dh) && dh >= DEVHZ_MIN && dh <= DEVHZ_MAX) devhz_saved = dh;
 
     key_lock = xSemaphoreCreateMutex();
     configASSERT(key_lock);

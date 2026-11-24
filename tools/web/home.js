@@ -75,11 +75,13 @@
   // Boards along the bottom (your side), the routers and devices along the top
   // (over there), each far end above the boards that reach it (fewest crossings).
   // Nothing has to be placed: this is the wires and what they share, not a map.
-  function layout(w, bs) {
+  // On a phone it turns sideways: boards in a column on the left, far ends on the right.
+  function layout(w, bs, narrow) {
     const ends = w.ends || {};
     const boards = bs.map((b) => b.key).filter((k) => ends[k] || bs.length);
     const far = Object.keys(ends).filter((k) => (ends[k] || {}).kind !== 'board');
-    const W = 1000, bx = new Map(), fx = new Map();
+    const n = Math.max(boards.length, far.length, 1);
+    const W = narrow ? Math.max(500, n * 90) : 1000, bx = new Map(), fx = new Map();
     boards.forEach((k, i) => bx.set(k, (i + 0.5) * W / Math.max(1, boards.length)));
     const bary = (k) => {
       const xs = w.wires.filter((x) => x.a === k || x.b === k).map((x) => bx.get(x.a === k ? x.b : x.a)).filter((v) => v !== undefined);
@@ -87,8 +89,12 @@
     };
     far.sort((a, b) => bary(a) - bary(b) || a.localeCompare(b));
     far.forEach((k, i) => fx.set(k, (i + 0.5) * W / Math.max(1, far.length)));
+    if (narrow) {                                  // x along the list becomes y; boards left, far ends right
+      const pos = (k) => (bx.has(k) ? [170, bx.get(k)] : fx.has(k) ? [330, fx.get(k)] : null);
+      return { W: 500, H: W, pos, boards, far, narrow };
+    }
     const pos = (k) => (bx.has(k) ? [bx.get(k), 330] : fx.has(k) ? [fx.get(k), 70] : null);
-    return { W, H: 420, pos, boards, far };
+    return { W, H: 420, pos, boards, far, narrow };
   }
   function renderWeb(w, bs) {
     const svg = $h('#ov-web');
@@ -97,7 +103,7 @@
         document.createTextNode(bs.length ? 'No wires yet: the boards report their links every few seconds' : 'Waiting for the boards…')));
       return;
     }
-    const L = layout(w, bs);
+    const L = layout(w, bs, (svg.parentElement && svg.parentElement.clientWidth || 1000) < 620);
     const g = sv('g');
     const bstate = Object.fromEntries(bs.map((b) => [b.key, b]));
     const nowS = Date.now() / 1000;
@@ -107,7 +113,9 @@
       const lit = x.state === 'moving' ? 1 : x.state === 'recent' ? Math.max(0.25, 1 - (x.ago || 0) / 6) : 0;
       // two boards: an arc below them (your side); else a straight wire up
       const both = (w.ends[x.a] || {}).kind === 'board' && (w.ends[x.b] || {}).kind === 'board';
-      const d = both ? `M${p[0]},${p[1]} Q${(p[0] + q[0]) / 2},${p[1] + 80} ${q[0]},${q[1]}` : `M${p[0]},${p[1]} L${q[0]},${q[1]}`;
+      const d = !both ? `M${p[0]},${p[1]} L${q[0]},${q[1]}`
+        : L.narrow ? `M${p[0]},${p[1]} Q${p[0] - 70},${(p[1] + q[1]) / 2} ${q[0]},${q[1]}`
+        : `M${p[0]},${p[1]} Q${(p[0] + q[0]) / 2},${p[1] + 80} ${q[0]},${q[1]}`;
       g.append(sv('path', { d, class: `ov-wire ${x.state}${both ? ' side' : ''}`, style: lit ? `opacity:${0.35 + 0.65 * lit}` : null },
         sv('title', {}, document.createTextNode(`${(w.ends[x.a] || {}).name} – ${(w.ends[x.b] || {}).name}: ${x.state}, level ${x.level}`))));
       if (lit && x.span && !both) {             // where on the wire: that stretch glows
@@ -122,7 +130,8 @@
       if (e.hot) grp.append(sv('circle', { cx: x, cy: y, r: 22, class: 'ov-halo' }));
       grp.append(e.kind === 'router' ? sv('circle', { cx: x, cy: y, r: 11 })
         : sv('rect', { x: x - 8, y: y - 8, width: 16, height: 16, rx: 3, transform: `rotate(45 ${x} ${y})` }));
-      grp.append(sv('text', { x, y: y - 20, 'text-anchor': 'middle' }, document.createTextNode(e.name || k)));
+      grp.append(L.narrow ? sv('text', { x: x + 18, y: y + 5, 'text-anchor': 'start' }, document.createTextNode(e.name || k))
+        : sv('text', { x, y: y - 20, 'text-anchor': 'middle' }, document.createTextNode(e.name || k)));
       g.append(grp);
     }
     for (const k of L.boards) {
@@ -132,13 +141,19 @@
       const grp = sv('g', { class: `ov-end board ${b.state || ''}${e.hot ? ' hot' : ''}` });
       if (e.hot || b.state === 'moving') grp.append(sv('circle', { cx: x, cy: y, r: 26, class: 'ov-halo' }));
       grp.append(sv('rect', { x: x - 15, y: y - 15, width: 30, height: 30, rx: 7 }));
-      grp.append(sv('text', { x, y: y + 34, 'text-anchor': 'middle', class: 'nm' }, document.createTextNode(b.name || e.name || k)));
-      grp.append(sv('text', { x, y: y + 51, 'text-anchor': 'middle', class: 'st' },
+      const tx = L.narrow ? x - 22 : x, ty = L.narrow ? y - 2 : y + 34, anc = L.narrow ? 'end' : 'middle';
+      grp.append(sv('text', { x: tx, y: ty, 'text-anchor': anc, class: 'nm' }, document.createTextNode(b.name || e.name || k)));
+      grp.append(sv('text', { x: tx, y: ty + 17, 'text-anchor': anc, class: 'st' },
         document.createTextNode((WORD[b.state] || '') + (b.since && b.state === 'moving' ? '' : b.since ? ` · ${fmtSpan(nowS - b.since)}` : ''))));
       g.append(grp);
     }
-    g.append(sv('text', { x: 8, y: 22, class: 'ov-lab' }, document.createTextNode('over there: routers and devices')));
-    g.append(sv('text', { x: 8, y: 410, class: 'ov-lab' }, document.createTextNode('your boards')));
+    if (L.narrow) {
+      g.append(sv('text', { x: 8, y: 16, class: 'ov-lab' }, document.createTextNode('your boards')));
+      g.append(sv('text', { x: 492, y: 16, class: 'ov-lab', 'text-anchor': 'end' }, document.createTextNode('over there')));
+    } else {
+      g.append(sv('text', { x: 8, y: 22, class: 'ov-lab' }, document.createTextNode('over there: routers and devices')));
+      g.append(sv('text', { x: 8, y: 410, class: 'ov-lab' }, document.createTextNode('your boards')));
+    }
     svg.setAttribute('viewBox', `0 0 ${L.W} ${L.H}`);
     svg.replaceChildren(g);
   }

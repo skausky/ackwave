@@ -552,6 +552,38 @@ int main(void) {
             CHECK(parse_sens("SENS,16000", &x) == SENS_BAD && parse_sens("SENSE", &x) == SENS_BAD);
             CHECK(parse_sens("SOUND", &x) == SENS_BAD && parse_cmd("SENS,160", cm) == CMD_NONE);
         }
+        {   // DEVHZ: the device links' poke rate, and the 1 ms poke schedule
+            int x;
+            CHECK(parse_devhz("DEVHZ", &x) == DEVHZ_QUERY && parse_devhz("DEVHZ\r\n", &x) == DEVHZ_QUERY);
+            CHECK(parse_devhz("DEVHZ,default", &x) == DEVHZ_DEFAULT);
+            CHECK(parse_devhz("DEVHZ,200", &x) == DEVHZ_SET && x == 200 && parse_devhz("DEVHZ,25\n", &x) == DEVHZ_SET);
+            CHECK(parse_devhz("DEVHZ,24", &x) == DEVHZ_BAD && parse_devhz("DEVHZ,401", &x) == DEVHZ_BAD);
+            CHECK(parse_devhz("DEVHZ,", &x) == DEVHZ_BAD && parse_devhz("DEVHZX", &x) == DEVHZ_BAD && parse_devhz("SENS", &x) == DEVHZ_BAD);
+            CHECK(parse_sens("DEVHZ,200", &x) == SENS_BAD && parse_cmd("DEVHZ,200", cm) == CMD_NONE);
+            poke_sched_t ps = {0, 0};
+            int n_ap = 0, n_dev = 0, rest = 0;
+            for (int t = 0; t < 10000; t++) {
+                int k = poke_sched_step(&ps, 100, 200);
+                n_ap += k == 0; n_dev += k == 1; rest += k < 0;
+            }
+            // each side its rate over 10 s (a device turn that meets an AP's waits 1 ms: one may fall just past the end)
+            CHECK(n_ap == 1000 && n_dev >= 1999 && n_dev <= 2000 && n_ap + n_dev + rest == 10000);
+            n_ap = n_dev = 0;
+            ps = (poke_sched_t){0, 0};
+            for (int t = 0; t < 10000; t++) { int k = poke_sched_step(&ps, 100, 400); n_ap += k == 0; n_dev += k == 1; }
+            CHECK(n_ap == 1000 && n_dev >= 3999 && n_dev <= 4000);
+            ps = (poke_sched_t){0, 0};
+            for (int t = 0; t < 30; t++) ps.ap += 100, ps.dev += 200;   // a 30 ms pause (the report hop)...
+            if (ps.ap > 2000) ps.ap = 2000;
+            if (ps.dev > 2000) ps.dev = 2000;
+            int burst = 0;
+            while (poke_sched_step(&ps, 0, 0) >= 0) burst++;
+            CHECK(burst <= 4);                                    // ...catches up by at most 2 of each
+            n_ap = 0;
+            ps = (poke_sched_t){0, 0};
+            for (int t = 0; t < 1000; t++) n_ap += poke_sched_step(&ps, 100, 0) == 0;
+            CHECK(n_ap == 100);                                   // no devices: the router as before
+        }
         {   // OUT: the light output
             int m, sec;
             CHECK(parse_out("OUT", &m, &sec) == OUT_QUERY && parse_out("OUT\r\n", &m, &sec) == OUT_QUERY);
