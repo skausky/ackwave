@@ -176,10 +176,7 @@ def house():
     d.house.since.pop('board', None)
     d.feed(f'SAT,{sat},-40,50,2,10,10,95,-60,1,50\n')      # the satellite: still
     d.tick()
-    assert d._light_on is True, "another board's alert holds a while (no flapping)"
-    d.others_until = 0.0                                     # 15 s later
-    d.tick()
-    assert not d.slow(30)['house']['motion'] and d._light_on is False, "the hub's motion no longer counts"
+    assert not d.slow(30)['house']['motion'], "the hub's motion no longer counts (the House lane; alerts: rules)"
     src = {x['key']: x['use'] for x in d.slow(30)['house']['sources']}
     assert src == {'board': False, sat: True}, src
     assert not d.command({'cmd': 'house_use', 'key': 'nope', 'use': True})[0]
@@ -427,6 +424,66 @@ def poke_policy():
     assert any(row[3] == 'Devices: Off' for row in d.policy_log), list(d.policy_log)
 
 
+def wires_and_rules():
+    """Three satellites, two routers, no map at all: someone near the front
+    router makes every board's wire to it react, so it is 'near the front
+    router', each board says 'moving' with that wire named (never 'still'
+    while one of its wires moves), and the alerts fire by board: 1 and 3, all
+    3, but not a rule watching only by the boards. The page renders it."""
+    import subprocess
+    import tempfile
+    S = [mac(0xc4, 0x9e, 0x7e, 1, 1, i) for i in (1, 2, 3)]
+    R1, R2 = mac(0x90, 0x0e, 0x84, 1, 1, 1), mac(0x90, 0x0e, 0x84, 2, 2, 2)
+    tmp = tempfile.mkdtemp()
+    sent = []
+    d = Dashboard(State(60), send=sent.append, settings=os.path.join(tmp, 'dashboard.json'))
+    d.feed(f'ME,{FIRST}\n')
+    seq = [100]
+
+    def report(front, back=10):
+        for s_ in S:
+            seq[0] += 1
+            d.feed(f'SAT,{s_},-40,{seq[0]},2,20,15,96,-57,0,60,{R1},6\n')
+            d.feed(f'SATL,{s_},{R1}:6:{front}:{front},{R2}:6:{back}:{back}\n')
+
+    report(10)                                         # quiet: learns each wire's quiet level
+    d._judge_step()
+    assert d.wv['headline'] == 'All wires quiet' and all(b['state'] == 'quiet' for k, b in d.bstates.items() if k != 'hub'), (d.wv['headline'], d.wv['wires']) or \
+        [(k, b['state']) for k, b in d.bstates.items()]
+    rules = [dict(id='a', name='1 and 3', boards=['sat:' + S[0], 'sat:' + S[2]], need='all', notify=True),
+             dict(id='b', name='All three', boards=['sat:' + m for m in S], need='all', light=True),
+             dict(id='c', name='By the boards', boards=[], where='yours', buzz=True)]
+    assert d.command(dict(cmd='rules', rules=rules))[0]
+    report(90)                                         # the front router's wire of every board reacts
+    d._judge_step()
+    assert d.wv['ends']['r:' + R1]['hot'] and not d.wv['ends']['r:' + R2]['hot'], d.wv['ends']
+    assert d.wv['side'] == 'over' and 'Near' in d.wv['words'][0]['text'], d.wv['words']
+    for m in S:
+        b = d.bstates['sat:' + m]
+        assert b['state'] == 'moving' and len(b['by']) == 1 and not b['near_me'], b
+    on = {r['id'] for r, _s in d.trig_active}
+    assert on == {'a', 'b'}, on
+    assert 'EXT,1' not in sent, "the buzzer rule wants movement right by the boards"
+    assert any("Alert '1 and 3'" in e['text'] for e in d.events)
+    sl = d.slow(30)
+    assert sl['rules']['state']['a']['on'] and len(sl['bstates']) == 4
+    # the page renders this payload without an error
+    p = os.path.join(tmp, 'slow.json')
+    with open(p, 'w') as f:
+        json.dump(sl, f)
+    r = subprocess.run(['node', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_pages_load.js'), p],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    # one board, right by it: both of its wires react, nothing else
+    report(10)
+    seq[0] += 1
+    d.feed(f'SATL,{S[1]},{R1}:6:90:90,{R2}:6:90:90\n')
+    d.wires.moved_at.clear()
+    d._judge_step()
+    assert d.wv['ends']['sat:' + S[1]]['hot'] and d.bstates['sat:' + S[1]]['near_me'], d.wv['ends']
+    assert d.wv['side'] == 'yours'
+
+
 def live_stream_and_demo():
     """The demo house: three boards (one joining late), a person walking, a
     device joining, the simulated light; and the live stream it produces."""
@@ -522,6 +579,7 @@ if __name__ == '__main__':
     sat_links()
     follow_network()
     poke_policy()
+    wires_and_rules()
     live_stream_and_demo()
     tagged_stream()
     ports()

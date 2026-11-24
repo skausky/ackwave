@@ -1,7 +1,8 @@
 :root {
-  --bg: #0d1116; --card: #151b22; --card2: #1b222b; --line: #26303b; --grid: #1f2731;
-  --fg: #e6e9ed; --muted: #8592a1; --accent: #5fd4d0;
-  --motion: #ff5a4f; --still: #3ecf8e; --brief: #ffb547; --scan: #9aa5b8; --cal: #7d8794;
+  --bg: #0a0e13; --card: #121821; --card2: #18202b; --line: #232d39; --grid: #1c2530;
+  --fg: #e8ecf1; --muted: #8a97a8; --accent: #5fd4d0;
+  --motion: #ff5d55; --still: #3ecf8e; --brief: #ffb547; --scan: #9aa5b8; --cal: #7d8794;
+  --present: #b18cff; --empty: #5b6878;
   --long: #f2f4f7; --blue: #4ea8ff;
   --r: 12px; --gap: 14px;
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -684,3 +685,87 @@ body.simple .map-link > div.muted.small { display: none; }       /* per-link tec
 .hist-paths { color: #ff9f43; }
 .field-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
 .board-tile .warn, #peer-links-note { color: var(--brief); }
+
+/* ================= Home: the house at a glance (home.js) ================= */
+.ov { display: grid; gap: var(--gap); }
+.ov-head { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; align-items: center; padding: 18px 22px;
+  border-left: 5px solid var(--empty); transition: border-color .3s, background .3s; }
+.ov-head-dot { width: 16px; height: 16px; border-radius: 50%; background: var(--empty); grid-row: span 2; }
+.ov-head-text { font-size: 24px; font-weight: 750; letter-spacing: .2px; }
+.ov-head-sub { color: var(--muted); margin-top: 2px; }
+.ov-head-more { grid-column: 2; color: var(--muted); font-size: 12.5px; }
+.ov-head.over { border-left-color: var(--motion); background: linear-gradient(90deg, rgba(255,93,85,.10), var(--card) 55%); }
+.ov-head.over .ov-head-dot { background: var(--motion); box-shadow: 0 0 0 0 rgba(255,93,85,.6); animation: ov-pulse 1.4s infinite; }
+.ov-head.yours { border-left-color: var(--blue); background: linear-gradient(90deg, rgba(78,168,255,.10), var(--card) 55%); }
+.ov-head.yours .ov-head-dot { background: var(--blue); }
+.ov-head.quiet .ov-head-dot { background: var(--still); }
+.ov-head.none .ov-head-dot { background: var(--brief); }
+@keyframes ov-pulse { 0% { box-shadow: 0 0 0 0 rgba(255,93,85,.55); } 100% { box-shadow: 0 0 0 14px rgba(255,93,85,0); } }
+
+.ov-boards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--gap); }
+.ov-board { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px;
+  border-top: 4px solid var(--empty); display: grid; gap: 4px; align-content: start; transition: border-color .3s; }
+.ov-board-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ov-board-top b { font-size: 15px; }
+.ov-state { font-weight: 750; font-size: 15px; color: var(--muted); }
+.ov-board.moving { border-top-color: var(--motion); } .ov-board.moving .ov-state { color: var(--motion); }
+.ov-board.still { border-top-color: var(--present); } .ov-board.still .ov-state { color: var(--present); }
+.ov-board.empty .ov-state { color: var(--empty); }
+.ov-board.quiet { border-top-color: var(--still); } .ov-board.quiet .ov-state { color: var(--still); }
+.ov-board.gone { opacity: .55; border-top-color: var(--brief); } .ov-board.gone .ov-state { color: var(--brief); }
+.ov-board.calibrating { border-top-color: var(--blue); } .ov-board.calibrating .ov-state { color: var(--blue); }
+.ov-health { margin-top: 4px; }
+.ov-wchips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.ov-wchip { font-size: 11.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.ov-wchip.moving { color: #fff; background: var(--motion); border-color: var(--motion); }
+.ov-wchip.recent { color: var(--brief); border-color: rgba(255,181,71,.5); }
+.ov-wchip.off { opacity: .5; border-style: dashed; }
+
+.ov-web { width: 100%; height: auto; display: block; background: radial-gradient(ellipse at 50% 0%, #121a24, transparent 70%); border-radius: 10px; }
+.ov-wire { fill: none; stroke: #33404f; stroke-width: 1.6; stroke-linecap: round; transition: stroke .25s, stroke-width .25s; }
+.ov-wire.side { stroke-dasharray: 5 6; }
+.ov-wire.off { stroke: #222b36; stroke-dasharray: 2 6; }
+.ov-wire.recent { stroke: var(--brief); stroke-width: 2.5; }
+.ov-wire.moving { stroke: var(--motion); stroke-width: 3.5; filter: drop-shadow(0 0 5px rgba(255,93,85,.7)); }
+.ov-span { stroke: #fff; stroke-width: 7; stroke-linecap: round; opacity: .9; filter: drop-shadow(0 0 8px rgba(255,93,85,.9)); }
+.ov-end text { fill: var(--fg); font: 600 13px var(--font); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+.ov-end text.st { fill: var(--muted); font-weight: 500; font-size: 12px; }
+.ov-end.router circle:not(.ov-halo) { fill: #1d2733; stroke: var(--accent); stroke-width: 2.5; }
+.ov-end.device rect { fill: #1d2733; stroke: #9aa5b8; stroke-width: 2; }
+.ov-end.board rect { fill: #1d2733; stroke: var(--still); stroke-width: 3; }
+.ov-end.board.moving rect { stroke: var(--motion); fill: rgba(255,93,85,.25); }
+.ov-end.board.still rect { stroke: var(--present); }
+.ov-end.board.empty rect { stroke: var(--empty); }
+.ov-end.board.gone rect { stroke: var(--brief); stroke-dasharray: 4 3; }
+.ov-halo { fill: rgba(255,93,85,.18); stroke: rgba(255,93,85,.7); stroke-width: 1.5; animation: ov-halo 1.6s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes ov-halo { 0% { transform: scale(.7); opacity: 1; } 100% { transform: scale(1.4); opacity: 0; } }
+.ov-lab { fill: var(--muted); font: 600 11px var(--font); letter-spacing: 1px; text-transform: uppercase; }
+.ov-empty { fill: var(--muted); font: 14px var(--font); }
+.ov-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px; }
+.ov-legend .lg { display: inline-block; width: 18px; height: 4px; border-radius: 2px; margin-right: 6px; vertical-align: middle; background: #33404f; }
+.ov-legend .lg.moving { background: var(--motion); } .ov-legend .lg.recent { background: var(--brief); }
+.ov-legend .lg.off { background: repeating-linear-gradient(90deg, #33404f 0 3px, transparent 3px 7px); }
+.ov-legend .lg.hot { width: 10px; height: 10px; border-radius: 50%; background: rgba(255,93,85,.35); border: 1px solid var(--motion); }
+
+.ov-grid2 { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--gap); align-items: start; }
+@media (max-width: 860px) { .ov-grid2 { grid-template-columns: 1fr; } .ov-head-text { font-size: 20px; } }
+.ov-rules { display: grid; gap: 8px; }
+.ov-rule { display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 10px; align-items: center;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card2); }
+.ov-rule.firing { border-color: var(--motion); box-shadow: 0 0 0 1px rgba(255,93,85,.4) inset; }
+.ov-rule.off { opacity: .55; }
+.ov-acts { display: flex; gap: 4px; flex-wrap: wrap; }
+.ov-act { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: transparent; color: var(--muted); }
+.ov-act.on { color: #061113; background: var(--accent); border-color: var(--accent); }
+@media (max-width: 600px) { .ov-rule { grid-template-columns: auto 1fr; } .ov-acts { grid-column: 1 / -1; } }
+.ov-editor { margin-top: 12px; padding: 14px; border: 1px solid var(--accent); border-radius: 10px; display: grid; gap: 10px; }
+.ov-editor h3 { margin: 0; font-size: 15px; }
+.ov-editor .field { display: grid; gap: 4px; }
+.ov-editor input[type=text], .ov-editor select { background: var(--card2); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font: inherit; }
+.ov-ed-boards, .ov-ed-acts { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.ov-ed-boards label, .ov-ed-acts label { display: inline-flex; gap: 6px; align-items: center; }
+.ov-ed-btns { display: flex; gap: 8px; }
+.ov-recent { display: grid; gap: 6px; max-height: 340px; overflow: auto; }
+.ov-ev { display: grid; grid-template-columns: 70px 1fr; gap: 8px; font-size: 13px; padding-left: 8px; border-left: 3px solid var(--line); }
+.ov-ev.automation { border-left-color: var(--accent); } .ov-ev.motion { border-left-color: var(--motion); } .ov-ev.health { border-left-color: var(--brief); }
+.ov-editor[hidden] { display: none; }

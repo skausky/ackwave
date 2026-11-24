@@ -38,7 +38,9 @@ def main():
     assert len(blob) < 400_000, len(blob)
     assert f['header']['badge']['word'] in ('STILL', 'MOTION', 'CALIBRATING')
     assert f['score']['series'] and f['window'][1] > f['window'][0]
-    assert 'links' not in sl and dict(sl['settings'], hub=None) == {'per_link': False, 'peer_links': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': []}
+    assert 'links' not in sl and dict(sl['settings'], hub=None, rules=None) == {'per_link': False, 'peer_links': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': [], 'rules': None}
+    r0 = sl['settings']['rules'][0]                 # the old settings became the first alert rule
+    assert r0['boards'] == [] and r0['need'] == 'any' and r0['where'] == 'any' and r0['buzz'], r0
     assert sent[:2] == ['SOUND', 'SENS'], "asks the board for its buzzer and threshold settings"
     assert sl['timeline']['end'] >= sl['timeline']['start']
     f600 = dash.fast(600)
@@ -137,8 +139,8 @@ def main():
     assert dash.command({'cmd': 'settings', 'per_link': True})[0]
     saved = json.load(open(os.path.join(tmp, 'dashboard.json')))
     assert len(saved.pop('board_secret') or '0' * 64) == 64, "the boards' secret, if a board was seen"
-    assert dict(saved, hub=None) == {
-        'per_link': True, 'peer_links': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': [],
+    assert dict(saved, hub=None, rules=None) == {
+        'per_link': True, 'peer_links': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': [], 'rules': None,
         'light': {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120},
         'notify': {'enabled': False, 'token': '', 'user': '', 'quiet_min': 10, 'max_day': 50, 'hours': None,
                    'urgent': False, 'offline': True, 'zones_only': False}}
@@ -600,9 +602,10 @@ def other_boards(tmp):
 
 
 def device_alerts(tmp):
-    """Device links you tick drive the alerts (light, and the board's LED and
-    buzzer via EXT) once their slow window confirms; the board's verdict is
-    never touched."""
+    """A wire of the hub's that moves (here a device link) makes the hub
+    'moving' for the alert rules (light, and the board's LED and buzzer via
+    EXT) once its slow window confirms, never on a lone spike; the board's own
+    verdict is never touched. A rule watching another board stays quiet."""
     import numpy as np
     rng = np.random.default_rng(7)
 
@@ -650,8 +653,9 @@ def device_alerts(tmp):
     assert 'EXT,1' in sent and calls[:1] == ['https://example.com/on'], (sent[-3:], calls)
     assert not d.s.board_motion and not d.s.det.motion, "the board's own verdict is untouched"
     sl = d.slow(30)
-    row = [r for r in sl['radio'] if r['key'] == mac][0]
-    assert row['alerts'] and row['alerting'] and d.fast(30)['header']['alerting'] == [d.s.devices.link_label(10)]
+    hub = [b for b in sl['bstates'] if b['key'] == 'hub'][0]
+    assert hub['state'] == 'moving' and not hub['own'] and hub['by'], hub     # moving by its device wire
+    assert any(e['type'] == 'automation' and e['text'].startswith("Alert 'Movement'") for e in d.events)
     n = sent.count('EXT,1')
     d.ext_at -= 2                                    # a second later: told again (the board holds it 5 s)
     d.tick()
@@ -660,16 +664,17 @@ def device_alerts(tmp):
     assert sent[-1] == 'EXT,0' or 'EXT,0' in sent, sent[-5:]
     assert calls[-1] == 'https://example.com/off'
 
-    # an unticked device link sees the same motion: no alerts
+    # a rule that only watches another board: the hub's motion sets nothing off
     d2, sent2, calls2 = make()
-    d2.command({'cmd': 'alerts', 'keys': [other]})
+    assert d2.command({'cmd': 'rules', 'rules': [dict(id='x', name='Board 2', boards=['sat:' + other], light=True, buzz=True)]})[0]
+    assert not d2.command({'cmd': 'rules', 'rules': [dict(boards=['kitchen'])]})[0], "checked"
     run(d2, 40); run(d2, 10, wild_dev=True)
     assert 'EXT,1' not in sent2 and calls2 == []
     # no board (a demo or a file): never
     d3, sent3, calls3 = make(send=False)
     d3.cfg['alerts'] = [mac]
     run(d3, 40); run(d3, 10, wild_dev=True)
-    assert sent3 == [] and calls3 == [] and d3.fast(30)['header']['alerting'] == []
+    assert sent3 == [] and calls3 == []
 
 
 def pages_and_debug(tmp):
@@ -679,12 +684,14 @@ def pages_and_debug(tmp):
     mapjs = open(os.path.join(here, 'map.js')).read()
     html = open(os.path.join(here, 'index.html')).read()
     # Names from the network (devices, networks, labels) only ever go in as text
+    homejs = open(os.path.join(here, 'home.js')).read()
     for bad in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval('):
-        assert bad not in js and bad not in mapjs, bad
-    routes = ['home', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings']
+        assert bad not in js and bad not in mapjs and bad not in homejs, bad
+    assert '<script src="home.js"></script>' in html
+    routes = ['home', 'classic', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings']
     for r in routes:
         assert f'data-page="{r}"' in html and f'href="#/{r}"' in html, r
-    assert "const ROUTES = ['home', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];" in js
+    assert "const ROUTES = ['home', 'classic', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];" in js
     assert '<script src="map.js"></script>' in html and 'localStorage' not in mapjs, "the layout lives on the PC"
     assert 'data-page="train"' not in html and 'data-page="ai"' not in html, "no placeholder pages"
     assert js.count('new EventSource(') == 1, "one live connection for every page"

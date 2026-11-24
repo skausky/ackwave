@@ -1561,7 +1561,7 @@ window.AckMap = (() => {
         ctx.setLineDash([]);
         ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'center';
         ctx.fillStyle = occ ? css('--motion') : css('--accent');
-        ctx.fillText(z.name + (occ ? ' · motion' : '') + (z.light ? ' 💡' : '') + (z.notify ? ' 🔔' : ''), X(m.x), Y(m.y) + r + 14);
+        ctx.fillText(z.name + (occ ? ' · motion' : '') + '', X(m.x), Y(m.y) + r + 14);
         ctx.restore();
         continue;
       }
@@ -1575,7 +1575,7 @@ window.AckMap = (() => {
       ctx.setLineDash([]);
       ctx.font = '600 12px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
       ctx.fillStyle = occ ? css('--motion') : css('--accent');
-      ctx.fillText(z.name + (z.watch ? ' · watched' : '') + (occ ? ' · someone here' : '') + (z.light ? ' 💡' : '') + (z.notify ? ' 🔔' : ''), x + 6, y + 5);
+      ctx.fillText(z.name + (z.watch ? ' · watched' : '') + (occ ? ' · someone here' : '') + '', x + 6, y + 5);
       if (!readOnly) {                               // the corner to resize it
         ctx.beginPath(); ctx.arc(x + w, y + h, 6, 0, Math.PI * 2);
         ctx.fillStyle = css('--accent'); ctx.fill();
@@ -1969,11 +1969,6 @@ window.AckMap = (() => {
     for (const z of M.zones) {
       const name = el('button', { type: 'button', className: 'ghost small', textContent: z.name });
       name.onclick = () => { const v = prompt('Name this zone (e.g. Front door, Stairs, Kitchen)', z.name); if (v) { z.name = v.slice(0, 32); dirty = true; zonesEl = null; renderList(); scheduleSave(); } };
-      const box = (label, key) => {
-        const cb = el('input', { type: 'checkbox', checked: !!z[key] });
-        cb.onchange = () => { z[key] = cb.checked; dirty = true; zonesEl = null; renderList(); scheduleSave(); };
-        return el('label', { className: 'check small' }, cb, label);
-      };
       const del = el('button', { type: 'button', className: 'ghost small', textContent: 'Remove' });
       del.onclick = () => { M.zones = M.zones.filter((q) => q !== z); dirty = true; zonesEl = null; renderList(); scheduleSave(); };
       let watchBox = null;
@@ -1983,7 +1978,7 @@ window.AckMap = (() => {
         watchBox = el('label', { className: 'check small', title: 'Place people only in this area (e.g. the house with the routers); movement elsewhere is ignored' }, cb, 'watch only here');
       }
       det.append(el('div', { className: 'map-zone-row' }, name, z.near ? el('span', { className: 'muted small', textContent: 'near it' }) : null,
-        watchBox, box('turns on the light', 'light'), box('notify me', 'notify'), box('only at night', 'night'), del));
+        watchBox, del));                               // the phone and the light: Home → Alerts
     }
     const add = el('button', { type: 'button', textContent: 'Draw a zone on the map' });
     add.onclick = () => setZoneDraw(true);
@@ -2000,7 +1995,7 @@ window.AckMap = (() => {
     det.append(add, nearSel, el('p', { className: 'muted small', textContent:
       'A zone near a router or board lights up when the links that meet there react together: motion at that end, from any board, even if you never placed the router. ' +
       'If any zone "turns on the light", the light follows only those zones (alerts keep the whole house).' }), el('p', { className: 'muted small', textContent:
-      'Drag a zone to move it, its corner dot to resize it. When someone walks in, the live stream says so; with "notify me", your phone too (Settings, Phone notifications: same wait and daily cap). Tracking is about 2 m accurate, so make zones room-sized.' }));
+      'Drag a zone to move it, its corner dot to resize it. When someone walks in, the live stream says so. The phone and the light are set on Home → Alerts. Tracking is about 2 m accurate, so make zones room-sized.' }));
     zonesEl = det;
     return det;
   }

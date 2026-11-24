@@ -15,7 +15,7 @@ const C = {
   cal: css('--cal'), long: css('--long'), blue: css('--blue'), card: css('--card'), card2: css('--card2'),
 };
 const FONT = '11px ui-sans-serif, system-ui, sans-serif';
-const ROUTES = ['home', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];
+const ROUTES = ['home', 'classic', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];
 
 let win = 30, paused = false, es = null;
 let link = null;                         // per-link focus for breathing / Doppler (null = router)
@@ -717,7 +717,7 @@ function renderHist() {
   if (!eps.length) list.append(el('li', { className: 'muted small', textContent: `No motion on the boards in the last ${histH} h.` }));
   $('#hist-state').textContent = eps.length ? `${eps.length} stretch${eps.length > 1 ? 'es' : ''} of motion` : '';
 }
-setInterval(() => { if (page === 'home') loadHist(); }, 5000);
+setInterval(() => { if (page === 'classic') loadHist(); }, 5000);
 
 function renderHome() {
   renderBoards();
@@ -755,7 +755,7 @@ async function loadWhere() {
   } catch (e) {
     $('#where-state').textContent = 'could not load';
   }
-  if (page === 'home') { drawWhere(); renderWhereList(); renderActList(); }
+  if (page === 'classic') { drawWhere(); renderWhereList(); renderActList(); }
 }
 function whereRange(h) {
   where.hours = h; where.sel = null;
@@ -763,7 +763,7 @@ function whereRange(h) {
   for (const b of $('#where-range').children) b.classList.toggle('on', +b.dataset.h === h);
   loadWhere();
   clearInterval(where.timer);                       // short ranges move quickly: refresh them more often
-  if (page === 'home') where.timer = setInterval(loadWhere, h < 0.1 ? 2000 : h <= 1 ? 5000 : 20000);
+  if (page === 'classic') where.timer = setInterval(loadWhere, h < 0.1 ? 2000 : h <= 1 ? 5000 : 20000);
 }
 for (const b of $('#where-range').children) b.onclick = () => whereRange(+b.dataset.h);
 function whereEvents() {
@@ -1253,7 +1253,7 @@ function renderFast() {
   renderHeader(fast.header);
   renderActHome();
   if (page === 'activity') { renderActNow(); renderTeach(); }
-  if (page === 'map' || page === 'home') window.AckMap.update(null, fast.header);   // the board's verdict pulses the router link
+  if (page === 'map' || page === 'classic') window.AckMap.update(null, fast.header);   // the board's verdict pulses the router link
   if (!paused) drawLive(true);
 }
 
@@ -1264,7 +1264,7 @@ function drawLive(force = false) {
   const now = performance.now();
   if (!force && now - lastFrame < 33) return;
   lastFrame = now;
-  if (page === 'home') drawScore('#home-live', true);
+  if (page === 'classic') drawScore('#home-live', true);
   else if (page === 'graphs') {
     drawScore(); drawBreath();
     if (force || now - lastDop > 100) { drawDoppler(); lastDop = now; }   // the heavy one: 10 a second
@@ -1281,7 +1281,8 @@ function renderSlow() {
   const n = slow.network;
   $('#net').textContent = n && n.ap_list && n.ap_list.length ? `${n.ap_list.length} chosen access point${n.ap_list.length > 1 ? 's' : ''}`
     : n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
-  if (page === 'home') { renderHome(); drawTimeline('#home-tl', true); drawWhere(); window.AckMap.update(slow, fast && fast.header); }
+  if (page === 'home' && window.Overview) window.Overview.render();
+  else if (page === 'classic') { renderHome(); drawTimeline('#home-tl', true); drawWhere(); window.AckMap.update(slow, fast && fast.header); }
   else if (page === 'graphs') drawTimeline();
   else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderRouters(); renderDev(); renderAlerts(); }
   else if (page === 'map') window.AckMap.update(slow, fast && fast.header);
@@ -1367,15 +1368,13 @@ function renderHouse() {
   $('#peer-links-note').textContent = devOff ? 'Devices (Links page) is Off: no board pokes anything, each other included.'
     : pl.checked ? '' : 'Off: the boards are told to stop poking each other, and are checked again whenever they report (after a restart too).';
   // which boards count (their motion still shows on their tiles and the timeline)
-  const box = $('#house-use');
+  const box = $('#house-cmds');
   // rebuilt only when something in it changed: a tap on a button being replaced is lost (phones)
   const sig = JSON.stringify((h.sources || []).map((x) => [x.key, x.name, x.use, x.cmd && [x.cmd.what, x.cmd.state]]));
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
   box.replaceChildren(...(h.sources || []).map((src) => {
-    const cb = el('input', { type: 'checkbox', checked: src.use });
-    cb.onchange = () => cmd({ cmd: 'house_use', key: src.key, use: cb.checked });
-    const lab = el('label', { className: 'house-use' }, cb, el('span', { textContent: src.name }));
+    const lab = el('span', { className: 'house-use' }, el('b', { textContent: src.name }));   // which boards alert: Home → Alerts
     if (src.key === 'board') return lab;
     // the board's own controls, sent from the air through the hub
     const act = (text, body) => {
@@ -2085,12 +2084,12 @@ function route() {
   document.body.dataset.page = page;
   // The map you set up on the Map page also shows on Home, view only
   if (page === 'map') { window.AckMap.mount(null, false); window.AckMap.show(); }
-  else if (page === 'home') { window.AckMap.mount('#home-map-slot', true); window.AckMap.show(); }
+  else if (page === 'classic') { window.AckMap.mount('#home-map-slot', true); window.AckMap.show(); }
   else window.AckMap.hide();
   clearInterval(statsTimer);
   if (page === 'stats') { loadStats(); statsTimer = setInterval(loadStats, 60000); }
   clearInterval(where.timer);
-  if (page === 'home') whereRange(where.hours);
+  if (page === 'classic') whereRange(where.hours);
   if (page === 'settings' && !netScanned && fast && fast.header.board_connected &&
       slow && slow.network && slow.network.state === 'idle') { netScanned = true; cmd({ cmd: 'scan' }); }
   renderPage();

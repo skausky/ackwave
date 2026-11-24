@@ -233,8 +233,20 @@ class SatLink:
         self.flags = flags
         self.q_s = self.q_l = None        # its quiet levels
         self.moving = False
+        self.moving_since = None
         self.ks = self.kl = 0.0
         self.at = self.t_last = None
+
+    CONFIRM_S = 1.0
+
+    @property
+    def confirmed(self):
+        """Moving, and not a lone spike: its slow (4 s) window agrees, or it has
+        moved for CONFIRM_S (two reports in a row)."""
+        if not self.moving or self.q_l is None:
+            return False
+        return self.kl >= self.ON_LONG * self.OFF * self.q_l or \
+            (self.moving_since is not None and self.at - self.moving_since >= self.CONFIRM_S)
 
     def feed(self, ks, kl, now):
         self.ks, self.kl, self.at = ks, kl, now
@@ -249,6 +261,10 @@ class SatLink:
             self.moving = rs > self.ON_SHORT * self.OFF or rl > self.ON_LONG * self.OFF
         else:
             self.moving = rs >= self.ON_SHORT or rl >= self.ON_LONG
+        if self.moving and self.moving_since is None:
+            self.moving_since = now
+        elif not self.moving:
+            self.moving_since = None
         if not self.moving:               # learn the quiet level only while quiet
             a = 1 - math.exp(-dt / self.TAU_S)
             self.q_s += a * (max(ks, 0.3) - self.q_s)

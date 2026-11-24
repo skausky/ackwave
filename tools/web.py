@@ -50,6 +50,8 @@ from mlfeat import Shadow
 import mltrain
 import autofit
 import linkpick
+import wires
+import triggers
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LED_MODES, LED_PATTERNS, LONG_C, MOTION_C,
                  SCAN_C, STILL_C, SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
 
@@ -105,6 +107,17 @@ EVENTS_MAX = 300                               # events kept for the live stream
 EVENT_TYPES = ('motion', 'automation', 'health', 'calib', 'device', 'network')                           # another board's motion keeps the alert on this long after
 ACT_HOLD_S = 3.0                              # an activity counts once it lasts this long (no flicker)
 ACT_NOT_KEPT = ('uncalibrated', 'no-data', 'unknown')   # shown, but not filed in the timeline
+
+
+def det_level(det, now_s):
+    """A detector's level now: 1.0 = at its motion threshold (the larger of its two windows)."""
+    f = det.floor
+    if not f or f <= 0 or not now_s:
+        return 0.0
+    ms, ml = det.max_scores(int(now_s * 1e6))
+    if ms is None:
+        return 0.0
+    return round(max(ms / (det.c['on_short'] * f), ml / (det.c['on_long'] * f)), 2)
 
 
 class LinkDetector:
@@ -260,6 +273,14 @@ class Dashboard:
         self.user_touch = {}             # node key -> when you last moved it (the automatic fit leaves it a day)
         self.autofit_state = dict(at=None, note='', moved={})   # the Pi's last automatic router fit
         self._autofit_busy = False
+        self.wires = wires.Wires()               # which end of the wires movement is near (no map needed)
+        self.wv = None                           # the wires as last judged (tick)
+        self.wire_ok = {}                        # the hub's link src -> its motion confirmed by the slow window
+        self.bstates = {}                        # board key -> its one state for the page and the alerts
+        self.board_since = {}                    # board key -> (state, since)
+        self.trig = triggers.Triggers()          # the alert rules (Home: Alerts)
+        self.trig_active = []
+        self.rule_off_at = {}                    # rule id -> when it last ended (phone: quiet_min before the next)
         self.picker = linkpick.LinkPicker()      # which devices each board pings: learned over time
         self.picker_off = {}                     # (board, device) -> when the picker dropped it
         self._picker_loaded = False
@@ -299,7 +320,7 @@ class Dashboard:
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
         self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, board_names={}, act_place=0, hub=None, paired=[],
-                        house_rule='confirm', house_off=[])   # house_off: boards that don't count   # sound, sens: kept on the board; None = its own
+                        house_rule='confirm', house_off=[], rules=None)   # house_off: boards that don't count   # sound, sens: kept on the board; None = its own
         # Device links that drive the alerts (light, buzzer, LED) besides the board:
         # src -> True once that link's slow window confirmed its current motion
         self.confirmed = {}
@@ -355,6 +376,12 @@ class Dashboard:
         if isinstance(ho, list) and len(ho) <= SAT_MAX + 1:
             self.cfg['house_off'] = sorted({k.lower() for k in ho if isinstance(k, str) and
                                             (k == 'board' or MAC_RE.fullmatch(k))})
+        rl = got.get('rules')
+        if isinstance(rl, list):                 # the alert rules (None: made from the old settings at the first tick)
+            try:
+                self.cfg['rules'] = [triggers.clean_rule(r, i) for i, r in enumerate(rl[:triggers.MAX_RULES])]
+            except ValueError:
+                self.cfg['rules'] = None
         pr = got.get('paired')
         if isinstance(pr, list) and len(pr) <= SAT_MAX:
             self.cfg['paired'] = sorted({m.lower() for m in pr if isinstance(m, str) and MAC_RE.fullmatch(m)})
@@ -1102,6 +1129,13 @@ class Dashboard:
                 except Exception as e:
                     print(f"tracking: {e}", file=sys.stderr)
             self._board_period()
+            tj = self.s.now or time.monotonic()                     # the data's own clock: a replay too
+            if abs(tj - getattr(self, '_judge_at', -9.0)) >= 0.5:  # the rules twice a second
+                self._judge_at = tj
+                try:
+                    self._judge_step()
+                except Exception as e:
+                    print(f"wires/rules: {e}", file=sys.stderr)
             self._light_rule()
             if not line.startswith('CSI,'):
                 self._debug_line(line.rstrip('\r\n'))
@@ -1266,7 +1300,8 @@ class Dashboard:
                 n = len(self.tracker.people)
                 self._event('zone', f"Motion at {z['name']}" if 'near' in z else f"Someone in {z['name']}", None,
                             important=bool(z.get('notify') or z.get('light')))
-                if z.get('notify') and self.send and now - self.zone_said.get(z['id'], 0) >= 60 * self.notify.cfg['quiet_min']:
+                if z.get('notify') and not self.cfg.get('rules') and self.send \
+                        and now - self.zone_said.get(z['id'], 0) >= 60 * self.notify.cfg['quiet_min']:   # rules replace this
                     paths = self._paths_now()
                     if self.notify.zone(f"Movement in {z['name']}" + (f" · seen on {', '.join(paths)}" if paths else '')
                                         + (f" · {n} people" if n > 1 else ''), z.get('night')):
@@ -1368,6 +1403,80 @@ class Dashboard:
                 f.write(json.dumps(rec, separators=(',', ':')) + '\n')
         except OSError:
             pass
+
+    def _wires_view(self, tj=None):
+        """Every wire the boards report (their router, device and board links),
+        each with which end the movement is near, from which wires share an end.
+        Needs no placement: see wires.py."""
+        now = time.time()
+        hub = (self.cfg['hub'] or self.s.me or '').lower()
+        ends, pairs = {}, {}
+
+        def board_end(m):
+            k = 'hub' if m == hub else 'sat:' + m
+            ml = self.mlb.get(k)
+            pres = None
+            if ml and now - ml['at'] <= 10:
+                pres = ('empty', 'still', 'moving')[max(range(3), key=lambda i: ml['p'][i])]
+            br = self.breath.get(k)
+            if br and now - br['at'] <= 10 and br['level'] == 'clear' and pres != 'moving':
+                pres = 'still'                          # breathing heard: someone there, not moving
+            ends[k] = dict(kind='board', name='Hub' if k == 'hub' else self.board_label(m), presence=pres)
+            return k
+
+        def far_end(o, flags):
+            if o == hub or o in self.sats or o in self.cfg['paired']:
+                return board_end(o)
+            if flags & 2:
+                ends['r:' + o] = dict(kind='router', name=self._router_label(o))
+                return 'r:' + o
+            ends[o] = dict(kind='device', name=self.s.devices.name(o) or 'device ' + o[-5:])
+            return o
+
+        def add(a, b, moving, level):
+            key = tuple(sorted((a, b)))
+            old = pairs.get(key)
+            if old is None or old['moving'] is None:
+                pairs[key] = dict(a=a, b=b, moving=moving, level=level)
+            elif moving is not None:                    # both directions of a board link: one wire
+                old['moving'] = old['moving'] or moving
+                old['level'] = max(old['level'], level)
+
+        for sat, lk in self.sat_links.items():
+            d = self.sats.get(sat)
+            if not d:
+                continue
+            a = board_end(sat)
+            gone = now - d['at'] > SAT_GONE_S
+            for o, ln in lk.items():
+                fresh = not gone and ln.at is not None and now - ln.at <= SAT_GONE_S
+                add(a, far_end(o, ln.flags), ln.confirmed if fresh else None, wires.level_of(ln) if fresh else 0.0)
+        if self.s.wall_off is not None:                  # the hub's own links (its address may not be known yet)
+            a = board_end(hub)
+            fresh = self.s.source_status() is None   # data flowing
+            if self.cfg['per_link'] and self.links:
+                for src, ln in self.links.items():
+                    k = self._src_key(src)
+                    if not k:
+                        continue
+                    mac = self.s.nodes.get(src) if k.startswith('ap:') else k
+                    if not mac:
+                        continue
+                    md = ln['md']
+                    ok = fresh and not md.weak
+                    if not md.motion:                    # not a lone spike: its slow window confirmed it
+                        self.wire_ok[src] = False
+                    elif md.det.m_long:
+                        self.wire_ok[src] = True
+                    add(a, far_end(mac.lower(), 2 if src < MAX_APS else 0), bool(md.motion and self.wire_ok.get(src)) if ok else None,
+                        det_level(md.det, self.s.now) if ok else 0.0)
+            elif self.s.nodes.get(0):
+                f = self.s.det.floor
+                add(a, far_end(self.s.nodes[0].lower(), 2), bool(self.s.board_motion) if fresh and f > 0 else None,
+                    det_level(self.s.det, self.s.now))
+        view = self.wires.update(list(pairs.values()), ends, now if tj is None else tj)
+        side, text = wires.headline(view)
+        return dict(view, side=side, headline=text)
 
     def _people(self):
         """For the page: the Pi's tracking (works with no page open), the zones, and
@@ -1755,8 +1864,102 @@ class Dashboard:
                 self._track_step()
             except Exception as e:           # tracking must never stop the dashboard
                 print(f"tracking: {e}", file=sys.stderr)
+            try:
+                self._judge_step()
+            except Exception as e:           # the wires and rules must never stop the dashboard
+                print(f"wires/rules: {e}", file=sys.stderr)
             self._light_rule()
             self._flush()
+
+    def _judge_clock(self):
+        """The clock the wires and rules hold and wait by: the data's own time while
+        the hub's data flows (a replay runs at its own pace), real time when it
+        stalls (so a rule that is on still ends). Never goes back."""
+        w = time.time()
+        prev, prev_w = getattr(self, '_tj', None), getattr(self, '_tj_w', w)
+        lw = self.s.last_wall if self.s.source_status() is None else None
+        if prev is None:
+            tj = lw or w
+        elif lw is None:
+            tj = prev + (w - prev_w)
+        else:
+            tj = max(prev, lw)
+        self._tj, self._tj_w = tj, w
+        return tj
+
+    def _judge_step(self):
+        """Twice a second: the wires, each board's one state, and the alert rules on them."""
+        now = self._judge_clock()
+        if self.cfg.get('rules') is None:                # first run: the old settings become a rule
+            self.cfg['rules'] = triggers.migrate(self.cfg, self._layout().get('zones', []))
+            if self.send:                                # a file or demo input writes no settings
+                self._save_settings()
+        self.trig.rules = self.cfg['rules']
+        self.wv = self._wires_view(now)
+        self.bstates = self._board_states(self.wv, time.time())
+        self.trig_active = self.trig.update({k: dict(moving=b['moving'], near_me=b['near_me']) for k, b in self.bstates.items()
+                                             if b['state'] not in ('gone', 'calibrating')}, now)
+        on = {r['id'] for r, _s in self.trig_active}
+        for r in self.cfg['rules']:
+            if r['id'] not in on and self.trig.state.get(r['id'], {}).get('since') is not None:
+                self.rule_off_at.setdefault(r['id'], now)
+        for r, started in self.trig_active:
+            off_at = self.rule_off_at.pop(r['id'], None) if started else None
+            if not started:
+                self.rule_off_at.pop(r['id'], None)
+                continue
+            names = ', '.join(self.bstates[k]['name'] for k in self.trig.state[r['id']]['boards'] if k in self.bstates)
+            where = next((w['text'] for w in (self.wv or {}).get('words', [])), '')
+            self._event('automation', f"Alert '{r['name']}': {names}" + (f" · {where}" if where else ''), 'rule:' + r['id'],
+                        important=True)
+            quiet = 60 * self.notify.cfg['quiet_min']
+            if r['notify'] and self.send and (off_at is None or now - off_at >= quiet):   # quiet_min since it ended
+                if self.notify.zone(f"{r['name']}: {names}" + (f" · {where}" if where else '')):
+                    self._event('automation', f"Phone notified · {r['name']}", 'notify')
+
+    def _board_states(self, wv, now):
+        """One state per board, from everything it has: its own verdict, every
+        wire it reports, its learned model and its breathing reading. The page
+        and the alerts both use this, so a tile never says 'still' while one of
+        that board's wires moves."""
+        hub = (self.cfg['hub'] or self.s.me or '').lower()
+        rows = []
+        if hub or self.s.wall_off is not None:
+            fresh = self.s.source_status() is None   # data flowing
+            g = self.s.devices.gate.get(0) or {}
+            rows.append(('hub', 'Hub', fresh, self.s.det.floor > 0, self._motion_now(),
+                         dict(acks=round(self.s.rate((0, 1))) if self.s.now else 0, router_rssi=g.get('rssi', 0) or 0,
+                              weak=g.get('state') in ('weak', 'silent'), via='usb')))
+        for m, d in sorted(self.sats.items()):
+            rows.append(('sat:' + m, self.board_label(m), now - d['at'] <= SAT_GONE_S, d['calibrated'], bool(d['motion']),
+                         dict(acks=d['acks'], router_rssi=d['router_rssi'], weak=d['weak'], via=d.get('via', 'air'),
+                              heard_rssi=d.get('rssi'), slots=d.get('links', 0))))
+        out = {}
+        names = {e: (wv['ends'].get(e) or {}).get('name', e) for e in wv['ends']}
+        for k, name, online, cal, own, extra in rows:
+            mine = [w for w in wv['wires'] if k in (w['a'], w['b'])]
+            moving_w = [w for w in mine if w['state'] == 'moving']
+            far = lambda w: w['b'] if w['a'] == k else w['a']
+            end = wv['ends'].get(k, {})
+            ml = self.mlb.get(k)
+            model = bool(ml and now - ml['at'] <= 10)
+            br = self.breath.get(k)
+            breathing = br['level'] if br and now - br['at'] <= 10 else None
+            moving = online and cal and (own or bool(moving_w))
+            pres = end.get('presence')
+            state = ('gone' if not online else 'calibrating' if not cal else 'moving' if moving else
+                     'still' if pres == 'still' else 'empty' if pres == 'empty' else 'quiet')
+            was = self.board_since.get(k)
+            if not was or was[0] != state:
+                self.board_since[k] = (state, now)
+            out[k] = dict(key=k, name=name, state=state, since=r2(self.board_since[k][1]), moving=moving,
+                          own=bool(own) and online, near_me=bool(end.get('hot')) and moving,
+                          by=[names.get(far(w), far(w)) for w in moving_w],
+                          wires=[dict(to=names.get(far(w), far(w)), state=w['state'], level=w['level']) for w in mine],
+                          model=model, learned=(('empty', 'still', 'moving')[max(range(3), key=lambda i: ml['p'][i])]
+                                                if model else None), p=ml['p'] if model else None,
+                          breathing=breathing, **extra)
+        return out
 
     def _src_key(self, src):
         """A link's key as the Map page and the alerts list name it."""
@@ -1789,41 +1992,21 @@ class Dashboard:
         return out
 
     def _light_rule(self):
-        """The alerts: the light (on the PC) and the board's LED and buzzer (EXT).
+        """The alerts, all from the rules (Home: Alerts): the light, and the hub's
+        LED and buzzer (EXT). The phone is told in _judge_step when a rule starts.
         Only a live board drives them: demo or file input (no board to send to)
-        never does, or a demo's fake motion would switch a real plug. The board's
-        own verdict counts, plus the device links you ticked."""
-        motion, by = self._house()
+        never does, or a demo's fake motion would switch a real plug."""
+        self._house()                                # the House lane on the timeline
         if not self.send and not self.demo:
             return
-        now_m = time.monotonic()
-        if any(b != 'board' for b in by):            # another board sees motion: held a while, so a
-            self.others_until = now_m + OTHERS_HOLD_S  # burst of movement is one alert, not ten
-        ext = bool(self._alerting()) or now_m < getattr(self, 'others_until', 0.0)
+        active = self.trig_active
+        light_rules = [r for r, _s in active if r['light']]
+        ext = any(r['buzz'] for r, _s in active)
         was = self.light.on
-        board_words = [('Hub' if b == 'board' else 'board ' + self.board_label(b)) for b in by]
-        # Zones that switch the light (Map page): then only motion in them counts for
-        # the light (the alerts and the boards' LED and buzzer keep the house verdict)
-        lz = [z for z in self._layout().get('zones', []) if z.get('light')]
-        if lz:
-            light_by = [z['name'] for z in lz if self.zone_in.get(z['id'])]
-            self.light.update(bool(light_by))
-        else:
-            light_by = board_words or (['a device link'] if ext else [])
-            self.light.update(motion or ext)
-        names = board_words
-        where = (self._where_words() if motion or ext else '') or ', '.join(names) or ('a device link' if ext else '')
-        if motion or ext:
-            paths = self._paths_now()
-            if paths:
-                where = (where + ' · ' if where else '') + 'seen on ' + ', '.join(paths)
-        if self.notify.update(motion or ext, where):
-            self._event('automation', 'Phone notified · motion', 'notify')
+        self.light.update(bool(light_rules))
         if self.light.on != was and self.light.on is not None and self.light.cfg.get('enabled'):
-            src = ', '.join(light_by) or 'a device link'
-            self._event('automation', f"Light on · motion at {src}" if self.light.on else
-                        ('Light off · the zones are still' if lz else 'Light off · the house is still'),
-                        'light', important=True)
+            self._event('automation', f"Light on · {', '.join(r['name'] for r in light_rules)}" if self.light.on
+                        else 'Light off · its alerts are quiet', 'light', important=True)
         now = time.monotonic()
         if ext and (not self.ext_sent or now - self.ext_at >= EXT_EVERY_S):
             self.s.outbox.append('EXT,1')
@@ -2025,6 +2208,20 @@ class Dashboard:
                 self._save_settings()
                 name = 'The hub' if key == 'board' else self.board_label(key)
                 msg = f"{name} {'counts' if use else 'no longer counts'} for the light and alerts"
+            elif what == 'rules':                    # the alert rules, the whole list from the page
+                rl = c.get('rules')
+                if not isinstance(rl, list) or len(rl) > triggers.MAX_RULES:
+                    return False, 'bad rules'
+                try:
+                    rules = [triggers.clean_rule(r, i) for i, r in enumerate(rl)]
+                except ValueError as e:
+                    return False, f'bad rule: {e}'
+                if len({r['id'] for r in rules}) != len(rules):
+                    return False, 'two rules with one id'
+                self.cfg['rules'] = rules
+                self.trig.rules = rules
+                self._save_settings()
+                msg = f"Alerts saved ({len(rules)} rule{'s' if len(rules) != 1 else ''})"
             elif what == 'house_rule':
                 if c.get('rule') not in HOUSE_RULES:
                     return False, 'bad rule'
@@ -2403,6 +2600,11 @@ class Dashboard:
             s = self.s
             out = dict(devices=self._devices(), network=self._network(), details=self._details(),
                        routers=self._routers(), boards=self._boards(), house=self._house_slow(), tz=PC_TZ,
+                       wires=self.wv or self._wires_view(),
+                       bstates=list(self.bstates.values()),
+                       rules=dict(list=self.cfg.get('rules') or [], state=self.trig.view(time.time()),
+                                  notify_ready=bool(self.notify.cfg.get('enabled') and self.notify.cfg.get('token')),
+                                  light_ready=bool(self.light.cfg.get('enabled'))),
                        map_boards=self._map_boards(), hearings=self._hearings(), tracked=self._people(),
                        teach=self._teach_view(),
                        demo_people=list(self.demo_people.values()) if self.demo else None, events=list(self.events)[-80:],

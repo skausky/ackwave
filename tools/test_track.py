@@ -151,7 +151,7 @@ def main():
     assert abs(d.tracker.model_err - 2.5) < 0.01 and d._people()['model_err'] == 2.5, d.tracker.model_err
     words = d._where_words()
     assert words.startswith('someone') and 'the hub' in words and 'within' in words, words
-    # a zone near a router switches the light; board motion elsewhere doesn't
+    # a zone near a router: someone there is counted and logged (the light and the phone: Home → Alerts)
     import time as _t
     calls = []
     d = Dashboard(State(60), send=lambda c: None, sessions_dir=tmp, settings=os.path.join(tmp, 'dashboard.json'), light_call=lambda url: (calls.append(url) or (True, 'ok')),
@@ -163,13 +163,13 @@ def main():
     d.tracker.near = dict(key='r:aa:bb', t=_t.time())
     d._track_step()
     d._light_rule()
-    assert d.zone_in.get('n1') == 1 and d.light.on is True and calls[-1].endswith('/on'), (d.zone_in, d.light.on, calls)
+    assert d.zone_in.get('n1') == 1 and calls == [], "a zone no longer switches the light by itself"
     assert any('Motion at Near router' in e['text'] for e in d.events)
     d.tracker.near = dict(key='sat:' + ':'.join(['11', '22', '33', '44', '55', '66']), t=_t.time())   # motion at a board instead
     d.tracker.at = None
     d._track_step()
     d._light_rule()
-    assert d.zone_in.get('n1') == 0 and d.light.on is False, (d.zone_in, d.light.on)
+    assert d.zone_in.get('n1') == 0, d.zone_in
     print(f'tracking median error {np.median(errs):.2f} m')
     # watched house over there, boards on your side: movement at a board is your side
     import track as T
