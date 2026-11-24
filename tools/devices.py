@@ -172,6 +172,7 @@ class Devices:
         self.refused = {}                # mac -> (time, why)
         self.bad_since = {}
         self.board_seen = False          # any DEV / POKING / STATS seen yet
+        self.allow_boards = True         # links to other ackwave boards (the dashboard's 'Links between boards')
 
     def forget_network(self):
         """The board now watches another network: what it heard on the old one
@@ -289,7 +290,7 @@ class Devices:
         if self.mode == 'off':
             return set()
         if self.mode == 'manual':
-            return set(sorted(self.manual)[:MAX_DEVS])
+            return set([m for m in sorted(self.manual) if self.allow_boards or not self._is_board(m)][:MAX_DEVS])
 
         def ok(dv):
             r = self.refused.get(dv.mac)
@@ -297,14 +298,23 @@ class Devices:
 
         if self.mode == 'auto':
             cands = [dv for dv in self.devs.values()
-                     if ok(dv) and self.status(dv, now)[0] in ('board', 'stationary')]
+                     if ok(dv) and self.status(dv, now)[0] in (('board', 'stationary') if self.allow_boards else ('stationary',))]
             cands.sort(key=lambda dv: (dv.mac not in self.poking, not dv.board, -dv.rssi, dv.mac))
         else:                                            # all: most active first
             cands = [dv for dv in self.devs.values()
-                     if ok(dv) and dv.tx > 0
+                     if ok(dv) and dv.tx > 0 and (self.allow_boards or not dv.board)
                      and self.status(dv, now)[0] not in ('gone', 'dropped', 'board_other')]
             cands.sort(key=lambda dv: (dv.mac not in self.poking, not dv.board, -dv.tx_rate(now), dv.mac))
         return {dv.mac for dv in cands[:MAX_DEVS]}
+
+    def _is_board(self, mac):
+        dv = self.devs.get(mac)
+        return dv is not None and dv.board
+
+    def set_boards(self, allow):
+        """Links to other boards allowed or not. Returns commands."""
+        self.allow_boards = bool(allow)
+        return self.reconcile()
 
     def reconcile(self):
         """Commands that move the board from what it pokes to what we want."""

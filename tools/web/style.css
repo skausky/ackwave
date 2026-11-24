@@ -682,3 +682,5 @@ body.simple .map-link > div.muted.small { display: none; }       /* per-link tec
 .hist-row.link .hist-bar { height: 9px; }
 .hist-row.link .hist-bar i { background: #ff9f43; }
 .hist-paths { color: #ff9f43; }
+.field-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.board-tile .warn, #peer-links-note { color: var(--brief); }

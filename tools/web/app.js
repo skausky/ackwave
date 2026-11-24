@@ -508,7 +508,12 @@ function renderBoards() {
       el('div', { className: 'bt-meter', title: 'How close its link is to the motion threshold (the mark)' },
         el('div', { className: 'bt-fill', style: `width:${pct}%` })),
       ['unpaired', 'quiet'].includes(b.state) ? null : el('div', { className: 'muted small', textContent:
-        `router ${b.acks}/s · ${b.router_rssi} dBm${b.weak ? ' · weak link' : ''} · ${b.links} other link${b.links === 1 ? '' : 's'} · ${b.via === 'usb' ? 'on USB' : `heard at ${b.rssi} dBm, sealed`}` }),
+        `router ${b.acks}/s · ${b.router_rssi} dBm${b.weak ? ' · weak link' : ''} · ${b.via === 'usb' ? 'on USB' : `heard at ${b.rssi} dBm, sealed`}` }),
+      ['unpaired', 'quiet', 'gone'].includes(b.state) ? null : el('div', { className: 'small' + (b.policy ? ' warn' : ' muted'),
+        title: 'What the board itself reports poking now (a poke that never answers is counted, but has no name)', textContent:
+        (b.pokes && b.pokes.length ? `pokes ${b.pokes.join(', ')}` : 'pokes no devices or boards')
+        + (b.links > (b.pokes || []).length ? ` · ${b.links - (b.pokes || []).length} slot${b.links - (b.pokes || []).length > 1 ? 's' : ''} not answering` : '')
+        + (b.policy ? ` · being stopped (${b.policy})` : '') }),
       ren);
   }));
 }
@@ -1356,6 +1361,11 @@ function renderHouse() {
     }
   for (const b of seg.children) b.classList.toggle('on', b.dataset.r === h.rule);
   $('#house-state').textContent = `${h.boards} boards`;
+  const devOff = !!(slow.devices && slow.devices.mode === 'off'), pl = $('#set-peer-links');
+  pl.checked = !!(slow.settings && slow.settings.peer_links !== false) && !devOff;
+  pl.disabled = devOff;
+  $('#peer-links-note').textContent = devOff ? 'Devices (Links page) is Off: no board pokes anything, each other included.'
+    : pl.checked ? '' : 'Off: the boards are told to stop poking each other, and are checked again whenever they report (after a restart too).';
   // which boards count (their motion still shows on their tiles and the timeline)
   const box = $('#house-use');
   // rebuilt only when something in it changed: a tap on a button being replaced is lost (phones)
@@ -1740,6 +1750,7 @@ function renderDebug() {
   drawTrace('#gap', 'gap', [[dbg.scan_gap_ms, 'scan gap', C.scan], [60, 'blips likelier', C.brief]], 150, (v) => `${v.toFixed(0)} ms`);
   fillRows($('#calibs'), [...dbg.calibs].reverse().map((c) => [clock(c.t, true), c.phase, c.why, c.floor > 0 ? c.floor.toFixed(4) : '–']), 'nothing yet');
   fillRows($('#sent'), [...dbg.sent].reverse().map(([t, c]) => [clock(t, true), c]), 'nothing sent yet');
+  fillRows($('#policy'), [...(dbg.policy || [])].reverse().map(([t, b, c, why]) => [clock(t, true), b, c, why]), 'every board follows the settings');
   fillRows($('#refused'), [...dbg.refused].reverse().map(([t, line, last]) => [clock(t, true), line, last || '–']), 'none refused');
   const pre = $('#tail'), keep = tailFilter ? tailFilter.split(',') : null;
   const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
@@ -2136,6 +2147,7 @@ $('#led-color').onchange = () => setLed({});
 $('#led-default').onclick = () => cmd({ cmd: 'led', mode: 'default' });
 $('#snd-default').onclick = () => cmd({ cmd: 'sound', mode: 'default' });
 $('#set-per-link').onchange = (e) => cmd({ cmd: 'settings', per_link: e.target.checked });
+$('#set-peer-links').onchange = (e) => cmd({ cmd: 'settings', peer_links: e.target.checked });
 $('#net-scan').onclick = () => { netScanned = true; cmd({ cmd: 'scan' }); };
 $('#aps-use').onclick = () => {
   const macs = [...apPick];

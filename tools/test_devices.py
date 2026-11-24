@@ -219,6 +219,16 @@ def test_other_boards():
         d2.devs[m].tx, d2.devs[m].rssi, d2.devs[m].last_heard = 100, -55, clk.t
     d2.feed('peer', dict(mac=B1, rssi=-75, n=3, age_ms=0, ch=6, same=True))
     check(B1 in d2.desired() and len(d2.desired()) == MAX_DEVS, d2.desired())
+    # 'Links between boards' off: no board in any mode, and the one poked now is dropped
+    d.poking = {B1: 8, TV: 9}
+    check(d.set_boards(False) == [f"UNPOKE,{B1}"], 'the board link goes')
+    check(B1 not in d.desired() and TV in d.desired(), d.desired())
+    d.set_mode('all')
+    check(B1 not in d.desired(), 'all: no board either')
+    d.manual, d.mode = {B1, TV}, 'manual'
+    check(d.desired() == {TV}, 'manual: even a ticked board')
+    d.set_mode('off')
+    check(d.desired() == set() and set(d.reconcile()) == {f"UNPOKE,{B1}", f"UNPOKE,{TV}"}, 'off: nothing at all')
 
 
 def test_drop_silent_and_reboot_resync():

@@ -38,7 +38,7 @@ def main():
     assert len(blob) < 400_000, len(blob)
     assert f['header']['badge']['word'] in ('STILL', 'MOTION', 'CALIBRATING')
     assert f['score']['series'] and f['window'][1] > f['window'][0]
-    assert 'links' not in sl and dict(sl['settings'], hub=None) == {'per_link': False, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': []}
+    assert 'links' not in sl and dict(sl['settings'], hub=None) == {'per_link': False, 'peer_links': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': []}
     assert sent[:2] == ['SOUND', 'SENS'], "asks the board for its buzzer and threshold settings"
     assert sl['timeline']['end'] >= sl['timeline']['start']
     f600 = dash.fast(600)
@@ -138,7 +138,7 @@ def main():
     saved = json.load(open(os.path.join(tmp, 'dashboard.json')))
     assert len(saved.pop('board_secret') or '0' * 64) == 64, "the boards' secret, if a board was seen"
     assert dict(saved, hub=None) == {
-        'per_link': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': [],
+        'per_link': True, 'peer_links': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': [],
         'light': {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120},
         'notify': {'enabled': False, 'token': '', 'user': '', 'quiet_min': 10, 'max_day': 50, 'hours': None,
                    'urgent': False, 'offline': True, 'zones_only': False}}

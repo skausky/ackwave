@@ -326,6 +326,107 @@ def follow_network():
     assert sent2 == ['USE,Net'], sent2
 
 
+def poke_policy():
+    """The settings reach every board, judged on what each one reports, not
+    on what was asked: Devices Off stops all pokes on the satellites too (the
+    pokes they restore from their own memory after a restart as well); links
+    between boards off stops only board links; Manual keeps only your picks.
+    The switch is saved, and a board on USB follows it too."""
+    import tempfile
+    S1, S2 = mac(0xc4, 0x9e, 0x7e, 1, 1, 1), mac(0x68, 0x9d, 0xd2, 2, 2, 2)
+    DEV, PICK = mac(0x5c, 0xaa, 0xfd, 9, 9, 9), mac(0x5c, 0xaa, 0xfd, 8, 8, 8)
+    BSSID = mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf1)
+    seq = [10]
+
+    def sat(d, S, links):
+        seq[0] += 1
+        d.feed(f'SAT,{S},-40,{seq[0]},2,20,15,96,-57,{links},60,{BSSID},6\n')
+
+    def tick(d, sent):
+        sent.clear()
+        d._peer_at = 0
+        d.tick()
+        return [c for c in sent if c.startswith('SATCMD,')]
+
+    def done(d, S):
+        d.feed(f'SATCMD,{S},done,{seq[0]}\n')
+
+    tmp = tempfile.mkdtemp()
+    sent = []
+    d = Dashboard(State(60), send=sent.append, settings=os.path.join(tmp, 'dashboard.json'))
+    d.feed(f'ME,{FIRST}\n')
+    for S in (S1, S2):
+        sat(d, S, 2)
+    d.feed(f'SATL,{S1},{S2}:4:22:21,{DEV}:4:5:5\n')            # S1 links to S2 and to a device
+    d.feed(f'SURV,{S1},{S2}:1:-60,{FIRST}:1:-55,{DEV}:2:-60\n')
+    # Off: every board stops, the board links included, and nothing is asked for
+    assert d.command(dict(cmd='mode', mode='off'))[0]
+    got = tick(d, sent)
+    assert f'SATCMD,{S1},UNPOKE,all' in got and f'SATCMD,{S2},UNPOKE,all' in got, got
+    assert not any(',POKE,' in c for c in got), got
+    assert d._boards()[-2]['policy'] == 'Devices: Off', d._boards()
+    for S in (S1, S2):
+        done(d, S)
+    assert not tick(d, sent), "not re-sent at once"
+    for S in (S1, S2):
+        sat(d, S, 0)                                            # both report no slots in use
+    assert not tick(d, sent), "nothing left to stop, and nothing asked for"
+    # S1 restarts and pokes what it saved on the board (silent: no link scores yet)
+    sat(d, S1, 2)
+    assert tick(d, sent) == [], "not more often than every 30 s"
+    d._sat_policy_at.clear()
+    assert tick(d, sent) == [f'SATCMD,{S1},UNPOKE,all'], "found again from what the board reports"
+    done(d, S1)
+    sat(d, S1, 0)
+    assert not tick(d, sent)
+    assert d._boards()[-2]['pokes'] == [] and d._boards()[-2]['policy'] is None
+    # Auto, but links between boards off: only the board link goes, no board link asked for
+    assert d.command(dict(cmd='mode', mode='auto'))[0]
+    ok, msg = d.command(dict(cmd='settings', peer_links=False))
+    assert ok and 'Links between boards off' in msg, msg
+    sat(d, S1, 2)
+    d.feed(f'SATL,{S1},{S2}:4:22:21,{DEV}:4:5:5\n')
+    got = tick(d, sent)
+    assert f'SATCMD,{S1},UNPOKE,{S2}' in got and not any(',POKE,' in c for c in got), got
+    done(d, S1)
+    sat(d, S1, 1)
+    d.feed(f'SATL,{S1},{DEV}:4:5:5\n')
+    sat(d, S2, 0)
+    got = tick(d, sent)
+    assert not any(f',POKE,{S1}' in c or f',POKE,{S2}' in c or f',POKE,{FIRST}' in c for c in got), got
+    assert json.load(open(os.path.join(tmp, 'dashboard.json')))['peer_links'] is False, "saved"
+    d2 = Dashboard(State(60), settings=os.path.join(tmp, 'dashboard.json'))
+    assert d2.cfg['peer_links'] is False, "and read back after a restart"
+    assert d2.s.devices.allow_boards is False, "the hub's own Auto mode leaves boards out too"
+    # back on: board links are asked for again at once (earlier tries forgotten)
+    assert d.command(dict(cmd='settings', peer_links=True))[0]
+    for S in (S1, S2):
+        done(d, S)
+    got = tick(d, sent)
+    assert f'SATCMD,{S1},POKE,{S2}' in got, got
+    # Manual: a device that isn't one of your picks goes; your pick is asked for
+    done(d, S1)
+    d.s.devices.mode, d.s.devices.manual = 'manual', {PICK}
+    d.feed(f'SURV,{S1},{S2}:1:-60,{FIRST}:1:-55,{DEV}:2:-60,{PICK}:2:-62\n')
+    sat(d, S1, 1)
+    d.feed(f'SATL,{S1},{DEV}:4:5:5\n')
+    got = tick(d, sent)
+    assert f'SATCMD,{S1},UNPOKE,{DEV}' in got, got
+    done(d, S1)
+    sat(d, S1, 0)
+    got = tick(d, sent)
+    assert f'SATCMD,{S1},POKE,{PICK}' in got, got
+    # a board on USB here follows the policy too, from the POKING lines it prints
+    usb = []
+    d.command(dict(cmd='mode', mode='off'))
+    d.feed_other(S2, 'POKING,8,' + DEV + '\n', send=usb.append)
+    d.feed_other(S2, 'STATS,1000000,1,0,0,0,0,0,0,0\n', send=usb.append)
+    d.others[S2].s.devices.poking = {DEV: 8}
+    tick(d, sent)
+    assert usb == ['UNPOKE,all'], usb
+    assert any(row[3] == 'Devices: Off' for row in d.policy_log), list(d.policy_log)
+
+
 def live_stream_and_demo():
     """The demo house: three boards (one joining late), a person walking, a
     device joining, the simulated light; and the live stream it produces."""
@@ -420,6 +521,7 @@ if __name__ == '__main__':
     house()
     sat_links()
     follow_network()
+    poke_policy()
     live_stream_and_demo()
     tagged_stream()
     ports()

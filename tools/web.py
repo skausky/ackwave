@@ -67,7 +67,7 @@ MAP_UNITS, MAP_ENVS = ('ft', 'm'), ('outdoor', 'open', 'home', 'cluttered')
 FAST_S, SLOW_S, DEBUG_S = 0.25, 1.0, 2.0     # update periods of the three event types
 TAIL_N = 250                                # board lines kept for the Debug page (not CSI)
 TODAY_S = 10.0                              # today's totals: recomputed this often
-SETTINGS = {'per_link': False}              # dashboard settings (sessions/dashboard.json)
+SETTINGS = {'per_link': False, 'peer_links': True}            # dashboard settings (sessions/dashboard.json)
 
 
 THRESHOLD_KEYS = ('on_short', 'off_short', 'on_long', 'off_long', 'short_gate')
@@ -240,6 +240,9 @@ class Dashboard:
         self.sat_cmds = {}               # MAC -> the last command sent to it through the hub, and its state
         self.follow = None               # a network switch waiting for the other boards to confirm
         self.peer_tries = {}             # (board, other board) -> (pokes asked, when): links between the boards
+        self.policy_log = deque(maxlen=40)  # (when, board, command, why): settings enforced on the boards (Debug)
+        self.sat_policy_state = {}       # board -> why it is being brought in line with the settings now (None: it is)
+        self._sat_policy_at, self._usb_policy_at, self._ghost_since = {}, {}, {}
         self.out = None                  # the hub's light output as it last said (OUT lines)
         self.breath = {}                 # 'hub' / 'sat:<mac>' -> its latest breathing reading (BREATH lines)
         self.mlb = {}                    # 'hub' / 'sat:<mac>' -> its learned model's last second (ML lines)
@@ -355,6 +358,8 @@ class Dashboard:
         pr = got.get('paired')
         if isinstance(pr, list) and len(pr) <= SAT_MAX:
             self.cfg['paired'] = sorted({m.lower() for m in pr if isinstance(m, str) and MAC_RE.fullmatch(m)})
+        self.cfg['peer_links'] = bool(self.cfg.get('peer_links', True))
+        state.devices.allow_boards = self.cfg['peer_links']   # the hub's own board links follow it too
         # Light on motion: web hooks called when motion starts / the room goes still
         if demo:                         # a light that only pretends: the demo shows the automation
             self.light = Light(dict(enabled=True, on_url='http://demo.invalid/on', off_url='http://demo.invalid/off',
@@ -890,8 +895,19 @@ class Dashboard:
                             level=round(max(d['k_short'], d['k_long']), 2), weak=d['weak'],
                             acks=d['acks'], router_rssi=d['router_rssi'], links=d['links'],
                             up_s=d['up_s'], heard_s=round(now - d['at'], 1), rssi=d['rssi'],
-                            since=r2(d['since']), via=d.get('via', 'air')))
+                            since=r2(d['since']), via=d.get('via', 'air'),
+                            pokes=self._sat_pokes(mac, now), policy=self.sat_policy_state.get(mac)))
         return out
+
+    def _sat_pokes(self, mac, now):
+        """What a board says it pokes now (not what was asked): each link it reports, named."""
+        ob = self.others.get(mac)
+        if ob is not None and ob.send and self.sats.get(mac, {}).get('via') == 'usb':
+            keys = sorted(ob.s.devices.poking)
+        else:
+            keys = sorted(o for o, ln in self.sat_links.get(mac, {}).items()
+                          if not (ln.flags & 2) and ln.at is not None and now - ln.at <= SAT_GONE_S)
+        return [self._target_key(o, 0)[1] for o in keys]
 
     def _link_key(self, src):
         if src < MAX_APS:
@@ -1475,20 +1491,114 @@ class Dashboard:
         cx, cy = (n['hint'][0], n['hint'][1]) if n.get('hint') else (n['x'], n['y'])
         return [End(cx, cy, z)]
 
+    def _sat_policy(self):
+        """What the other boards may poke, from the settings (the hub's own pokes
+        follow the same Devices mode through devices.py):
+          devices  Devices mode not Off (Off: no board pokes anything at all)
+          boards   links between the boards (Settings, and not Off)
+          manual   the devices you ticked, when the mode is Manual (else None)"""
+        mode = self.s.devices.mode
+        return dict(devices=mode != 'off', boards=mode != 'off' and bool(self.cfg.get('peer_links', True)),
+                    manual=set(self.s.devices.manual) if mode == 'manual' else None)
+
+    def _sat_unwanted(self, sat, pol, boards, n_dev, links, now):
+        """(command, why) that brings one satellite back within the policy, or None.
+        Judged on what the board itself reports, not on what was asked: its
+        number of device slots in use (n_dev, every hello, silent pokes too) and
+        the links whose scores it reports now. So a poke the board restored from
+        its own memory after a restart, or one asked for before the setting
+        changed, is found and undone too."""
+        if not pol['devices']:
+            return ('UNPOKE,all', 'Devices: Off') if n_dev > 0 or links else None
+        for o in sorted(links):
+            is_board = o in boards or o in self.sats
+            if is_board and not pol['boards']:
+                return f'UNPOKE,{o}', 'links between boards off'
+            if not is_board and pol['manual'] is not None and o not in pol['manual']:
+                return f'UNPOKE,{o}', 'Devices: Manual, not one of your picks'
+        if pol['manual'] is not None and n_dev > len(links):      # a slot poking something we can't see
+            t0 = self._ghost_since.setdefault(sat, now)
+            pend = any(now - at < PEER_RETRY_S for (s, _o), (_n, at) in self.peer_tries.items() if s == sat)
+            if not pend and now - t0 >= 120:
+                self._ghost_since.pop(sat, None)
+                return 'UNPOKE,all', 'Devices: Manual, a slot pokes something that never answers'   # picks asked for again
+        else:
+            self._ghost_since.pop(sat, None)
+        return None
+
+    def _sat_order(self, sat, line, why, now):
+        """One command for a satellite, through the hub (one at a time per board)."""
+        self.s.outbox.append(f'SATCMD,{sat},{line}')
+        self.sat_cmds[sat] = dict(line=line, state='sent', at=now)
+        self.policy_log.append((now, sat, line, why))
+        verb, _, o = line.partition(',')
+        what = 'all its links' if o == 'all' else self._target_key(o, 0)[1]
+        print(f"{self.board_label(sat)}: {verb.lower()} {what} ({why})", flush=True)
+
+    def _enforce_usb_others(self, pol, now):
+        """Boards on USB here (not the hub) are watched, not driven, but they
+        still follow the poke policy: what they report poking is checked too."""
+        boards = set(self.sats) | {(self.cfg['hub'] or self.s.me or '').lower()}
+        for m, ob in self.others.items():
+            if not ob.send or not ob.s.devices.board_seen:
+                continue
+            poking = set(ob.s.devices.poking)
+            if not pol['devices']:
+                bad = ['all'] if poking else []
+            else:
+                bad = [o for o in sorted(poking) if ((o in boards) and not pol['boards']) or
+                       (o not in boards and pol['manual'] is not None and o not in pol['manual'])]
+            if not bad or now - self._usb_policy_at.get(m, 0.0) < 30:
+                continue
+            self._usb_policy_at[m] = now
+            line = f'UNPOKE,{bad[0]}'
+            try:
+                ob.send(line)
+                self.sent_cmds.append((now, f'{m[-5:]}: {line}'))
+                self.policy_log.append((now, m, line, 'settings (USB)'))
+            except Exception as e:
+                print(f"command not sent ({line}): {e}", file=sys.stderr)
+
     def _peer_step(self):
-        """Links between the boards: each satellite pokes up to PEER_POKE_MAX boards it
-        hears well (other satellites first, then the hub), asked through the hub one
-        command at a time. A board link has both ends exactly where you placed them:
-        the map's most trustworthy kind. Needs firmware that takes POKE from the air."""
-        if not self.send or not self.cfg.get('peer_links', True):
+        """What the satellites poke. First the settings are enforced on what each
+        board reports (Devices Off: nothing; Links between boards off: no board
+        links; Manual: only your picks). Then, where allowed, each satellite pokes
+        up to PEER_POKE_MAX boards it hears well (other satellites first, then the
+        hub), asked through the hub one command at a time. A board link has both
+        ends exactly where you placed them: the map's most trustworthy kind. Needs
+        firmware that takes POKE from the air."""
+        if not self.send:
             return
         now = time.time()
         if now - getattr(self, '_peer_at', 0.0) < 5:
             return
         self._peer_at = now
+        pol = self._sat_policy()
+        key = (pol['devices'], pol['boards'], tuple(sorted(pol['manual'])) if pol['manual'] is not None else None)
+        if key != getattr(self, '_pol_key', key):
+            self.peer_tries.clear()                      # a setting changed: links may be asked for again at once
+            self.picker_off.clear()
+        self._pol_key = key
+        self._enforce_usb_others(pol, now)
         hub = (self.cfg['hub'] or self.s.me or '').lower()
         live = {m for m, d in self.sats.items() if now - d['at'] <= SAT_GONE_S and d.get('via') != 'usb'}
         boards = live | ({hub} if hub else set())
+        for sat in sorted(live):
+            c = self.sat_cmds.get(sat)
+            if 'sat:' + sat in self.mlw_q or (c and c.get('state') in ('sent', 'queued') and now - c.get('at', 0) < 60):
+                continue
+            lk = self.sat_links.get(sat, {})
+            reporting = {o for o, ln in lk.items() if not (ln.flags & 2) and ln.at is not None and now - ln.at <= SAT_GONE_S}
+            got = self._sat_unwanted(sat, pol, boards, self.sats[sat].get('links', 0), reporting, now)
+            self.sat_policy_state[sat] = got[1] if got else None
+            if got and now - self._sat_policy_at.get((sat, got[0]), 0.0) >= 30:   # re-sent until the board shows it
+                line, why = got
+                self._sat_policy_at[(sat, line)] = now
+                for o in (reporting if line == 'UNPOKE,all' else {line.split(',', 1)[1]}):
+                    lk.pop(o, None)                      # its scores stop: no longer one of its links
+                self._sat_order(sat, line, why, now)
+        if not pol['devices']:
+            return                                       # Off: nothing is ever asked for
         m = self._layout()
         wz = next((z for z in m.get('zones', []) if z.get('watch')), None)
         targets = None
@@ -1517,7 +1627,7 @@ class Dashboard:
                          and not me_in and not in_zone(wz, *((0.0, 0.0) if o == hub else where.get('sat:' + o, (1e9, 1e9))))]
                 spare.sort(key=lambda o: (o == hub, -(heard.get(o, {}).get('rssi') or -100)))
                 spare = spare[1:]                        # one stays: your side's tripwire (it firing = movement here)
-                if spare:
+                if spare and pol['boards']:
                     o = spare[-1]
                     self.picker_off.setdefault(sat, {})[o] = now
                     self.s.outbox.append(f'SATCMD,{sat},UNPOKE,{o}')
@@ -1526,8 +1636,14 @@ class Dashboard:
                     print(f"{self.board_label(sat)}: freeing the slot of its link to "
                           f"{'the hub' if o == hub else self.board_label(o)} (keeps one board link as your side's tripwire)", flush=True)
                     continue
-                pinned = (set(self.s.devices.manual) if self.s.devices.mode == 'manual' else set()) & set(devs)   # your picks on the Devices page: on every board that hears them
-                act = self.picker.choose(sat, devs, linked, pinned)
+                pinned = (pol['manual'] or set()) & set(devs)   # your picks on the Devices page: on every board that hears them
+                if pol['manual'] is not None:            # Manual: exactly your picks, nothing learned on top
+                    act = next((('poke', d) for d in sorted(pinned - linked)
+                                if self._peer_may(sat, d, now)), None)
+                    if act:
+                        self.peer_tries[(sat, act[1])] = (self.peer_tries.get((sat, act[1]), (0, 0.0))[0] + 1, now)
+                else:
+                    act = self.picker.choose(sat, devs, linked, pinned)
                 if act:
                     verb, dev = act
                     off = self.picker_off.setdefault(sat, {})
@@ -1547,12 +1663,16 @@ class Dashboard:
             else:
                 cands = sorted((m for m, e in heard.items() if e['kind'] == 'board' and m in boards and m != sat
                                 and now - e['at'] < 60 and e['rssi'] > PEER_MIN_RSSI),
-                               key=lambda m: (m == hub, -heard[m]['rssi']))
+                               key=lambda m: (m == hub, -heard[m]['rssi'])) if pol['boards'] else []
                 linked = {m for m in self.sat_links.get(sat, {}) if m in boards}
-            for other in [m for m in cands if m not in linked][:max(0, PEER_POKE_MAX - len(linked))]:
-                n, at = self.peer_tries.get((sat, other), (0, 0.0))
-                if n >= PEER_TRIES or now - at < PEER_RETRY_S:
+                picks = sorted(m for m in (pol['manual'] or ()) if m in heard and heard[m]['kind'] == 'device'
+                               and now - heard[m]['at'] < 60 and m not in self.sat_links.get(sat, {}))
+                free = MAX_DEVS - self.sats[sat].get('links', 0)
+                cands = (picks + [m for m in cands if m not in linked][:max(0, PEER_POKE_MAX - len(linked))])[:max(0, free)]
+            for other in cands:
+                if not self._peer_may(sat, other, now):
                     continue
+                n = self.peer_tries.get((sat, other), (0, 0.0))[0]
                 self.peer_tries[(sat, other)] = (n + 1, now)
                 self.s.outbox.append(f'SATCMD,{sat},POKE,{other}')
                 self.sat_cmds[sat] = dict(line=f'POKE,{other}', state='sent', at=now)
@@ -1560,6 +1680,11 @@ class Dashboard:
                       f"{'the hub' if other == hub else self.board_label(other) if other in boards else self.s.devices.name(other) or 'a device'}",
                       flush=True)
                 break
+
+    def _peer_may(self, sat, other, now):
+        """A link not asked for too often: PEER_TRIES times, PEER_RETRY_S apart."""
+        n, at = self.peer_tries.get((sat, other), (0, 0.0))
+        return n < PEER_TRIES and now - at >= PEER_RETRY_S
 
     def _switch_network(self, line, what):
         """A new network for the hub: the other boards are told first (through
@@ -1911,11 +2036,15 @@ class Dashboard:
                 if not changed:
                     return False, 'nothing to change'
                 self.cfg.update(changed)
+                if 'peer_links' in changed:          # the hub's own board links too
+                    self.s.outbox += self.s.devices.set_boards(self.cfg['peer_links'])
                 if not self.cfg['per_link']:
                     self._drop_links()               # free the analysers
                 self._save_settings()
-                msg = 'Per-link analysis on (experimental)' if self.cfg['per_link'] \
-                    else 'Per-link analysis off'
+                self._peer_at = 0.0                  # the boards are brought in line at the next tick
+                words = {'per_link': ('Per-link analysis on (experimental)', 'Per-link analysis off'),
+                         'peer_links': ('Links between boards on', 'Links between boards off: the boards stop poking each other')}
+                msg = ' · '.join(words[k][0 if v else 1] for k, v in changed.items())
             elif what == 'sound':
                 if not self.send:
                     return False, 'the buzzer needs a board'
@@ -2131,13 +2260,16 @@ class Dashboard:
                     return False, 'bad mode'
                 self.s.outbox += self.s.devices.set_mode(c['mode'])
                 self._save_prefs()
-                msg = f"Device mode: {c['mode']}"
+                self._peer_at = 0.0                  # every board follows at the next tick, not just the hub
+                msg = f"Device mode: {c['mode']}" + (' (every board stops poking devices and each other)'
+                                                     if c['mode'] == 'off' else '')
             elif what == 'toggle':
                 mac = c.get('mac', '')
                 if mac not in self.s.devices.devs:
                     return False, 'unknown device'
                 self.s.outbox += self.s.devices.toggle(mac)
                 self._save_prefs()
+                self._peer_at = 0.0
                 msg = 'Device list updated'
             else:
                 return False, 'unknown command'
@@ -2298,6 +2430,7 @@ class Dashboard:
             out = dict(calibs=list(self.calibs),
                        tail=[[r2(t), line] for t, line in self.tail],
                        sent=[[r2(t), c] for t, c in self.sent_cmds],
+                       policy=[[r2(t), self.board_label(m), c, why] for t, m, c, why in self.policy_log],
                        refused=[[r2(t), line, last] for t, line, last in self.refused])
             if s.wall_off is None:
                 return out
