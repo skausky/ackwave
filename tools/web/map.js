@@ -17,7 +17,15 @@ window.AckMap = (() => {
     cluttered: { label: 'Indoors, cluttered', n: 3.3 },
   };
   const PALETTE = ['#5fd4d0', '#4ea8ff', '#b48cff', '#ffb547', '#c3e88d', '#f78c6c', '#89ddff', '#ff7eb6'];
-  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  const cssMemo = new Map();
+  let cssAt = 0;
+  const css = (v) => {                     // style tokens, looked up once (not per wire per frame)
+    const n = performance.now();
+    if (n - cssAt > 2000) { cssMemo.clear(); cssAt = n; }
+    let x = cssMemo.get(v);
+    if (x === undefined) { x = getComputedStyle(document.documentElement).getPropertyValue(v).trim(); cssMemo.set(v, x); }
+    return x;
+  };
   const $ = (s) => document.querySelector(s);
   const el = (tag, props = {}, ...kids) => {
     const e = Object.assign(document.createElement(tag), props);
@@ -424,7 +432,8 @@ window.AckMap = (() => {
   function strength(r) {
     const q = (x) => Math.round(Math.min(3, Math.max(0, x)) * 20) / 20;
     if (r.link) return r.link.level !== undefined ? q(r.link.level) : r.link.moving ? 1.25 : 0;
-    if (r.board) return r.board.level !== undefined ? q(r.board.level / 2.8) : r.board.state === 'motion' ? 1.25 : 0;
+    // a board's level is already 1 = its threshold
+    if (r.board) return r.board.level !== undefined ? q(r.board.level) : r.board.state === 'motion' ? 1.25 : 0;
     if (r.key === 'ap:0') return hubAct !== null ? q(hubAct) : boardMotion ? 1.25 : 0;
     if (r.activity !== undefined && r.activity !== null) return q(r.activity / 2.8);
     return r.moving ? 1.25 : r.state === 'still' ? 0 : null;
@@ -2169,10 +2178,18 @@ window.AckMap = (() => {
     if (sc.view) body.view = sc.view;
     try {
       const r = await fetch('api/map', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ackwave': '1' }, body: JSON.stringify(body) });
+      if (!r.ok) throw new Error(`the Pi answered ${r.status}`);
       const j = await r.json().catch(() => null);
       if (j && j.map) takeRemote(j.map);
-    } catch (e) { /* the next change tries again */ }
+      saveFails = 0;
+    } catch (e) {                                      // said, and tried again (not only at the next change)
+      saveFails++;
+      if (saveFails === 1 && typeof window.toast === 'function') window.toast(`Map not saved (${e.message || 'no connection'}): trying again`, true);
+      clearTimeout(saveRetry);
+      saveRetry = setTimeout(save, Math.min(60000, 3000 * 2 ** Math.min(5, saveFails)));
+    }
   }
+  let saveFails = 0, saveRetry = null;
   // Another page's changes: taken where this page hasn't changed the same item
   function takeRemote(m) {
     if (drag) return;                                  // never under your finger
@@ -2196,7 +2213,13 @@ window.AckMap = (() => {
       if (m.floor_h) M.floorH = m.floor_h;
       M.hubFacing = typeof m.hub_facing === 'number' ? m.hub_facing : null;
     }
+    if (!edits.has('unit') && m.unit) M.unit = m.unit;
+    if (!edits.has('env') && m.env) M.env = m.env;
     baselineFrom(m);
+    // what this page doesn't take from the Pi here (pictures, the view) must not look like this
+    // page's own edit: it would be sent back and undo another page's change (a picture removed there)
+    const sc = sections();
+    for (const k of ['plans', 'view', 'unit', 'env']) if (!edits.has(k) && k in sc) base.secs[k] = JSON.stringify(sc[k]);
     floorsEl = null; zonesEl = null; locAt = 0; heatKey = ''; dirty = true;
   }
   async function pollMap() {
@@ -2833,7 +2856,7 @@ window.AckMap = (() => {
       renderList(); draw(performance.now());
     },
     // slow payload (once a second) and the header (the board's verdict)
-    update(slow, header) {
+    update(slow, header, quick) {                // quick: a fast event (10/s) only moves the picture, the list waits for slow
       if (slow && slow.tracked && slow.tracked.model_err) modelErr = slow.tracked.model_err;
       if (slow && slow.tracked) { yourSide = !!slow.tracked.your_side; unclear = !!slow.tracked.unclear; zoneIn = slow.tracked.zones || {}; breathing = slow.tracked.breathing || {}; todayMap = slow.tracked.today || null; learned = slow.tracked.learned || {}; }
       if (slow) { radio = slow.radio || []; others = slow.map_boards || []; routersInfo = slow.routers || []; hearings = slow.hearings || {}; demoPeople = slow.demo_people || []; if (slow.channel) channel = slow.channel; }
@@ -2866,7 +2889,7 @@ window.AckMap = (() => {
       }
       if (!visible || !loaded) return;
       dirty = true;
-      renderList();
+      if (!quick) renderList();
     },
     focus: focusKey,
     showPath,

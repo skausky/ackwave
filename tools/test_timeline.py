@@ -52,7 +52,7 @@ def dashboard():
     keys = {s[2] for s in r['spans']}
     assert {'board', 'ap:0'} <= keys, keys
     lanes = [l for l in r['lanes'] if l['key'] != 'house']    # the demo has a satellite: a house row too
-    assert lanes[0] == {'key': 'board', 'name': 'Board'} and r['per_link']
+    assert lanes[0] == {'key': 'board', 'name': 'Hub' if d.sats else 'Board'} and r['per_link']
     assert [l['name'] for l in r['lanes'] if l['key'] == 'ap:0'] == ['Router 1']
     assert all(s[0] <= s[1] for s in r['spans'])
     with open(os.path.join(tmp, f"timeline-{datetime.now().strftime('%Y-%m-%d')}.jsonl")) as f:

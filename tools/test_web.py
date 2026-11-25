@@ -353,6 +353,8 @@ def main():
         for src in _re.findall(r'<script src="([^"]+)"', open(os.path.join(HERE_WEB, 'index.html')).read()):
             st, body = request(port, 'GET', '/' + src)
             assert st == 200 and body, f'{src} not served'
+        st, body = request(port, 'GET', '/api/wires?hours=2', headers={'X-Ackwave': '1'})
+        assert st == 200 and {'t0', 'bin', 'n', 'wires', 'house'} <= set(json.loads(body))
         st, body = request(port, 'GET', '/api/sensors?hours=2', headers={'X-Ackwave': '1'})
         assert st == 200 and set(json.loads(body)) == {'log', 'now'}
         hdr = {'X-Ackwave': '1', 'Content-Type': 'application/json'}
@@ -653,6 +655,7 @@ def device_alerts(tmp):
 
     run(d, 40)                                       # both quiet: nothing
     assert 'EXT,1' not in sent and calls == []
+    d.cfg['rules'][0]['sure'] = 'possible'           # one ticked link alone is 'possible': this rule takes it
     run(d, 0.5, spike=True)                          # a lone spike on the device link: nothing
     run(d, 3)
     assert 'EXT,1' not in sent and calls == [], "a spike alone doesn't set the alerts off"

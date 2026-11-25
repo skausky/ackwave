@@ -19,8 +19,14 @@ def main():
     assert st == 'moving' and c > 0.9 and sensors.grade(c) == 'sure', (c, why)
     st, c, why = judge(b('moving', by=['Router 1']), 5)
     assert st == 'moving' and c <= 0.5 and 'one link alone' in why, (c, why)
+    st, c, why = judge(b('moving', by=['Router 1'], agree=['Router 1']), 1)
+    assert sensors.grade(c) == 'likely', (c, why)              # every board's link to that router reacts
     st, c, _ = judge(b('moving', own=True, level=1.0, weak=True), 5)
     assert c < 0.55, "a weak link halves the confidence"
+    c_graze = judge(b('moving', own=True, level=1.05), 3)[1]
+    c_long = judge(b('moving', own=True, level=1.05), 10)[1]
+    c_clear = judge(b('moving', own=True, level=1.8), 3)[1]
+    assert sensors.grade(c_graze) == 'possible' and sensors.grade(c_long) == 'likely' and c_clear >= 0.8, (c_graze, c_long, c_clear)
     assert judge(b('quiet', model=True, p=[85, 10, 5]))[0] == 'empty'
     assert judge(b('quiet', model=True, p=[5, 90, 5]))[0] == 'still'
     st, c, why = judge(b('quiet'))

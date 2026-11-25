@@ -160,13 +160,16 @@
 
   // ---------------------------------------------------------------- alerts
   const needText = (r, n) => (r.need === 'all' ? (n > 1 ? `all ${n} of them` : '') : r.need === 'any' ? (n > 1 ? 'any of them' : '') : `at least ${r.need}`);
+  const sureText = { possible: 'any hint of movement (more false alarms)', likely: 'likely movement or surer', sure: 'only sure movement (may miss small moves)' };
   const whereText = { any: 'anywhere on their wires', over: 'away from the boards (routers, devices, between)', yours: 'right by the boards' };
   function ruleText(r, names) {
     const who = r.boards.length ? r.boards.map((k) => names[k] || k).join(', ') : 'any board';
     const nt = needText(r, r.boards.length);
-    return `${who}${nt ? ` · ${nt}` : ''} · ${whereText[r.where]}`;
+    return `${who}${nt ? ` · ${nt}` : ''} · ${whereText[r.where]} · ${sureText[r.sure || 'likely']}`;
   }
-  function saveRules(list) { cmd({ cmd: 'rules', rules: list }); }
+  async function saveRules(list) {             // refused: the rows are drawn again from the Pi's list (a flipped switch flips back)
+    if (!(await cmd({ cmd: 'rules', rules: list }))) { const b = $h('#ov-rules'); if (b) delete b.dataset.sig; }
+  }
   function renderRules(R, bs) {
     const box = $h('#ov-rules');
     if (!R) return;
@@ -188,7 +191,7 @@
           onclick: () => { if (confirm(`Delete the alert '${r.name}'?`)) saveRules(list.filter((x) => x.id !== r.id)); } }));
     });
     const add = el('button', { type: 'button', textContent: '+ Add an alert', onclick: () => {
-      editing = { id: null, name: '', boards: [], need: 'any', where: 'any', notify: true, light: false, buzz: false, on: true };
+      editing = { id: null, name: '', boards: [], need: 'any', where: 'any', sure: 'likely', notify: true, light: false, buzz: false, on: true };
       renderEditor(bs, list);
     } });
     const sig = JSON.stringify([list, R.state, R.notify_ready, R.light_ready, bs.map((b) => [b.key, b.name])]);
@@ -210,7 +213,7 @@
       for (const [v, t] of opts) s.append(el('option', { value: v, textContent: t, selected: String(cur) === String(v) }));
       return s;
     };
-    const needOpts = [['any', 'any one of them'], ['all', 'all of them (within 3 s)'], ...[2, 3, 4].filter((n) => n <= Math.max(2, bs.length)).map((n) => [n, `at least ${n}`])];
+    const needOpts = [['any', 'any one of them'], ['all', 'all of them (within 3 s)'], ...[2, 3, 4].filter((n) => n <= Math.max(2, (r.boards && r.boards.length) || bs.length)).map((n) => [n, `at least ${n}`])];   // never more than the boards it watches
     box.replaceChildren(
       el('h3', { textContent: r.id ? 'Edit alert' : 'New alert' }),
       el('label', { className: 'field' }, el('span', { textContent: 'Name' }),
@@ -218,6 +221,7 @@
       el('div', { className: 'field' }, el('span', { textContent: 'Boards (none ticked = any board)' }), boardsBox),
       el('label', { className: 'field' }, el('span', { textContent: 'How many must see it' }), sel(needOpts, r.need, (v) => { r.need = /^\d+$/.test(v) ? Number(v) : v; })),
       el('label', { className: 'field' }, el('span', { textContent: 'Where' }), sel(Object.entries(whereText), r.where, (v) => { r.where = v; })),
+      el('label', { className: 'field' }, el('span', { textContent: 'How sure' }), sel(Object.entries(sureText), r.sure || 'likely', (v) => { r.sure = v; })),
       el('div', { className: 'ov-ed-acts' }, ...[['notify', 'Phone notification'], ['light', 'Switch the light'], ['buzz', "Hub's LED + buzzer"]].map(([k, t]) =>
         el('label', {}, el('input', { type: 'checkbox', checked: r[k], onchange: (e) => { r[k] = e.target.checked; } }), el('span', { textContent: t })))),
       el('div', { className: 'ov-ed-btns' },
@@ -234,7 +238,7 @@
   // ---------------------------------------------------------------- recent
   function renderRecent(evs) {
     const box = $h('#ov-recent');
-    const keep = (evs || []).filter((e) => ['automation', 'motion', 'health'].includes(e.type)).slice(-10).reverse();
+    const keep = (evs || []).filter((e) => ['automation', 'motion', 'health', 'sensor'].includes(e.type)).slice(-10).reverse();
     box.replaceChildren(...(keep.length ? keep.map((e) => el('div', { className: `ov-ev ${e.type}${e.important ? ' imp' : ''}` },
       el('span', { className: 'muted', textContent: clock(e.t, true) }), el('span', { textContent: e.text })))
       : [el('p', { className: 'muted', textContent: 'Nothing yet.' })]));
@@ -245,9 +249,18 @@
       if (!slow) return;
       const bs = slow.bstates || [], w = slow.wires || null;
       renderHead(w, bs);
-      $h('#ov-boards').replaceChildren(...(window.Sensors ? window.Sensors.cards(slow) : bs.map(boardCard)));
+      // redrawn when something in them changed (and every 5 s for the durations): a rebuild each
+      // second drops hover text and taps on phones
+      const cs = JSON.stringify([bs, (slow.sensors || {}).now, slow.sat_settings, slow.sat_cmds,
+        (slow.boards || []).map((b) => [b.mac, b.pokes, b.policy, b.reports_cfg]), Math.floor(Date.now() / 5000)]);
+      const bx = $h('#ov-boards');
+      if (bx.dataset.sig !== cs) {
+        bx.dataset.sig = cs;
+        bx.replaceChildren(...(window.Sensors ? window.Sensors.cards(slow) : bs.map(boardCard)));
+      }
       if (window.Sensors) window.Sensors.homeLog(slow);
-      renderWeb(w, bs);
+      const svg = $h('#ov-web'), ws = JSON.stringify([w, bs.map((b) => [b.key, b.state, b.near_me])]);
+      if (svg.dataset.sig !== ws) { svg.dataset.sig = ws; renderWeb(w, bs); }
       renderRules(slow.rules, bs);
       renderRecent(slow.events);
     },

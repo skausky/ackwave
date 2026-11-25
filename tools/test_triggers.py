@@ -54,6 +54,22 @@ def main():
                 [dict(watch=True, notify=True)])[0]
     assert r['boards'] == ['hub', S1] and r['need'] == 2 and r['where'] == 'over' and r['notify'] and r['light'], r
     assert migrate({}, [])[0]['boards'] == [] and migrate({}, [])[0]['where'] == 'any'
+    # how sure: a 'possible' movement (one link alone, a graze of the threshold) sets off only rules that ask for it
+    t = Triggers([clean_rule(dict(id='a', name='A', notify=True)),                  # default: likely
+                  clean_rule(dict(id='b', name='B', sure='possible', notify=True)),
+                  clean_rule(dict(id='c', name='C', sure='sure', notify=True))])
+    on = {r['id'] for r, _s in t.update({'hub': dict(moving=True, near_me=False, conf=0.4)}, 1000.0)}
+    assert on == {'b'}, on
+    on = {r['id'] for r, _s in t.update({'hub': dict(moving=True, near_me=False, conf=0.7)}, 1001.0)}
+    assert on == {'a', 'b'}, on
+    on = {r['id'] for r, _s in t.update({'hub': dict(moving=True, near_me=False, conf=0.9)}, 1002.0)}
+    assert on == {'a', 'b', 'c'}, on
+    assert clean_rule(dict(name='x'))['sure'] == 'likely'
+    try:
+        clean_rule(dict(name='x', sure='maybe'))
+        raise AssertionError('bad sure taken')
+    except ValueError:
+        pass
     print('TRIGGERS TESTS PASSED')
 
 

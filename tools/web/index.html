@@ -85,6 +85,17 @@
       <div class="sn-legend muted small"><span><i style="background:var(--motion)"></i>moving (faded: possible)</span><span><i style="background:var(--present)"></i>someone still</span><span><i style="background:var(--empty)"></i>empty</span><span><i style="background:var(--still);opacity:.3"></i>quiet</span><span><i style="background:var(--brief)"></i>weak link / not heard</span><span><i style="background:var(--blue)"></i>calibrating</span></div>
       <p class="small" id="sn-log-sum"></p>
       <div class="sn-list" id="sn-log-list"></div>
+    </article>
+    <article class="card">
+      <div class="card-head"><h2>Where and when: every link <span class="muted small">each row is one link (board → router, device or board); darker = more of that stretch above its threshold; blank = not reporting</span></h2></div>
+      <div class="sn-scroll"><svg id="sn-wires" class="sn-strips" viewBox="0 0 1000 200" role="img" aria-label="Each link's movement over time"></svg></div>
+      <p class="muted small">This is the finest "where" the boards can give: a link reacts when someone is near the line between its two ends, so rows that light together are one place, and a link alone means somewhere along it. Rows lit together at night, all at once, are not people: that is a link that lost its quiet level (fixed 2026-11-25) or a saturated radio.</p>
+    </article>
+    <article class="card">
+      <div class="card-head"><h2>Routine <span class="muted small">minutes of movement per hour, each board, the last 7 days</span></h2></div>
+      <div id="sn-routine" class="sn-routine"></div>
+    </article>
+    <article class="card">
       <p class="muted small">How sure: <b>sure</b> ≥ 80 %, <b>likely</b> ≥ 55 %, <b>possible</b> below. Movement rests on the board's own verdict, plus the links and the learned model that agree; one link alone is never more than possible. "Someone still" and "empty" come only from the learned model or breathing: a guess, since a sleeper and an empty room look alike to movement. Kept on the Pi (sensors-<i>date</i>.jsonl).</p>
     </article>
   </section>
@@ -273,7 +284,7 @@
     <section class="card" id="links-card">
       <div class="card-head">
         <h2>Per-link analysis <span class="chip warn">experimental</span></h2>
-        <label class="switch inline"><input type="checkbox" id="set-per-link"><span class="track"><span class="knob"></span></span><span class="small">on</span></label>
+        <label class="switch inline"><input type="checkbox" id="set-per-link"><span class="track"><span class="knob"></span></span><span class="small sw-word"></span></label>
       </div>
       <p class="muted small" id="links-off">Off. Switch it on to judge every link (router and each poked device) on its own, against its own quiet level. Display only: the board's verdict still comes from the router link.</p>
       <p class="cap" id="lanes-cap" hidden>Each lane is one link, judged on its own against its own quiet level. Top lane: the board's verdict. If only a device lane lights up, the movement was near that device rather than between the board and the router.</p>
@@ -498,7 +509,7 @@
       <p class="muted small">Which boards set off the phone, the light and the buzzer, and how many must agree: <a href="#/home">Home → Alerts</a>. Each board's recalibrate and beep are below.</p>
       <div class="house-uses" id="house-cmds"></div>
       <div class="field-row"><span><b>Links between boards</b> <span class="muted small">each satellite pokes boards it hears well (a sensing path with both ends where you placed them)</span></span>
-        <label class="switch inline"><input type="checkbox" id="set-peer-links"><span class="track"><span class="knob"></span></span><span class="small">on</span></label></div>
+        <label class="switch inline"><input type="checkbox" id="set-peer-links"><span class="track"><span class="knob"></span></span><span class="small sw-word"></span></label></div>
       <p class="muted small" id="peer-links-note"></p>
     </section>
     <section class="card">
@@ -589,7 +600,7 @@
     <section class="card" id="notify-card">
       <div class="card-head">
         <h2>Phone notifications <span id="notify-state" class="muted small"></span></h2>
-        <label class="switch inline"><input type="checkbox" id="notify-on"><span class="track"><span class="knob"></span></span><span class="small">on</span></label>
+        <label class="switch inline"><input type="checkbox" id="notify-on"><span class="track"><span class="knob"></span></span><span class="small sw-word"></span></label>
       </div>
       <p class="muted small">The Pushover account, the wait and the daily cap. <b>When</b> it notifies (which boards, how many, where) is set on <a href="#/home">Home → Alerts</a>.</p>
       <label class="field"><span>Pushover API token <span class="muted">(your ackwave application)</span></span><input type="password" id="notify-token" autocomplete="off" spellcheck="false" placeholder="30 letters and digits"></label>
@@ -611,7 +622,7 @@
     <section class="card" id="light-card">
       <div class="card-head">
         <h2>Light or smart device on motion <span id="light-state" class="muted small"></span></h2>
-        <label class="switch inline"><input type="checkbox" id="light-on"><span class="track"><span class="knob"></span></span><span class="small">on</span></label>
+        <label class="switch inline"><input type="checkbox" id="light-on"><span class="track"><span class="knob"></span></span><span class="small sw-word"></span></label>
       </div>
       <p class="muted small">The light's URLs and how long it stays on. <b>What</b> turns it on (which boards, how many, where) is set on <a href="#/home">Home → Alerts</a>: tick Light on an alert.</p>
       <label class="field"><span>URL that turns it on</span><input type="password" id="light-on-url" autocomplete="off" spellcheck="false" placeholder="https://api-v3.voicemonkey.io/trigger?token=…&amp;device=…"></label>

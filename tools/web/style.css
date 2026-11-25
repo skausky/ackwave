@@ -1,3 +1,4 @@
+[hidden] { display: none !important; }   /* the attribute always wins over a class's display */
 :root {
   --bg: #0a0e13; --card: #121821; --card2: #18202b; --line: #232d39; --grid: #1c2530;
   --fg: #e8ecf1; --muted: #8a97a8; --accent: #5fd4d0;
@@ -602,7 +603,8 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .check { display: flex; gap: 8px; align-items: center; margin: 6px 0; font-size: 0.92em; }
 
 /* one board in the boards list: its tick and its own buttons */
-.house-board { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 4px 0; }
+.house-board { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 6px 0; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; }
 
 /* the wiring picture (Settings) */
 .wiring { width: 100%; max-width: 560px; display: block; margin: 4px auto 10px; }
@@ -750,14 +752,15 @@ body.simple .map-link > div.muted.small { display: none; }       /* per-link tec
 .ov-grid2 { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--gap); align-items: start; }
 @media (max-width: 860px) { .ov-grid2 { grid-template-columns: 1fr; } .ov-head-text { font-size: 20px; } }
 .ov-rules { display: grid; gap: 8px; }
-.ov-rule { display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 10px; align-items: center;
+.ov-rule { display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px 10px; align-items: center;
   padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card2); }
 .ov-rule.firing { border-color: var(--motion); box-shadow: 0 0 0 1px rgba(255,93,85,.4) inset; }
 .ov-rule.off { opacity: .55; }
 .ov-acts { display: flex; gap: 4px; flex-wrap: wrap; }
 .ov-act { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: transparent; color: var(--muted); }
 .ov-act.on { color: #061113; background: var(--accent); border-color: var(--accent); }
-@media (max-width: 600px) { .ov-rule { grid-template-columns: auto 1fr; } .ov-acts { grid-column: 1 / -1; } }
+.ov-acts { grid-column: 1 / -1; grid-row: 2; }   /* what it does: its own row, so the rule's words have the width */
+@media (max-width: 600px) { .ov-rule { grid-template-columns: auto 1fr; } }
 .ov-editor { margin-top: 12px; padding: 14px; border: 1px solid var(--accent); border-radius: 10px; display: grid; gap: 10px; }
 .ov-editor h3 { margin: 0; font-size: 15px; }
 .ov-editor .field { display: grid; gap: 4px; }
@@ -782,7 +785,8 @@ body.simple .map-link > div.muted.small { display: none; }       /* per-link tec
 .sn-card.moving { border-top-color: var(--motion); } .sn-card.still { border-top-color: var(--present); }
 .sn-card.quiet { border-top-color: var(--still); } .sn-card.weak { border-top-color: var(--brief); }
 .sn-card.gone { opacity: .6; border-top-color: var(--brief); } .sn-card.calibrating { border-top-color: var(--blue); }
-.sn-conf { font-size: 12px; font-weight: 650; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); }
+.sn-conf { font-size: 12px; font-weight: 650; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--muted);
+  justify-self: start; white-space: nowrap; }
 .sn-conf.sure { color: var(--fg); border-color: var(--fg); } .sn-conf.likely { color: var(--fg); } .sn-conf.possible { color: var(--muted); border-style: dashed; }
 .sn-where { color: var(--fg); }
 .sn-q.good { color: var(--still); } .sn-q.fair { color: var(--muted); } .sn-q.poor, .sn-q.none { color: var(--brief); }
@@ -799,12 +803,30 @@ body.simple .map-link > div.muted.small { display: none; }       /* per-link tec
 .sn-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 6px 0; }
 .sn-legend i { display: inline-block; width: 12px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
 .sn-list { display: grid; gap: 2px; max-height: 60vh; overflow: auto; }
-.sn-row { display: grid; grid-template-columns: 9.5em 9em 7.5em 6.5em 6.5em 1fr; gap: 8px; align-items: baseline;
+.sn-row { display: grid; grid-template-columns: 9.5em 9em 7.5em 6.5em 8em 1fr; gap: 8px; align-items: baseline;
   padding: 4px 2px; border-bottom: 1px solid var(--line); font-size: 13px; }
 .sn-row.possible { opacity: .7; }
 .sn-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
-@media (max-width: 700px) {
-  .sn-row { grid-template-columns: 1fr 1fr; }
-  .sn-row > :last-child { grid-column: 1 / -1; }
+@media (max-width: 700px) {        /* a phone: one compact block per period, the page scrolls (not the list) */
+  .sn-row { grid-template-columns: auto auto 1fr auto; gap: 2px 8px; }
+  .sn-row .sn-when { grid-column: 1 / -1; font-size: 12px; }
+  .sn-row > :last-child { grid-column: 1 / -1; font-size: 12px; }
+  .sn-list { max-height: none; overflow: visible; }
+  .sn-list.short .sn-row:nth-child(n+6) { display: none; }
 }
 .sn-list.short { max-height: 260px; }
+.sn-set.verified { color: var(--still); border-color: var(--still); } .sn-set.unknown { color: var(--muted); border-style: dashed; }
+.sn-routine { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(330px, 100%), 1fr)); gap: 14px; }
+.sn-scroll { overflow-x: auto; }
+.sn-scroll > svg { min-width: 760px; }
+.sn-routine h3 { font-size: 13px; margin: 0 0 4px; }
+.sn-cell { fill: var(--motion); } .sn-cell.none { fill: var(--line); opacity: .4; }
+.sn-wsep { stroke: var(--line); }
+/* a switch says what it is now, beside it */
+.switch.inline { display: inline-grid; grid-template-columns: auto auto; align-items: center; white-space: nowrap; flex-shrink: 0; }
+.switch input:checked ~ .sw-word::before { content: 'on'; }
+.switch input:not(:checked) ~ .sw-word::before { content: 'off'; }
+.switch input:disabled ~ .sw-word { opacity: .5; }
+select { max-width: 260px; }
+body.offline main { opacity: .55; filter: grayscale(.6); transition: opacity .3s; }
+@media (max-width: 700px) { .sn-list, .sn-list.short { max-height: none; overflow: visible; } }   /* after .short: the page scrolls */

@@ -437,6 +437,33 @@ def poke_policy():
         sat(d, S1, 2)
         d.feed(f'SATL,{S1},{DEV}:4:5:5\n')
     assert {S2, FIRST.lower()} <= {a.lower() for a in asked}, asked
+    # newer firmware says what it is set to and what each slot pokes (SATC): the policy is kept
+    # on the board too, and a silent slot is known by its address at once
+    done(d, S1)
+    d._sat_policy_at.clear()
+    satc = lambda S, dv, bd, slots: d.feed(f'SATC,{S},{dv},{bd},0,200,beep,2,2700,status,40,strength,ff3300,motion,60,{"|".join(slots)}\n')
+    sat(d, S1, 2)
+    satc(S1, 1, 1, [DEV, S2])
+    got = tick(d, sent)
+    assert f'SATCMD,{S1},POLICY,1,0' in got, got                  # the board's own policy first
+    sent.clear()
+    done(d, S1)                                                  # confirmed: the next in its queue goes
+    assert f'SATCMD,{S1},UNPOKE,{S2}' in sent, ("the silent board slot, by the address the board gave", sent)
+    done(d, S1)
+    satc(S1, 1, 0, [DEV])
+    sat(d, S1, 1)
+    d._sat_policy_at.clear()
+    assert not [c for c in tick(d, sent) if 'POLICY' in c or 'UNPOKE' in c], "in line now: nothing more"
+    assert d._sat_settings_view(S1)['POLICY']['state'] == 'verified'
+    # a setting the board confirmed but doesn't show (reset by its button): sent again
+    d.cfg['board_cfg'][S1] = {'SENS': 'SENS,150'}
+    d.sat_applied[S1] = {'SENS': 'done'}
+    satc(S1, 1, 0, [DEV])
+    assert d.sat_applied[S1]['SENS'] == 'pending' and any('SENS,150' in c for c in sent[-3:]), sent[-3:]
+    done(d, S1)
+    d.feed(f'SATC,{S1},1,0,150,200,beep,2,2700,status,40,strength,ff3300,motion,60,{DEV}\n')
+    assert d.sat_applied[S1]['SENS'] == 'verified'
+    d.cfg['board_cfg'].pop(S1)
     sat(d, S1, 1)
     assert json.load(open(os.path.join(tmp, 'dashboard.json')))['peer_links'] is False, "saved"
     d2 = Dashboard(State(60), settings=os.path.join(tmp, 'dashboard.json'))
@@ -446,6 +473,10 @@ def poke_policy():
     assert d.command(dict(cmd='settings', peer_links=True))[0]
     for S in (S1, S2):
         done(d, S)
+    got = tick(d, sent)
+    assert f'SATCMD,{S1},POLICY,1,1' in got, got                  # the board's own policy first
+    d.feed(f'SATC,{S1},1,1,0,200,beep,2,2700,status,40,strength,ff3300,motion,60,{DEV}\n')
+    done(d, S1)
     got = tick(d, sent)
     assert f'SATCMD,{S1},POKE,{S2}' in got, got
     # Manual: a device that isn't one of your picks goes; your pick is asked for

@@ -59,7 +59,9 @@ def judge(b, moving_for=0.0):
     if st == 'moving':
         miss = 1.0
         if b.get('own'):
-            e = 0.55 + 0.35 * _clip((level - 1.0) / 1.0)
+            # just over its threshold (the long window grazing x1.4: the most common false start in
+            # the 2026-11-24 night) is only 'possible' on its own; clearly over, or lasting, is more
+            e = 0.45 + 0.45 * _clip((level - 1.0) / 0.8) + (0.1 if moving_for >= 8.0 else 0.0)
             miss *= 1 - e
             why.append(f'its own verdict (x{level:.1f} of its threshold)' if level else 'its own verdict')
         by = b.get('by') or []
@@ -67,6 +69,10 @@ def judge(b, moving_for=0.0):
             miss *= 0.65 ** min(len(by), 3)
             n = len(b.get('wires') or [])
             why.append(f"{len(by)} of {n} links: {', '.join(by[:3])}" if n else f"links: {', '.join(by[:3])}")
+        agree = b.get('agree') or []
+        if agree:                                           # other boards' links to the same end react too
+            miss *= 0.5
+            why.append(f"other boards' links to {', '.join(agree[:2])} react too")
         if p:
             miss *= 1 - 0.7 * p[2] / 100
             why.append(f'learned model {p[2]}% moving')
@@ -76,7 +82,7 @@ def judge(b, moving_for=0.0):
         if weak:
             c *= 0.6
             why.append('weak router link')
-        if not b.get('own') and len(by) == 1 and not (p and p[2] >= 50):
+        if not b.get('own') and len(by) == 1 and not agree and not (p and p[2] >= 50):
             c = min(c, 0.5)                                 # one link alone, nothing else agrees
             why.append('one link alone')
         return 'moving', _clip(c, 0.05, 0.97), why
@@ -196,7 +202,11 @@ class SensorLog:
         t0 = now - hours * 3600
         out = []
         if self.dir:
-            days = {time.strftime('%Y-%m-%d', time.localtime(t)) for t in (t0, now, (t0 + now) / 2)}
+            days = set()
+            t = t0 - 86400                                 # the day before too: a period that started then
+            while t <= now + 3600:
+                days.add(time.strftime('%Y-%m-%d', time.localtime(t)))
+                t += 3600 * 6
             for d in sorted(days):
                 p = os.path.join(self.dir, f'sensors-{d}.jsonl')
                 try:

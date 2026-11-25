@@ -56,7 +56,8 @@ Sessions from both `gui` and `record` are saved to `sessions/` in the project fo
 
 | Page | What it shows |
 |---|---|
-| **Home** | The board's verdict in plain words ("Strong motion in the sensing zone · for 12 s", "All quiet for 3 min"), how close the room is to the motion threshold right now, today's motion, link health, **Recalibrate**, the live signal, recent motion and the session strip |
+| **Home** | One card per board: its state (moving, someone still, empty, quiet, weak link, calibrating, not heard), **how sure** (sure / likely / possible, with the evidence), since when, its router link's quality, and each setting you gave it as applied / waiting / failed. Then the last 12 hours per board, the web of links lit where movement is, and the alert rules (each with how sure the movement must be) |
+| **Log** | What each board saw, from when to when, how long and how sure, for 6 h to 7 days (kept on the PC / Pi in `sensors-<date>.jsonl`); **Where and when**: every link as a row over time, so links that light together show the place; **Routine**: minutes of movement per hour and day for each board |
 | **Graphs** | The motion score with its thresholds, Doppler, breathing rate and the whole session |
 | **Activity** | (experimental) What you are doing, learned from short clips you record: **empty**, **still**, **sitting**, **lying**, **walking**, and moments like **sitting down** and **getting up**, or your own. See *Activity recognition* below |
 | **Stats** | Activity by day and hour across all recorded sessions, by hour of day, how long motion lasts, and every session's totals |

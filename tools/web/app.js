@@ -34,6 +34,7 @@ function syncClock() {
   } else sync.goal = goal;
 }
 function liveWindow() {
+  if (!fast || !fast.window) { const n = Date.now() / 1000; return [n - win, n]; }
   const [w0, w1] = fast.window;
   if (fast.filling) sync.off = null;                   // standing still: start over once it moves
   if (paused || sync.off === null) return [w0, w1];
@@ -73,10 +74,17 @@ function connect() {
   if (es) es.close();
   es = new EventSource(`events?win=${win}${link !== null ? `&link=${link}` : ''}`);
   setLive('connecting');
-  es.addEventListener('fast', (e) => { fast = JSON.parse(e.data); syncClock(); setLive(paused ? 'paused' : 'live'); renderFast(); });
+  es.addEventListener('fast', (e) => {
+    fast = JSON.parse(e.data);
+    if (fast.window) syncClock();                  // no window yet: the PC has no clock from the board (waiting, unplugged)
+    document.body.classList.remove('offline');
+    setLive(paused ? 'paused' : 'live');
+    renderFast();
+  });
   es.addEventListener('slow', (e) => { slow = JSON.parse(e.data); renderSlow(); });
   es.addEventListener('debug', (e) => { dbg = JSON.parse(e.data); if (page === 'debug' && !paused) renderDebug(); });
   es.onerror = () => {
+    document.body.classList.add('offline');        // every page dims: what it shows is no longer live
     setLive('offline');
     setBadge({ word: 'OFFLINE', color: C.motion, sub: 'lost the dashboard server: retrying…' });
   };
@@ -90,7 +98,7 @@ window.ackCmdText = async (body) => {
     const j = await r.json();
     toast(j.msg || (j.ok ? 'done' : 'failed'), !j.ok);
     return j;
-  } catch (e) { return null; }
+  } catch (e) { toast('could not reach the dashboard server', true); return null; }
 };
 async function cmd(body) {
   try {
@@ -98,7 +106,7 @@ async function cmd(body) {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ackwave': '1' },
       body: JSON.stringify(body),
     });
-    const j = await r.json();
+    const j = await r.json().catch(() => ({ ok: false, msg: `the server answered ${r.status}` }));
     toast(j.msg || (j.ok ? 'done' : 'failed'), !j.ok);
     return j.ok;
   } catch (e) {
@@ -169,6 +177,9 @@ function renderHomeStatus() {
   let line, sub = '';
   if (word === 'calibrating') { line = 'Getting ready'; sub = 'measuring the quiet level: keep still a moment'; }
   else if (word === 'waiting' || word === 'no data') { line = 'Waiting for the boards'; sub = b.sub || ''; }
+  else if (['offline', 'disconnected', 'input ended'].includes(word) || (fast && fast.header && fast.header.stale)) {
+    line = 'No live data'; sub = b.sub || 'the dashboard lost the board or the server: what shows is from before';
+  }
   else if (lone.length) {                          // a board sees it; the house rule waits for another
     line = ms && ms.people === 1 && ms.where.length ? `Maybe someone ${ms.where[0]}` : `Motion at ${lone.join(', ')}`;
     sub = `only ${lone.join(', ')} ${lone.length > 1 ? 'see' : 'sees'} it so far: the house counts it once another board agrees`;
@@ -232,8 +243,27 @@ function renderMeter(a) {
     `slow (4 s) window ×${a.long.toFixed(1)} (threshold ×${a.on_l})`;
 }
 
+// With several boards the top bar speaks for all of them (the same states as Home's cards),
+// not for the hub's router link alone: it never says STILL while a board's card says Moving.
+function allBoardsBadge() {
+  const now = (slow && slow.sensors && slow.sensors.now) || [];
+  if (now.length < 2) return false;
+  const moving = now.filter((x) => x.state === 'moving');
+  const gone = now.filter((x) => x.state === 'gone');
+  const e = $('#badge');
+  const word = moving.length ? 'MOVING' : 'STILL';
+  e.textContent = word;
+  e.style.color = moving.length ? '#ff5d55' : '#3ecf8e';
+  e.classList.remove('long');
+  const sub = moving.length ? moving.map((x) => `${x.name}${x.grade === 'possible' ? ' (possible)' : ''}`).join(', ')
+    : `${now.length - gone.length} of ${now.length} boards quiet`;
+  $('#badge-sub').textContent = sub + (gone.length ? ` · not heard: ${gone.map((x) => x.name).join(', ')}` : '');
+  document.title = `${moving.length ? 'Moving: ' + sub : 'Still'} · ackwave`;
+  return true;
+}
 function renderHeader(h) {
   setBadge(h.badge);
+  allBoardsBadge();
   renderMeter(h.activity);
   const lk = $('#link');
   lk.querySelector('i').style.background = h.link.color;
@@ -372,7 +402,8 @@ function renderTeach() {
   if (!teachBoard || !t.boards.some((b) => b.key === teachBoard)) teachBoard = (t.boards[0] || {}).key || null;
   if (seg.dataset.sig !== sig) {
     seg.dataset.sig = sig;
-    seg.replaceChildren(...t.boards.map((b) => {
+    if (!t.boards.length) seg.replaceChildren(el('span', { className: 'muted small', textContent: 'no board sends its learned-model features yet (needs the learned model firmware)' }));   // say why, not an empty row
+    else seg.replaceChildren(...t.boards.map((b) => {
       const e = el('button', { type: 'button', textContent: (/^\d+$/.test(b.name) ? `Board ${b.name}` : b.name) + (b.live ? '' : ' (silent)') });
       e.dataset.k = b.key;
       e.onclick = () => { teachBoard = b.key; renderTeach(); };
@@ -645,10 +676,19 @@ document.querySelectorAll('#hist-range button').forEach((b) => {
 async function loadHist() {
   if (Date.now() - histAt < 15000) return;
   histAt = Date.now();
-  try { histData = await (await fetch(`api/timeline?hours=${histH}`)).json(); } catch (e) { return; }
+  try {                                             // /api/ needs the header (without it: 403, and 'Loading…' for ever)
+    const r = await fetch(`api/timeline?hours=${histH}`, { headers: { 'X-Ackwave': '1' } });
+    if (!r.ok) throw new Error(String(r.status));
+    histData = await r.json();
+  } catch (e) {
+    const list = $('#hist-list');
+    if (!histData && list) list.replaceChildren(el('li', { className: 'muted small', textContent: "Couldn't load the motion history; trying again." }));
+    histAt = 0;
+    return;
+  }
   renderHist();
 }
-const hhmm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const hhmm = (t) => clock(t, true);              // the PC's zone, like every other time on the page
 function histEpisodes(spans, keys) {
   const ps = spans.filter((p) => keys.includes(p[2]) && p[1] - p[0] >= 2).sort((a, b) => a[0] - b[0]);
   const eps = [];
@@ -662,7 +702,7 @@ function histEpisodes(spans, keys) {
 function renderHist() {
   const d = histData;
   if (!d || !d.lanes) return;
-  const isBoard = (k) => k.startsWith('sat:') && !k.includes('>');
+  const isBoard = (k) => k === 'board' || (k.startsWith('sat:') && !k.includes('>'));   // the hub too
   const hadMotion = new Set(d.spans.map((p) => p[2]));
   const boards = d.lanes.filter((l) => isBoard(l.key));
   const lanes = [...d.lanes.filter((l) => l.key === 'house')];
@@ -688,7 +728,7 @@ function renderHist() {
   const ab = el('div', { className: 'hist-bar' });
   const stepS = histH <= 1 ? 900 : histH <= 3 ? 1800 : 3600;
   for (let t = Math.ceil(T0 / stepS) * stepS; t < T1; t += stepS) {
-    const k = el('b', { textContent: new Date(t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) });
+    const k = el('b', { textContent: clock(t) });     // the PC's clock, like every other time on the page
     k.style.left = pct(t); ab.append(k);
   }
   axis.append(ab); box.append(axis);
@@ -1253,7 +1293,7 @@ function renderFast() {
   renderHeader(fast.header);
   renderActHome();
   if (page === 'activity') { renderActNow(); renderTeach(); }
-  if (page === 'map' || page === 'classic') window.AckMap.update(null, fast.header);   // the board's verdict pulses the router link
+  if (page === 'map' || page === 'classic') window.AckMap.update(null, fast.header, true);   // the verdict pulses the router link (no list rebuild)
   if (!paused) drawLive(true);
 }
 
@@ -1319,8 +1359,10 @@ function renderSound() {
   const st = $('#snd-state');
   if (!board) st.textContent = 'waiting for the board (firmware too old?)';
   else if (!board.buzzer) st.textContent = 'no buzzer on this board (BUZZER_GPIO)';
-  else st.textContent = want ? 'kept by this dashboard' : "the firmware's settings";
-  for (const b of $('#snd-mode').children) b.classList.toggle('on', !!cur && b.dataset.m === cur.mode);
+  else if (want && board.mode !== want[0]) st.textContent = `the board has ${board.mode}; sending ${want[0]}…`;
+  else st.textContent = want ? 'on the board · kept by this dashboard' : "the firmware's settings";
+  const shown = board || cur;                       // the button lit is what the board does, not what was asked
+  for (const b of $('#snd-mode').children) b.classList.toggle('on', !!shown && b.dataset.m === shown.mode);
   $('.snd').classList.toggle('off', !!cur && cur.mode === 'off');
   if (!cur) return;
   for (const [id, v] of [['#snd-vol', cur.vol], ['#snd-hz', cur.hz]])
@@ -1371,12 +1413,17 @@ function renderHouse() {
   // which boards count (their motion still shows on their tiles and the timeline)
   const box = $('#house-cmds');
   // rebuilt only when something in it changed: a tap on a button being replaced is lost (phones)
-  const sig = JSON.stringify((h.sources || []).map((x) => [x.key, x.name, x.use, x.cmd && [x.cmd.what, x.cmd.state]]));
+  const sset = (slow && slow.sat_settings) || {};
+  const sig = JSON.stringify((h.sources || []).map((x) => [x.key, x.name, x.use, x.cmd && [x.cmd.what, x.cmd.state],
+    (sset[x.key] || {}).SENS]));
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
   box.replaceChildren(...(h.sources || []).map((src) => {
     const lab = el('span', { className: 'house-use' }, el('b', { textContent: src.name }));   // which boards alert: Home → Alerts
-    if (src.key === 'board') return lab;
+    if (src.key === 'board') {
+      return el('div', { className: 'house-board' }, lab,
+        el('span', { className: 'muted small', textContent: "on this Pi's USB: its settings are the Detection, Buzzer and LED cards" }));
+    }
     // the board's own controls, sent from the air through the hub
     const act = (text, body) => {
       const b = el('button', { type: 'button', className: 'ghost small', textContent: text });
@@ -1385,8 +1432,18 @@ function renderHouse() {
     };
     const c = src.cmd, st = !c ? '' : c.state === 'done' ? `${c.what}: done` : c.state === 'failed'
       ? `${c.what}: no answer (needs the new firmware)` : c.state === 'error' ? `${c.what}: refused` : `${c.what}: sending…`;
+    // its sensitivity (saved on the board; ✓ once the board shows it, … until then)
+    const sv_ = (sset[src.key] || {}).SENS, cur = sv_ && /^SENS,(\d+)$/.test(sv_.line) ? sv_.line.slice(5) : '';
+    const sens = el('select', { className: 'small', title: 'Sensitivity of this board (its slow window threshold); saved on the board',
+      onchange: (ev) => cmd({ cmd: 'sens', board: src.key, x100: ev.target.value === 'default' ? 'default' : +ev.target.value }) },
+      el('option', { value: '', textContent: 'Sensitivity…', disabled: true }),
+      ...[['140', 'High ×1.4'], ['160', 'Medium ×1.6'], ['180', 'Low ×1.8'], ['default', "firmware's"]].map(([v, t]) =>
+        el('option', { value: v, textContent: t })));
+    sens.value = cur || '';
+    const sst = sv_ ? { verified: '✓ on the board', done: '✓ received', pending: '… sending', failed: '✗ not confirmed' }[sv_.state] || '' : '';
     return el('div', { className: 'house-board' }, lab,
-      act('Recalibrate', { cmd: 'cal' }), act('Beep', { cmd: 'sound', test: true }),
+      act('Recalibrate', { cmd: 'cal' }), act('Beep', { cmd: 'sound', test: true }), sens,
+      sst ? el('span', { className: 'muted small' + (sv_.state === 'failed' ? ' err' : ''), textContent: sst }) : null,
       el('span', { className: 'muted small' + (c && c.state !== 'done' && c.state !== 'queued' && c.state !== 'sent' ? ' err' : ''), textContent: st }));
   }));
   const none = (h.sources || []).length && !(h.sources || []).some((x) => x.use);
@@ -1394,8 +1451,9 @@ function renderHouse() {
 }
 function renderSens() {
   const board = slow && slow.sens, want = slow && slow.settings && slow.settings.sens;
-  const cur = want || board;
+  const cur = board || want;                        // lit: what the board uses
   $('#sens-state').textContent = !board ? 'waiting for the board (firmware too old?)'
+    : want && want !== board ? `×${(board / 100).toFixed(1)} on the board; sending ×${(want / 100).toFixed(1)}…`
     : `×${(board / 100).toFixed(1)} on the board · ${want ? 'kept by this dashboard' : "the firmware's"}`;
   for (const b of $('#sens-level').children) b.classList.toggle('on', +b.dataset.x === cur);
 }
@@ -2169,13 +2227,13 @@ $('#tail-filter').addEventListener('click', (e) => {
   if (dbg) renderDebug();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.target.closest('input, textarea') || document.querySelector('dialog[open]') || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.closest('input, textarea, select, button, [contenteditable]') || document.querySelector('dialog[open]') || e.ctrlKey || e.metaKey || e.altKey) return;
   const k = e.key;
   const pages = { h: 'home', a: 'activity', g: 'graphs', s: 'stats', l: 'links', d: 'debug' };
   if (k === ' ' && page === 'graphs') { e.preventDefault(); togglePause(); }
   else if (k === '1' || k === '2' || k === '3') setWin([30, 120, 600][+k - 1]);
   else if (k === 'c') $('#btn-cal').click();
-  else if (pages[k]) go(pages[k]);
+  else if (pages[k] && !(document.body.classList.contains('simple') && document.querySelector(`#nav a[data-route="${pages[k]}"][data-adv]`))) go(pages[k]);   // Advanced pages: only with Advanced on
   else if (k === '?') $('#dlg-help').showModal();
 });
 let resizeTimer = null;

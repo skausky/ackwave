@@ -8,6 +8,9 @@ and where the movement must be, then what to do:
   where    'any'   movement anywhere on their wires
            'over'  away from the board: by the routers / devices, or between
            'yours' right by the board (most of its wires react together)
+  sure     how sure the movement must be: 'possible' | 'likely' (default) | 'sure'
+           (sensors.py's confidence: one link alone, or a blip grazing the
+           threshold, is only 'possible' and no longer sets anything off)
   notify / light / buzz: what it does
 
 A board counts while it moves, and for TOL_S after (boards see the same person
@@ -25,6 +28,7 @@ TOL_S = 3.0
 HOLD_S = 2.0                # the light (off after) and the phone (quiet time) wait on top of this
 MAX_RULES = 12
 WHERE = ('any', 'over', 'yours')
+SURE = {'possible': 0.0, 'likely': 0.55, 'sure': 0.8}   # the confidence each needs (sensors.grade)
 KEY_RE = re.compile(r'^(hub|sat:[0-9a-f]{2}(:[0-9a-f]{2}){5})$')
 
 
@@ -44,11 +48,14 @@ def clean_rule(r, n=0):
     name = r.get('name', '')
     if not isinstance(name, str) or len(name) > 40:
         raise ValueError('bad name')
+    sure = r.get('sure', 'likely')
+    if sure not in SURE:
+        raise ValueError('bad sure')
     rid = r.get('id') or f'r{n}{int(time.time() * 1000) % 100000}'
     if not isinstance(rid, str) or not re.fullmatch(r'[a-z0-9]{1,16}', rid):
         raise ValueError('bad id')
     return dict(id=rid, name=name.strip() or 'Alert', boards=sorted({b.lower() for b in boards}), need=need,
-                where=where, notify=bool(r.get('notify')), light=bool(r.get('light')), buzz=bool(r.get('buzz')),
+                where=where, sure=sure, notify=bool(r.get('notify')), light=bool(r.get('light')), buzz=bool(r.get('buzz')),
                 on=bool(r.get('on', True)))
 
 
@@ -63,7 +70,8 @@ def migrate(cfg, zones):
     over = any(z.get('watch') and (z.get('notify') or z.get('light')) for z in zones or [])
     return [clean_rule(dict(id='r1', name='Movement' + (' over there' if over else ''), boards=boards,
                             need=2 if cfg.get('house_rule') == 'two' else 'any', where='over' if over else 'any',
-                            notify=True, light=True, buzz=True))]
+                            notify=True, light=True, buzz=True,
+                            sure='possible' if cfg.get('alerts') else 'likely'))]   # ticked device links fired alone
 
 
 class Triggers:
@@ -73,12 +81,15 @@ class Triggers:
         self.state = {}                # rule id -> dict(on, since, until, boards)
 
     def update(self, boards, now):
-        """boards: {key: dict(moving, near_me)} for every board heard now.
-        Returns [(rule, started: bool)] for the rules that are on."""
+        """boards: {key: dict(moving, near_me, conf)} for every board heard now (conf 0..1,
+        how sure its movement is; missing = sure). Returns [(rule, started: bool)] for the rules that are on."""
         for k, b in boards.items():
             if b.get('moving'):
-                self.seen[(k, 'any')] = now
-                self.seen[(k, 'yours' if b.get('near_me') else 'over')] = now
+                c = b.get('conf', 1.0)
+                for g, need in SURE.items():
+                    if c >= need:
+                        self.seen[(k, 'any', g)] = now
+                        self.seen[(k, 'yours' if b.get('near_me') else 'over', g)] = now
         out = []
         for r in self.rules:
             st = self.state.setdefault(r['id'], dict(on=False, since=None, until=0.0, boards=[]))
@@ -87,7 +98,7 @@ class Triggers:
                 continue
             watch = r['boards'] or sorted(boards)
             live = [k for k in watch if k in boards]
-            hit = [k for k in live if now - self.seen.get((k, r['where']), -1e9) <= TOL_S]
+            hit = [k for k in live if now - self.seen.get((k, r['where'], r.get('sure', 'likely')), -1e9) <= TOL_S]
             need = len(live) if r['need'] == 'all' else 1 if r['need'] == 'any' else r['need']
             ok = bool(live) and len(hit) >= max(1, need)
             if r['need'] == 'all' and r['boards'] and len(live) < len(r['boards']):

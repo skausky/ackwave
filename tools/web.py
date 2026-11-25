@@ -99,11 +99,13 @@ def out_line(c):
     mode, secs = c.get('mode'), c.get('secs', 60)
     if mode == 'default':
         return 'OUT,default', "light output back to the firmware's (with motion, off after 1 min)"
-    if mode not in OUT_MODES or isinstance(secs, bool) or not isinstance(secs, int) or not 0 <= secs <= 86400:
+    if mode not in OUT_MODES or isinstance(secs, bool) or not isinstance(secs, int) or not 0 <= secs <= 65535:   # 18 h: the board reports it in 16 bits
         return None
     words = {'off': 'light output off', 'on': 'light output always on',
              'motion': f'light on with motion, off after {fmt_age(secs) if secs else "the motion ends"}'}[mode]
     return f'OUT,{mode},{secs}', words
+
+
 SAT_CMD_WAIT_S = 150                           # a command the hub never answered for: tried again (the hub gives up at 120 s)
 SAT_CMD_TRIES = 3                              # a command that failed this often is dropped (and said)
 BOARD_CFG_KINDS = ('SENS', 'LEDSET', 'SOUND', 'OUT', 'DEVHZ')   # settings kept per board here and applied again
@@ -259,7 +261,10 @@ class Dashboard:
         self.sat_cmds = {}               # MAC -> the command in flight to it through the hub, and its state
         self.sat_q = {}                  # MAC -> deque of commands waiting for it (one in flight at a time:
                                          # the hub holds one order per board and a newer one replaces it)
-        self.sat_applied = {}            # MAC -> {setting kind: 'done' | 'pending' | 'failed'} (board_cfg)
+        self.sat_applied = {}            # MAC -> {setting kind: 'verified' | 'done' | 'pending' | 'failed'} (board_cfg)
+        self.sat_cfg = {}                # MAC -> what the board itself says it is set to, and what its slots poke (SATC)
+        self.hub_pol = None              # the hub's own poke policy as it says (POLICY lines; newer firmware)
+        self._cfg_fix_at = {}            # (board, kind) -> when a setting the board doesn't show was sent again
         self.follow = None               # a network switch waiting for the other boards to confirm
         self.peer_tries = {}             # (board, other board) -> (pokes asked, when): links between the boards
         self.policy_log = deque(maxlen=40)  # (when, board, command, why): settings enforced on the boards (Debug)
@@ -949,7 +954,8 @@ class Dashboard:
                             acks=d['acks'], router_rssi=d['router_rssi'], links=d['links'],
                             up_s=d['up_s'], heard_s=round(now - d['at'], 1), rssi=d['rssi'],
                             since=r2(d['since']), via=d.get('via', 'air'),
-                            pokes=self._sat_pokes(mac, now), policy=self.sat_policy_state.get(mac)))
+                            pokes=self._sat_pokes(mac, now), policy=self.sat_policy_state.get(mac),
+                            reports_cfg=bool(self.sat_cfg.get(mac) and now - self.sat_cfg[mac]['at'] < 60)))
         return out
 
     def _sat_pokes(self, mac, now):
@@ -957,6 +963,8 @@ class Dashboard:
         ob = self.others.get(mac)
         if ob is not None and ob.send and self.sats.get(mac, {}).get('via') == 'usb':
             keys = sorted(ob.s.devices.poking)
+        elif self.sat_cfg.get(mac) and now - self.sat_cfg[mac]['at'] < 30:   # its own list: silent slots too
+            keys = sorted(self.sat_cfg[mac]['slots'])
         else:
             keys = sorted(o for o, ln in self.sat_links.get(mac, {}).items()
                           if not (ln.flags & 2) and ln.at is not None and now - ln.at <= SAT_GONE_S)
@@ -1133,6 +1141,12 @@ class Dashboard:
                     self.out_pin = p[1]
             if line.startswith('SAT,'):
                 self._sat(line)
+            elif line.startswith('SATC,'):
+                self._sat_cfg_line(line)
+            elif line.startswith('POLICY,'):
+                ev = parse_line(line)
+                if ev:
+                    self.hub_pol = dict(ev[1], at=time.time())
             elif line.startswith(('SATL,', 'SURV,')):
                 self._sat_extra(line)
             if self.pair.feed(line) or line.startswith('ME,'):
@@ -1657,7 +1671,7 @@ class Dashboard:
         if not pol['boards'] and n_dev > len(links):              # a slot poking something it reports nothing for:
             known = sorted((set(boards) | set(self.sats) | set(self.cfg['paired'])) - {sat})   # may be a board that
             for o in known:                                       # never answered: unpoked by its address (harmless if not)
-                if now - self._sat_policy_at.get((sat, f'UNPOKE,{o}'), 0.0) >= 300:
+                if now - self._sat_policy_at.get((sat, f'UNPOKE,{o}'), -1e9) >= 3600:   # once, then hourly (cleared on restart)
                     return f'UNPOKE,{o}', 'links between boards off (a slot it reports nothing for)'
         if pol['manual'] is not None and n_dev > len(links):      # a slot poking something we can't see
             t0 = self._ghost_since.setdefault(sat, now)
@@ -1674,7 +1688,7 @@ class Dashboard:
         self._sat_send(sat, line, why, front=True)
         self.policy_log.append((now, sat, line, why))
         verb, _, o = line.partition(',')
-        what = 'all its links' if o == 'all' else self._target_key(o, 0)[1]
+        what = o if verb not in ('POKE', 'UNPOKE') else 'all its links' if o == 'all' else self._target_key(o, 0)[1]
         print(f"{self.board_label(sat)}: {verb.lower()} {what} ({why})", flush=True)
 
     def _enforce_usb_others(self, pol, now):
@@ -1725,12 +1739,17 @@ class Dashboard:
         hub = (self.cfg['hub'] or self.s.me or '').lower()
         live = {m for m, d in self.sats.items() if now - d['at'] <= SAT_GONE_S and d.get('via') != 'usb'}
         boards = live | ({hub} if hub else set())
+        self._policy_step(pol, sorted(live), now)
         for sat in sorted(live):
             if 'sat:' + sat in self.mlw_q:
                 continue                                 # (a policy command goes ahead of what waits: front of its queue)
             lk = self.sat_links.get(sat, {})
             reporting = {o for o, ln in lk.items() if not (ln.flags & 2) and ln.at is not None and now - ln.at <= SAT_GONE_S}
-            got = self._sat_unwanted(sat, pol, boards, self.sats[sat].get('links', 0), reporting, now)
+            n_dev = self.sats[sat].get('links', 0)
+            sc = self.sat_cfg.get(sat)
+            if sc and now - sc['at'] < 30:                # newer firmware says what every slot pokes: silent ones too
+                reporting, n_dev = set(sc['slots']), len(sc['slots'])
+            got = self._sat_unwanted(sat, pol, boards, n_dev, reporting, now)
             self.sat_policy_state[sat] = got[1] if got else None
             if got and now - self._sat_policy_at.get((sat, got[0]), 0.0) >= 30:   # re-sent until the board shows it
                 line, why = got
@@ -1875,6 +1894,8 @@ class Dashboard:
             if now - c.get('at', now) < SAT_CMD_WAIT_S:
                 return
             c['state'] = 'failed'                        # no answer at all: as if the hub gave up
+            if c.get('line', '').startswith('MLW') and ('sat:' + mac) in self.mlw_q:
+                self._mlw_step_sat(mac, False)           # the model's upload ends (else the board stays skipped)
             self._sat_failed(mac, c)
         q = self.sat_q.get(mac)
         if not q:
@@ -1899,9 +1920,58 @@ class Dashboard:
         """Every setting you gave this board, sent again (it restarted, or came back):
         the board saves each one itself, so this only repairs one it never got."""
         for kind, line in sorted(self.cfg['board_cfg'].get(mac, {}).items()):
-            if self.sat_applied.get(mac, {}).get(kind) != 'done' or why == 'restarted':
+            if self.sat_applied.get(mac, {}).get(kind) not in ('done', 'verified') or why == 'restarted':
                 self.sat_applied.setdefault(mac, {})[kind] = 'pending'
                 self._sat_send(mac, line, f'setting again ({why})')
+
+    def _sat_cfg_line(self, line):
+        """SATC: a board's own word on its settings and poke slots (newer firmware). A setting
+        it shows is 'verified'; one it was sent and confirmed but doesn't show (lost, reset with
+        the BOOT button...) goes again."""
+        ev = parse_line(line)
+        if not ev or ev[1]['mac'] not in self.sats:
+            return
+        d, now = ev[1], time.time()
+        mac = d['mac']
+        self.sat_cfg[mac] = dict(d, at=now)
+        for kind, want in self.cfg['board_cfg'].get(mac, {}).items():
+            have = d['lines'].get(kind)
+            if have is None or want.endswith(',default'):
+                continue                                 # 'back to the firmware's': nothing to compare with
+            if kind == 'OUT':                            # the report holds up to 65535 s (18 h)
+                m, _, secs = want.partition(',')[2].partition(',')
+                want = f'OUT,{m},{min(int(secs or 0), 65535)}'
+            st = self.sat_applied.setdefault(mac, {})
+            if have == want:
+                st[kind] = 'verified'
+                self._cfg_fix_at.pop((mac, kind), None)
+            elif st.get(kind) not in ('pending', 'failed') and now - self._cfg_fix_at.get((mac, kind), (0.0, 0))[0] >= 120:
+                n = self._cfg_fix_at.get((mac, kind), (0.0, 0))[1] + 1
+                self._cfg_fix_at[(mac, kind)] = (now, n)
+                if n > 3:                                # it takes it but never shows it: said, not sent for ever
+                    st[kind] = 'failed'
+                    self._event('health', f"{self.board_label(mac)}: {kind} doesn't stay as set (shows {have})", 'sat:' + mac, important=True)
+                    continue
+                st[kind] = 'pending'
+                self._sat_send(mac, want, f'setting again (the board shows {have})')
+
+    def _policy_step(self, pol, live, now):
+        """The poke policy kept ON each board too (newer firmware: POLICY, saved there), so a
+        restart or a Pi that is away never brings back pokes the settings don't allow."""
+        want = (pol['devices'], pol['boards'])
+        line = f'POLICY,{int(want[0])},{int(want[1])}'
+        hp = self.hub_pol
+        if hp and now - hp['at'] < 30 and (hp['devices'], hp['boards']) != want \
+                and now - self._sat_policy_at.get(('hub', line), 0.0) >= 30:
+            self._sat_policy_at[('hub', line)] = now
+            self.s.outbox.append(line)
+            self.policy_log.append((now, 'hub', line, 'poke policy on the board'))
+        for sat in live:
+            c = self.sat_cfg.get(sat)
+            if c and now - c['at'] < 60 and (c['devices'], c['boards']) != want \
+                    and now - self._sat_policy_at.get((sat, line), 0.0) >= 30:
+                self._sat_policy_at[(sat, line)] = now
+                self._sat_order(sat, line, 'poke policy on the board', now)
 
     def _peer_may(self, sat, other, now):
         """A link not asked for too often: PEER_TRIES times, PEER_RETRY_S apart."""
@@ -2020,6 +2090,7 @@ class Dashboard:
         self.trig.rules = self.cfg['rules']
         self.wv = self._wires_view(now)
         self.bstates = self._board_states(self.wv, time.time())
+        self._wires_log(self.wv, time.time())
         for kind, e in self.sensorlog.update(self.bstates, time.time()):
             if kind == 'close' and (e['state'] in ('moving', 'gone') or e['t1'] - e['t0'] >= 60):
                 self._event('sensor', sensors.SensorLog.text(e), e['key'],
@@ -2028,8 +2099,9 @@ class Dashboard:
                     print(sensors.SensorLog.text(e), flush=True)     # the add-on's log
             elif kind == 'open' and e['state'] == 'gone':
                 self._event('sensor', sensors.SensorLog.text(e), e['key'], important=True)
-        self.trig_active = self.trig.update({k: dict(moving=b['moving'], near_me=b['near_me']) for k, b in self.bstates.items()
-                                             if b['state'] not in ('gone', 'calibrating')}, now)
+        conf = {k: (c['peak'] if c['state'] == 'moving' else c['conf']) for k, c in self.sensorlog.cur.items()}
+        self.trig_active = self.trig.update({k: dict(moving=b['moving'], near_me=b['near_me'], conf=conf.get(k, 0.0))
+                                             for k, b in self.bstates.items() if b['state'] not in ('gone', 'calibrating')}, now)
         on = {r['id'] for r, _s in self.trig_active}
         for r in self.cfg['rules']:
             if r['id'] not in on and self.trig.state.get(r['id'], {}).get('since') is not None:
@@ -2084,7 +2156,8 @@ class Dashboard:
             was = self.board_since.get(k)
             if not was or was[0] != state:
                 self.board_since[k] = (state, now)
-            out[k] = dict(key=k, name=name, state=state, since=r2(self.board_since[k][1]), moving=moving,
+            agree = sorted({names.get(far(w), far(w)) for w in moving_w if (wv['ends'].get(far(w)) or {}).get('hot')})
+            out[k] = dict(key=k, name=name, state=state, since=r2(self.board_since[k][1]), moving=moving, agree=agree,
                           own=bool(own) and online, near_me=bool(end.get('hot')) and moving,
                           by=[names.get(far(w), far(w)) for w in moving_w],
                           wires=[dict(to=names.get(far(w), far(w)), state=w['state'], level=w['level']) for w in mine],
@@ -2222,8 +2295,16 @@ class Dashboard:
 
     def _sat_settings_view(self, mac):
         """Each setting you gave this board and whether the board confirmed it."""
-        return {k: dict(line=v, state=self.sat_applied.get(mac, {}).get(k, 'unknown'))
-                for k, v in sorted(self.cfg['board_cfg'].get(mac, {}).items())}
+        c = self.sat_cfg.get(mac)
+        fresh = bool(c and time.time() - c['at'] < 60)
+        st = lambda k: self.sat_applied.get(mac, {}).get(k, 'unknown')
+        out = {k: dict(line=v, state='done' if st(k) == 'verified' and not fresh else st(k))   # 'verified' only while it reports
+               for k, v in sorted(self.cfg['board_cfg'].get(mac, {}).items())}
+        pol = self._sat_policy()
+        out['POLICY'] = dict(line=f"devices {'on' if pol['devices'] else 'off'}, board links {'on' if pol['boards'] else 'off'}",
+                             state=('verified' if (c['devices'], c['boards']) == (pol['devices'], pol['boards']) else 'pending')
+                             if fresh else 'unknown')
+        return out
 
     def _house_slow(self):
         motion, by = self.house_now
@@ -2270,6 +2351,8 @@ class Dashboard:
     def command(self, c):
         """Run one command dict; returns (ok, message)."""
         what = c.get('cmd')
+        if not isinstance(what, str):
+            return False, 'unknown command'
         board = c.get('board')
         if board is not None and board != self.primary and board != self.s.me:
             return self._board_command(board, c)
@@ -2772,7 +2855,7 @@ class Dashboard:
             out = dict(calibs=list(self.calibs),
                        tail=[[r2(t), line] for t, line in self.tail],
                        sent=[[r2(t), c] for t, c in self.sent_cmds],
-                       policy=[[r2(t), self.board_label(m), c, why] for t, m, c, why in self.policy_log],
+                       policy=[[r2(t), 'Hub' if m == 'hub' else self.board_label(m), c, why] for t, m, c, why in self.policy_log],
                        refused=[[r2(t), line, last] for t, line, last in self.refused])
             if s.wall_off is None:
                 return out
@@ -3028,14 +3111,155 @@ class Dashboard:
                     names[k] = self.s.devices.name(k) or names[k]
             order = lambda k: (-1 if k == 'house' else 0 if k == 'board' else 1.5 if '>' in k else 1 if k.startswith('sat:')
                                else 2 if k == 'activity' else 3 if k.startswith('ap:') else 4, k)
-            lanes = [dict(key=k, name='Board' if k == 'board' else names[k])
+            hub_name = 'Hub' if self.sats else 'Board'      # one name for the hub on every page
+            lanes = [dict(key=k, name=hub_name if k == 'board' else names[k])
                      for k in sorted(names, key=order)]
             if not any(l['key'] == 'board' for l in lanes):
-                lanes.insert(1 if lanes and lanes[0]['key'] == 'house' else 0, dict(key='board', name='Board'))
+                lanes.insert(1 if lanes and lanes[0]['key'] == 'house' else 0, dict(key='board', name=hub_name))
             return dict(t0=r2(t0), t1=r2(now), hours=hours, lanes=lanes,
                         spans=[[r2(p[0]), r2(p[1]), p[2], len(p) > 4,
                                 label_info(p[3])['name'] if p[2] == 'activity' else p[3]] for p in spans],
                         per_link=self.cfg['per_link'])
+
+    def _wires_log(self, wv, now):
+        """Every wire's share of time moving, once a minute, in wires-<date>.jsonl (the Log page's
+        'where and when'): from the wires themselves, so it works with no map at all, and small."""
+        if not self.sessions_dir or not wv:
+            return
+        acc = getattr(self, '_wacc', None)
+        if acc is None or now - acc['t0'] >= 60 or now < acc['t0']:   # a new minute (or the clock was set back)
+            if acc and acc['w']:
+                rec = dict(t=round(acc['t0'], 1), w={k: round(m / n, 2) for k, (m, n) in acc['w'].items()},
+                           names=acc['names'], h=round(acc['h'][0] / acc['h'][1], 2) if acc['h'][1] else None)
+                try:
+                    p = os.path.join(self.sessions_dir, time.strftime('wires-%Y-%m-%d.jsonl', time.localtime(acc['t0'])))
+                    with open(p, 'a') as f:
+                        f.write(json.dumps(rec, separators=(',', ':')) + '\n')
+                except OSError:
+                    pass
+            acc = self._wacc = dict(t0=now - now % 60, w={}, names={}, h=[0, 0])
+        ends = wv.get('ends') or {}
+        for w in wv.get('wires') or []:
+            if w.get('state') == 'off':
+                continue                                 # not answering: no sample (blank on the chart)
+            k = f"{w['a']}>{w['b']}"
+            m = acc['w'].setdefault(k, [0, 0])
+            m[0] += w.get('state') == 'moving'
+            m[1] += 1
+            acc['names'][k] = [(ends.get(w['a']) or {}).get('name', w['a']), (ends.get(w['b']) or {}).get('name', w['b'])]
+        hm = getattr(self, 'house_now', None)
+        if hm:
+            acc['h'][0] += bool(hm[0])
+            acc['h'][1] += 1
+
+    def wire_history(self, hours):
+        """Where and when, per link: for each board -> far end link, the share of each time bin
+        it was above its threshold, from the once-a-second tracking log (track.jsonl, kept on
+        the Pi). A bin with no samples is None (the link wasn't reporting). Cached 2 min."""
+        hours = min(max(hours if math.isfinite(hours) else 24.0, 1.0), 168.0)
+        c = getattr(self, '_wh_cache', None)
+        if c and c[0] == hours and time.time() - c[1] < (120 if hours <= 6 else 600):   # a day of it: seconds on a Pi
+            return c[2]
+        bin_s = 60 if hours <= 6 else 300 if hours <= 24 else 900 if hours <= 72 else 1800
+        now = time.time()
+        t0 = now - hours * 3600
+        n = int(math.ceil((now - t0) / bin_s))
+        on, cnt = {}, {}
+        house = [0] * n
+        hn = [0] * n
+        labels = {}
+        first = None                                     # the first minute the wires log covers
+        if self.sessions_dir:
+            days, t = set(), t0 - 86400
+            while t <= now + 3600:
+                days.add(time.strftime('%Y-%m-%d', time.localtime(t)))
+                t += 6 * 3600
+            for day in sorted(days):
+                try:
+                    with open(os.path.join(self.sessions_dir, f'wires-{day}.jsonl')) as f:
+                        for line in f:
+                            try:
+                                r = json.loads(line)
+                                t = float(r['t'])
+                                if t < t0 or not isinstance(r.get('w'), dict):
+                                    continue
+                            except (ValueError, KeyError, TypeError):
+                                continue
+                            first = t if first is None else min(first, t)
+                            i = min(n - 1, int((t - t0) / bin_s))
+                            for k, v in r['w'].items():
+                                if isinstance(v, (int, float)):
+                                    cnt.setdefault(k, [0] * n)[i] += 1
+                                    on.setdefault(k, [0.0] * n)[i] += v
+                            for k, nm in (r.get('names') or {}).items():
+                                if isinstance(nm, list) and len(nm) == 2:
+                                    labels[k] = nm
+                            if isinstance(r.get('h'), (int, float)):
+                                hn[i] += 1
+                                house[i] += r['h']
+                except OSError:
+                    continue
+        for fn in ('track.jsonl.old', 'track.jsonl'):    # older history: the tracking log (only with a watched area)
+            p = os.path.join(self.sessions_dir or '', fn)
+            if not self.sessions_dir or not os.path.exists(p):
+                continue
+            try:
+                with open(p) as f:
+                    for line in f:
+                        try:                      # skip old lines before parsing them: '{"t":<seconds>,...'
+                            t = float(line[5:line.index(',', 5)])
+                        except ValueError:
+                            continue
+                        if t < t0 or (first is not None and t >= first):
+                            continue
+                        try:
+                            r = json.loads(line)
+                        except ValueError:
+                            continue
+                        if not isinstance(r, dict) or not isinstance(r.get('links') or {}, dict):
+                            continue
+                        i = min(n - 1, int((t - t0) / bin_s))
+                        for k, v in (r.get('links') or {}).items():
+                            if not k.startswith('sat:') or not isinstance(v, (int, float)):
+                                continue
+                            cnt.setdefault(k, [0] * n)[i] += 1
+                            if v >= 1.0:
+                                on.setdefault(k, [0] * n)[i] += 1
+                        if r.get('house') is not None:
+                            hn[i] += 1
+                            house[i] += bool(r['house'])
+            except OSError:
+                continue
+        wires = []
+        for k in sorted(cnt):
+            b, _, far = k.partition('>')
+            if k in labels:                              # from the wires log: its own names
+                o = on.get(k, [0] * n)
+                wires.append(dict(key=k, board=b, board_name=labels[k][0], far=labels[k][1],
+                                  cells=[round(o[i] / cnt[k][i], 2) if cnt[k][i] else None for i in range(n)]))
+                continue
+            if far == 'hub':
+                fname = 'Hub'
+            elif far.startswith('r:'):
+                fname = self._router_label(far[2:])
+            elif far.startswith('sat:'):
+                fname = self.board_label(far[4:])
+            else:
+                fname = self.s.devices.name(far) or far[-8:]
+            o = on.get(k, [0] * n)
+            wires.append(dict(key=k, board=b, board_name=self.board_label(b[4:]) if b.startswith('sat:') else 'Hub',
+                              far=fname, cells=[round(o[i] / cnt[k][i], 2) if cnt[k][i] else None for i in range(n)]))
+        seen = {}
+        for w in wires:                                  # two Sonos: 'Sonos ·b0' and 'Sonos ·74', only where names repeat
+            seen.setdefault((w['board'], w['far']), []).append(w)
+        for same in seen.values():
+            if len(same) > 1:
+                for w in same:
+                    w['far'] += f" ·{w['key'][-5:].replace(':', '')}"
+        out = dict(t0=r2(t0), bin=bin_s, n=n, wires=wires,
+                   house=[round(house[i] / hn[i], 2) if hn[i] else None for i in range(n)])
+        self._wh_cache = (hours, time.time(), out)
+        return out
 
     def _router_label(self, mac):
         """A router by its address: your nickname, else the hub's 'Router N' when
@@ -3466,13 +3690,20 @@ def make_handler(dash, allowed_hosts):
                     return self._reply(403, {'error': 'missing X-Ackwave header'})
                 if u.path == '/api/stats':
                     return self._reply(200, dash.stats())
+                if u.path == '/api/wires':
+                    try:
+                        hours = float(parse_qs(u.query).get('hours', ['24'])[0])
+                    except ValueError:
+                        hours = 24.0
+                    return self._reply(200, dash.wire_history(hours))
                 if u.path == '/api/sensors':
                     try:
                         hours = min(24 * 14, max(0.1, float(parse_qs(u.query).get('hours', ['24'])[0])))
                     except ValueError:
                         hours = 24.0
-                    with dash.lock:
-                        return self._reply(200, dict(log=dash.sensorlog.history(hours), now=dash.sensorlog.view(time.time())['now']))
+                    with dash.lock:                       # a snapshot; the files are read outside the lock
+                        now_v = dash.sensorlog.view(time.time())['now']
+                    return self._reply(200, dict(log=dash.sensorlog.history(hours), now=now_v))
                 if u.path == '/api/map':
                     return self._reply(200, dash.map_load())
                 if u.path == '/api/walks':
@@ -3588,7 +3819,7 @@ def make_handler(dash, allowed_hosts):
                 return self._reply(404, {'ok': False, 'msg': 'not found'})
             try:
                 n = int(self.headers.get('Content-Length') or 0)
-                c = json.loads(self.rfile.read(min(n, 4096)) or b'{}')
+                c = json.loads(self.rfile.read(min(n, 32768)) or b'{}')   # 12 rules with many boards pass 4 KB
                 if not isinstance(c, dict):
                     raise ValueError
             except ValueError:

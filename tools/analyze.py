@@ -138,6 +138,19 @@ def parse_line(line):
             if p[0] == 'SATL':
                 return 'satl', dict(mac=p[1].lower(), links=out)
             return 'surv', dict(mac=p[1].lower(), seen=out)
+        if line.startswith('SATC,'):                      # another board's settings and poke slots (as it says)
+            p = line.strip().split(',')
+            if len(p) != 16 or len(p[1]) != 17 or p[2] not in ('0', '1') or p[3] not in ('0', '1'):
+                return None
+            lines = dict(SENS=f'SENS,{int(p[4])}', DEVHZ=f'DEVHZ,{int(p[5])}', SOUND=f'SOUND,{p[6]},{int(p[7])},{int(p[8])}',
+                         LEDSET=f'LEDSET,{p[9]},{int(p[10])},{p[11]},{p[12].lower()}', OUT=f'OUT,{p[13]},{int(p[14])}')
+            slots = [m.lower() for m in p[15].split('|') if len(m) == 17] if p[15] else []
+            return 'satc', dict(mac=p[1].lower(), devices=p[2] == '1', boards=p[3] == '1', lines=lines, slots=slots)
+        if line.startswith('POLICY,'):                    # this board's poke policy
+            p = line.strip().split(',')
+            if len(p) == 3 and p[1] in ('0', '1') and p[2] in ('0', '1'):
+                return 'policy', dict(devices=p[1] == '1', boards=p[2] == '1')
+            return None
         if line.startswith('POKING,'):
             p = line.split(',')
             return 'poking', dict(idx=int(p[1]), mac=p[2].lower())
