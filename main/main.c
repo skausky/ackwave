@@ -263,6 +263,18 @@ static void print_extra(const uint8_t *who, const rep_extra_t *x) {
                           x->link[i].flags, x->link[i].ks, x->link[i].kl);
         printf("%s\n", line);
     }
+    if (x->has_cfg) {                    // SATC,<mac>,<devices>,<boards>,<sens>,<devhz>,<sound>,<vol>,<hz>,
+        const rep_cfg_t *c = &x->cfg;    //   <led mode>,<bright>,<pattern>,<rgb>,<out mode>,<secs>,<slot>|<slot>
+        int k = snprintf(line, sizeof line, "SATC," MACF ",%d,%d,%u,%u,%s,%u,%u,%s,%u,%s,%06" PRIx32 ",%s,%u,", MACA(who),
+                         c->pol & POL_DEVICES ? 1 : 0, c->pol & POL_BOARDS ? 1 : 0, c->sens, c->devhz,
+                         c->snd_mode <= SND_ALARM ? SND_NAMES[c->snd_mode] : "?", c->snd_vol, c->snd_hz,
+                         c->led_mode < 3 ? LED_MODE_NAMES[c->led_mode] : "?", c->led_bright,
+                         c->led_pat < 4 ? LED_PAT_NAMES[c->led_pat] : "?", c->led_rgb & 0xFFFFFF,
+                         c->out_mode <= OUT_MODE_ON ? OUT_MODE_NAMES[c->out_mode] : "?", c->out_secs);
+        for (int i = 0; i < c->n_slots && k < (int)sizeof line - 20; i++)
+            k += snprintf(line + k, sizeof line - (size_t)k, "%s" MACF, i ? "|" : "", MACA(c->slot[i]));
+        printf("%s\n", line);
+    }
     if (x->n_seen) {
         int k = snprintf(line, sizeof line, "SURV," MACF, MACA(who));
         for (int i = 0; i < x->n_seen && k < (int)sizeof line - 32; i++)
@@ -456,6 +468,8 @@ static int devhz_now(void) {
     if (devhz_saved) return devhz_saved;
     return have_hub && memcmp(hub_mac, my_mac, 6) != 0 ? SAT_DEV_HZ : POKE_HZ;
 }
+static volatile uint8_t policy = POL_DEVICES | POL_BOARDS;   // what we may poke (POLICY, saved)
+static void print_policy(void) { printf("POLICY,%d,%d\n", policy & POL_DEVICES ? 1 : 0, policy & POL_BOARDS ? 1 : 0); }
 static void print_devhz(void) { printf("DEVHZ,%d,%s\n", devhz_now(), devhz_saved ? "set" : "default"); }
 typedef struct { int8_t mode; uint8_t vol; uint16_t hz; } snd_saved_t;
 
@@ -1001,6 +1015,19 @@ static void poke_task(void *arg) {
             ext.ord_boot = ord_mk[0];
             ext.ord_n = ord_mk[1];
             bool listen = n_reports % 4 == 0 || !deadline_passed(tn, ord_listen_ms);
+            ext.has_cfg = n_reports % 20 == 10;          // our settings and slots every 10 s (not with the survey: size)
+            if (ext.has_cfg) {
+                rep_cfg_t *c = &ext.cfg;
+                c->pol = policy;
+                c->sens = (uint16_t)sens_x100; c->devhz = (uint16_t)devhz_now();
+                c->snd_mode = (uint8_t)snd_mode; c->snd_vol = (uint8_t)snd_vol; c->snd_hz = (uint16_t)snd_hz;
+                c->led_mode = led_cfg.mode; c->led_pat = led_cfg.pattern; c->led_bright = led_cfg.bright;
+                c->led_rgb = led_cfg.rgb;
+                c->out_mode = (uint8_t)out_mode; c->out_secs = (uint16_t)(out_secs > 65535 ? 65535 : out_secs);
+                c->n_slots = 0;
+                for (int k = 0; k < MAX_DEVS && k < 4; k++)
+                    if (node_active(&nodes, DEV_NODE(k))) memcpy(c->slot[c->n_slots++], nodes.mac[DEV_NODE(k)], 6);
+            }
             if (n_reports++ % 20 == 0) {
                 for (int i = 0; i < node_count(&nodes) && ext.n_seen < REP_SEEN_MAX; i++)
                     if (gate.rssi_x16[i]) {
@@ -1163,6 +1190,22 @@ static __attribute__((unused)) void print_poking(void) {   // unused when POKE_H
             printf("POKING,%d," MACF "\n", DEV_NODE(k), MACA(nodes.mac[DEV_NODE(k)]));
 }
 
+// The poke policy, enforced on what we poke now: no device slots at all with
+// devices off; none holding another board with boards off. Run at boot, on
+// POLICY and every few seconds (a board heard later is found then).
+static void policy_apply(void) {
+    bool changed = false;
+    for (int k = 0; k < MAX_DEVS; k++) {
+        if (!node_active(&nodes, DEV_NODE(k))) continue;
+        if (!(policy & POL_DEVICES) || (!(policy & POL_BOARDS) && peer_has(nodes.mac[DEV_NODE(k)]))) {
+            printf("UNPOKED," MACF ",policy\n", MACA(nodes.mac[DEV_NODE(k)]));
+            dev_clear(&nodes, k);
+            changed = true;
+        }
+    }
+    if (changed) devs_save();
+}
+
 // POKE / UNPOKE from the PC. Only devices already heard on our network.
 static void sat_cmd(const char *line);
 static void run_cmd(const char *line) {
@@ -1172,7 +1215,7 @@ static void run_cmd(const char *line) {
     char name[33];
     int hz, hz2, vol, beep_ms = parse_beep(line, &hz, &vol);
     int glide_ms = parse_glide(line, &hz, &hz2, &vol);
-    int dhc, dhv;
+    int dhc, dhv, plc, plv;
     int snd, smode, svol, shz, sens, sx, na, ledc, ext, kc, pk, hc, oc, omode, osecs, mlc, mla, mlb, mln;
     float mlv[MLW_VALS_MAX];
     uint8_t newkey[16], pmac[6];
@@ -1326,6 +1369,15 @@ static void run_cmd(const char *line) {
             nvs_put("sens", NULL, 0);
         }
         print_sens();
+    } else if ((plc = parse_policy(line, &plv)) != POLICY_BAD) {
+        if (plc != POLICY_QUERY && (uint8_t)plv != policy) {
+            uint8_t v = (uint8_t)plv;
+            if (plc == POLICY_DEFAULT) nvs_put("pol", NULL, 0);
+            else nvs_put("pol", &v, sizeof v);
+            policy = v;
+            policy_apply();
+        }
+        print_policy();
     } else if ((dhc = parse_devhz(line, &dhv)) != DEVHZ_BAD) {
         if (dhc == DEVHZ_SET && dhv != devhz_saved) {
             int16_t v = (int16_t)dhv;
@@ -1384,6 +1436,10 @@ static void run_cmd(const char *line) {
         int k = dev_slot_for(&nodes, mac, &is_new);
         if (node_is_ap(node_find(&nodes, mac))) {
             printf("REFUSED," MACF ",is-an-ap\n", MACA(mac));
+        } else if (!(policy & POL_DEVICES)) {
+            printf("REFUSED," MACF ",policy-devices-off\n", MACA(mac));
+        } else if (!(policy & POL_BOARDS) && peer_has(mac)) {
+            printf("REFUSED," MACF ",policy-boards-off\n", MACA(mac));
         } else if (!seen_has(mac) && !peer_has(mac)) {
             printf("REFUSED," MACF ",not-seen-on-network\n", MACA(mac));
         } else if (k < 0) {
@@ -1503,6 +1559,8 @@ static void settings_reset(void) {
     nvs_put("out", NULL, 0);
     nvs_put("devhz", NULL, 0);
     devhz_saved = 0;
+    nvs_put("pol", NULL, 0);
+    policy = POL_DEVICES | POL_BOARDS;
     led_save(NULL);
     snd_mode = MOTION_ALARM ? SND_ALARM : SND_BEEP;
     snd_vol = BUZZER_VOL;
@@ -1706,8 +1764,10 @@ static void control_task(void *arg) {
                            gate.sent[i], st == GATE_OK && ap_is_far(&gate, i, best_ap)
                            ? "far" : gate_name(st));
                 }
+            policy_apply();
             print_poking();
 #endif
+            print_policy();
             print_devices();
             print_peers();
             print_peerkeys();                // then KEY, which closes the list for the PC
@@ -2016,6 +2076,8 @@ void app_main(void) {
     if (nvs_take("sens", &ss, sizeof ss) && ss >= SENS_MIN && ss <= SENS_MAX) saved_sens = ss;
     int16_t dh;
     if (nvs_take("devhz", &dh, sizeof dh) && dh >= DEVHZ_MIN && dh <= DEVHZ_MAX) devhz_saved = dh;
+    uint8_t pol;
+    if (nvs_take("pol", &pol, sizeof pol) && pol <= (POL_DEVICES | POL_BOARDS)) policy = pol;
 
     key_lock = xSemaphoreCreateMutex();
     configASSERT(key_lock);
@@ -2040,6 +2102,7 @@ void app_main(void) {
     gate_init(&gate);
     gate.keep_far = aps.n > 0;             // chosen one by one: never skipped as "far"
     devs_load();                           // the devices it poked before (saved)
+    policy_apply();                        // ...only what the poke policy allows
     buzzer_init();                           // never fatal
     buzzer_play(&TUNE_HELLO);                // power-on chirp: shows the wiring works
     print_sound();

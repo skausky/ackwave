@@ -551,6 +551,28 @@ static inline int parse_devhz(const char *line, int *hz) {
     return DEVHZ_SET;
 }
 
+// POLICY: what this board may poke, saved on it and enforced by it (so a restart,
+// or a PC that is away, never brings back what the settings don't allow):
+//   POLICY                 report it (POLICY,<devices 0/1>,<boards 0/1>)
+//   POLICY,<d>,<b>         devices: poke devices at all; boards: poke other ackwave boards
+//   POLICY,default         both allowed
+enum { POL_DEVICES = 1, POL_BOARDS = 2 };              // the poke policy (POLICY): what the board may poke
+enum { POLICY_BAD = -1, POLICY_QUERY = 0, POLICY_SET, POLICY_DEFAULT };
+static inline int parse_policy(const char *line, int *bits) {
+    if (!line || strncmp(line, "POLICY", 6) != 0) return POLICY_BAD;
+    const char *s = line + 6;
+    if (*s == '\0' || *s == '\r' || *s == '\n') return POLICY_QUERY;
+    if (*s++ != ',') return POLICY_BAD;
+    if (strncmp(s, "default", 7) == 0 && (s[7] == '\0' || s[7] == '\r' || s[7] == '\n')) {
+        *bits = POL_DEVICES | POL_BOARDS;
+        return POLICY_DEFAULT;
+    }
+    if ((s[0] != '0' && s[0] != '1') || s[1] != ',' || (s[2] != '0' && s[2] != '1') ||
+        !(s[3] == '\0' || s[3] == '\r' || s[3] == '\n')) return POLICY_BAD;
+    *bits = (s[0] == '1' ? POL_DEVICES : 0) | (s[2] == '1' ? POL_BOARDS : 0);
+    return POLICY_SET;
+}
+
 // The poke schedule, one 1 ms tick at a time: 0 = an access point's turn,
 // 1 = a device slot's turn (a device, a hello or a report), -1 = rest. Each
 // side gets its own rate exactly (a 1000 Hz Bresenham), the APs first. After
@@ -827,6 +849,7 @@ static inline int poke_ta_node(const uint8_t me[6], const uint8_t *dmac) {
 // with a sniffer could read whether a board sees motion.
 #define HELLO_LEN    71         // a report with no extra sections (version 4's size)
 #define REPORT_MAX_LEN 480      // a report with every section (version 5): 53 + 10 + links 110 + order 9 + breathing 6 + learned 22 + survey 242 + tag 8 = 460
+                                // (the config section, 47 with 4 slots, goes only in reports without the survey)
 #define HELLO_V1_LEN 40         // a hello: who and where (broadcast, every board)
 #define HELLO_EVERY_MS 500      // hellos and reports each at a fixed rate: timing says nothing
 #define MAX_PEERS    8          // boards one board lists, and keys a hub holds
@@ -868,13 +891,26 @@ typedef struct {
 //  - links (every report): each link's target, and its short and long scores
 //    relative to the board's quiet level (x20, so 20 = at the quiet level)
 //  - survey (every 10 s): who the board hears and how strongly (the map lays itself out)
-enum { TLV_LINKS = 1, TLV_SURVEY = 2, TLV_ORDER = 3, TLV_BREATH = 4, TLV_ML = 5 };
+enum { TLV_LINKS = 1, TLV_SURVEY = 2, TLV_ORDER = 3, TLV_BREATH = 4, TLV_ML = 5, TLV_CONFIG = 6 };
 enum { RL_ACK = 1, RL_AP = 2, RL_DEVICE = 4 };           // link flags
 enum { RS_ROUTER = 0, RS_BOARD = 1, RS_DEVICE = 2 };     // survey kinds
 #define REP_LINKS_MAX 12
 #define REP_SEEN_MAX  30
 typedef struct { uint8_t mac[6]; uint8_t flags, ks, kl; } rep_link_t;      // 9 bytes on air
 typedef struct { uint8_t mac[6]; uint8_t kind; int8_t rssi; } rep_seen_t;  // 8 bytes on air
+// What the board is set to now and what each poke slot pokes (TLV_CONFIG): the PC
+// compares it with what it asked for, so a setting is known to be applied, not
+// just sent, and a slot that pokes something silent is seen by its address.
+typedef struct {
+    uint8_t pol;                // POL_* bits
+    uint16_t sens, devhz;       // SENS x100 (0 = built in), device pokes/s
+    uint8_t snd_mode, snd_vol; uint16_t snd_hz;
+    uint8_t led_mode, led_pat, led_bright; uint32_t led_rgb;
+    uint8_t out_mode; uint16_t out_secs;
+    uint8_t n_slots, slot[4][6];  // MAC of each poke slot in use (MAX_DEVS)
+} rep_cfg_t;
+#define REP_CFG_LEN 19          // + 6 per slot
+
 typedef struct {
     int n_links, n_seen;
     rep_link_t link[REP_LINKS_MAX];
@@ -886,6 +922,8 @@ typedef struct {
     bool has_ml;                // the learned model's last second (TLV_ML): its verdict,
     uint8_t ml_motion, ml_p[3]; // [empty, still, moving] x255,
     int16_t ml_f[8];            // and the 8 features x1000 (the PC records clips from them)
+    bool has_cfg;               // its settings and poke slots (TLV_CONFIG; not with the survey: size)
+    rep_cfg_t cfg;
 } rep_extra_t;
 
 static inline uint8_t rep_k20(float score, float floor) {
@@ -970,6 +1008,20 @@ static inline int build_report(uint8_t out[REPORT_MAX_LEN], const uint8_t me[6],
         for (int i = 0; i < 4; i++) m[n++] = (uint8_t)(x->ord_boot >> (8 * i));
         for (int i = 0; i < 3; i++) m[n++] = (uint8_t)(x->ord_n >> (8 * i));
     }
+    if (x && x->has_cfg && x->n_seen == 0) {   // never with the survey: both would pass REPORT_MAX_LEN
+        const rep_cfg_t *c = &x->cfg;
+        int ns = c->n_slots < 4 ? c->n_slots : 4;
+        m[n++] = TLV_CONFIG; m[n++] = (uint8_t)(REP_CFG_LEN + 6 * ns);
+        m[n++] = c->pol;
+        m[n++] = (uint8_t)c->sens; m[n++] = (uint8_t)(c->sens >> 8);
+        m[n++] = (uint8_t)c->devhz; m[n++] = (uint8_t)(c->devhz >> 8);
+        m[n++] = c->snd_mode; m[n++] = c->snd_vol; m[n++] = (uint8_t)c->snd_hz; m[n++] = (uint8_t)(c->snd_hz >> 8);
+        m[n++] = c->led_mode; m[n++] = c->led_pat; m[n++] = c->led_bright;
+        m[n++] = (uint8_t)(c->led_rgb >> 16); m[n++] = (uint8_t)(c->led_rgb >> 8); m[n++] = (uint8_t)c->led_rgb;
+        m[n++] = c->out_mode; m[n++] = (uint8_t)c->out_secs; m[n++] = (uint8_t)(c->out_secs >> 8);
+        m[n++] = (uint8_t)ns;
+        for (int i = 0; i < ns; i++) { memcpy(m + n, c->slot[i], 6); n += 6; }
+    }
     if (x && x->n_seen > 0) {
         int k = x->n_seen < REP_SEEN_MAX ? x->n_seen : REP_SEEN_MAX;
         m[n++] = TLV_SURVEY; m[n++] = (uint8_t)(8 * k);
@@ -1026,6 +1078,7 @@ static inline bool hello_open(const uint8_t *f, int len, aes_block_fn enc, void 
         x->has_order = false;
         x->has_breath = false;
         x->has_ml = false;
+        x->has_cfg = false;
         for (int i = REPORT_LEN; i + 2 <= mlen;) {
             int tag = m[i], tl = m[i + 1];
             const uint8_t *v = m + i + 2;
@@ -1048,6 +1101,21 @@ static inline bool hello_open(const uint8_t *f, int len, aes_block_fn enc, void 
                 x->has_order = true;
                 x->ord_boot = (uint32_t)v[0] | (uint32_t)v[1] << 8 | (uint32_t)v[2] << 16 | (uint32_t)v[3] << 24;
                 x->ord_n = (uint32_t)v[4] | (uint32_t)v[5] << 8 | (uint32_t)v[6] << 16;
+            }
+            else if (tag == TLV_CONFIG && tl >= REP_CFG_LEN) {
+                rep_cfg_t *c = &x->cfg;
+                x->has_cfg = true;
+                c->pol = v[0];
+                c->sens = (uint16_t)(v[1] | v[2] << 8); c->devhz = (uint16_t)(v[3] | v[4] << 8);
+                c->snd_mode = v[5]; c->snd_vol = v[6]; c->snd_hz = (uint16_t)(v[7] | v[8] << 8);
+                c->led_mode = v[9]; c->led_pat = v[10]; c->led_bright = v[11];
+                c->led_rgb = (uint32_t)v[12] << 16 | (uint32_t)v[13] << 8 | v[14];
+                c->out_mode = v[15]; c->out_secs = (uint16_t)(v[16] | v[17] << 8);
+                c->n_slots = 0;
+                for (int k = 0; k < v[18] && k < 4 && REP_CFG_LEN + 6 * (k + 1) <= tl; k++) {
+                    memcpy(c->slot[k], v + REP_CFG_LEN + 6 * k, 6);
+                    c->n_slots++;
+                }
             }
             else if (tag == TLV_SURVEY)
                 for (int k = 0; k + 8 <= tl && x->n_seen < REP_SEEN_MAX; k += 8) {
@@ -1139,7 +1207,7 @@ static inline bool order_open(const uint8_t *f, int len, const uint8_t me[6], ae
 // devices or boards it pokes (it still refuses one it hasn't heard). Never keys, the
 // hub or a settings reset: those need its USB cable.
 static inline bool order_allowed(const char *line) {
-    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE", "OUT", "MLW", "POKE,", "UNPOKE,", "DEVHZ" };
+    static const char *const ok[] = { "USE,", "USE_DEFAULT", "APS,", "APS", "CAL", "SENS", "SOUND", "LEDSET", "BEEP", "GLIDE", "OUT", "MLW", "POKE,", "UNPOKE,", "DEVHZ", "POLICY" };
     for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++) {
         size_t k = strlen(ok[i]);
         if (strncmp(line, ok[i], k) == 0 && (ok[i][k - 1] == ',' || line[k] == '\0' || line[k] == ',')) return true;

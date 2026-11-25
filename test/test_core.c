@@ -1334,6 +1334,40 @@ int main(void) {
                   y.br_rate2 == 28 && y.br_prom == 200 && y.br_agree == 75 && y.has_order && y.n_seen == REP_SEEN_MAX);
             CHECK(y.has_ml && y.ml_motion == 1 && y.ml_p[2] == 225 && y.ml_f[0] == -3500 && y.ml_f[7] == 3500);
         }
+        {   // the board's settings and poke slots (TLV_CONFIG): with everything but the survey, it fits
+            rep_extra_t x = {0}, y;
+            x.n_links = REP_LINKS_MAX;
+            for (int i = 0; i < REP_LINKS_MAX; i++) { memcpy(x.link[i].mac, PLUG, 6); x.link[i].mac[5] = (uint8_t)i; }
+            x.has_order = true; x.ord_boot = 3; x.ord_n = 9;
+            x.has_breath = true; x.has_ml = true;
+            x.has_cfg = true;
+            rep_cfg_t *c = &x.cfg;
+            c->pol = POL_DEVICES; c->sens = 160; c->devhz = 200; c->snd_mode = SND_BEEP; c->snd_vol = 3; c->snd_hz = 2700;
+            c->led_mode = 1; c->led_pat = 2; c->led_bright = 40; c->led_rgb = 0x12ab34; c->out_mode = OUT_MODE_MOTION; c->out_secs = 300;
+            c->n_slots = 4;
+            for (int i = 0; i < 4; i++) { memcpy(c->slot[i], PLUG, 6); c->slot[i][5] = (uint8_t)(0x40 + i); }
+            int n = build_report(h, B1, HUBM, AP1, 6, &rp, &x, 46, aes128_block, &ak);
+            CHECK(n <= REPORT_MAX_LEN);
+            CHECK(hello_open(h, n, aes128_block, &ak, &got, &y) && y.has_cfg && y.has_order && y.n_links == REP_LINKS_MAX);
+            CHECK(y.cfg.pol == POL_DEVICES && y.cfg.sens == 160 && y.cfg.devhz == 200 && y.cfg.snd_hz == 2700 &&
+                  y.cfg.led_rgb == 0x12ab34 && y.cfg.out_secs == 300 && y.cfg.n_slots == 4 && y.cfg.slot[3][5] == 0x43);
+            x.n_seen = REP_SEEN_MAX;             // with the survey too: the config is left out, it still fits
+            for (int i = 0; i < REP_SEEN_MAX; i++) { memcpy(x.seen[i].mac, AP1, 6); x.seen[i].mac[5] = (uint8_t)i; }
+            n = build_report(h, B1, HUBM, AP1, 6, &rp, &x, 46, aes128_block, &ak);
+            CHECK(n <= REPORT_MAX_LEN && hello_open(h, n, aes128_block, &ak, &got, &y) && !y.has_cfg && y.n_seen == REP_SEEN_MAX);
+            x.n_seen = 0;
+            x.has_cfg = false;                   // and without it: an older hub reads the same report
+            n = build_report(h, B1, HUBM, AP1, 6, &rp, &x, 46, aes128_block, &ak);
+            CHECK(hello_open(h, n, aes128_block, &ak, &got, &y) && !y.has_cfg);
+            int b;                               // POLICY: what the board may poke
+            CHECK(parse_policy("POLICY", &b) == POLICY_QUERY && parse_policy("POLICY\r\n", &b) == POLICY_QUERY);
+            CHECK(parse_policy("POLICY,1,0", &b) == POLICY_SET && b == POL_DEVICES);
+            CHECK(parse_policy("POLICY,0,0\n", &b) == POLICY_SET && b == 0);
+            CHECK(parse_policy("POLICY,default", &b) == POLICY_DEFAULT && b == (POL_DEVICES | POL_BOARDS));
+            CHECK(parse_policy("POLICY,2,0", &b) == POLICY_BAD && parse_policy("POLICY,1", &b) == POLICY_BAD &&
+                  parse_policy("POLICY,1,0x", &b) == POLICY_BAD && parse_policy("POLICYX", &b) == POLICY_BAD);
+            CHECK(order_allowed("POLICY,0,0") && order_allowed("POLICY"));
+        }
         {   // the learned model: weights over the air (MLW), forward pass, verdict
             int a, b, nv; float vals[MLW_VALS_MAX];
             CHECK(parse_mlw("MLW", &a, &b, vals, &nv) == MLW_QUERY && parse_mlw("MLW,default", &a, &b, vals, &nv) == MLW_DEFAULT);
