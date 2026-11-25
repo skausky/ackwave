@@ -245,7 +245,8 @@
       if (!slow) return;
       const bs = slow.bstates || [], w = slow.wires || null;
       renderHead(w, bs);
-      $h('#ov-boards').replaceChildren(...bs.map(boardCard));
+      $h('#ov-boards').replaceChildren(...(window.Sensors ? window.Sensors.cards(slow) : bs.map(boardCard)));
+      if (window.Sensors) window.Sensors.homeLog(slow);
       renderWeb(w, bs);
       renderRules(slow.rules, bs);
       renderRecent(slow.events);

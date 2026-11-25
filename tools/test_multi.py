@@ -211,6 +211,23 @@ def sat_links():
     assert ln.feed(9.0, 3.0, t + 0.5), "well above its own quiet level: motion"
     assert ln.feed(6.0, 2.6, t + 1.0), "still over the off level"
     assert not ln.feed(2.4, 2.4, t + 1.5)
+    # 2026-11-24 21:20: after a router switch two links came up above their threshold
+    # and stayed 'moving' for 12 h (the quiet level only learned while quiet)
+    ln, t = SatLink(3), 0.0
+    ln.feed(1.0, 1.0, t)
+    stuck = 0
+    for _ in range(4 * 600):                          # 10 min at 4 reports/s, steady at 1.6x
+        t += 0.25
+        stuck += ln.feed(1.6, 1.6, t)
+    assert not ln.moving and stuck < 4 * 60, f"a steady link is not movement for ever ({stuck} reports moving)"
+    # a sleeper-like rhythm (15 s of movement a minute) keeps its quiet level low: each burst still counts
+    ln, t, hits = SatLink(3), 0.0, 0
+    for i in range(4 * 1800):
+        t += 0.25
+        burst = (i // 4) % 60 < 15
+        m = ln.feed(4.0 if burst else 1.0, 2.0 if burst else 1.0, t)
+        hits += m and burst and i > 4 * 600
+    assert hits > 0.8 * 4 * 15 * 20, f"the bursts are still seen once it has learned ({hits})"
     tmp = tempfile.mkdtemp()
     d = Dashboard(State(60), settings=os.path.join(tmp, 'dashboard.json'))
     d.feed(f'ME,{FIRST}\n')
@@ -272,13 +289,27 @@ def follow_network():
     ev = [e['text'] for e in d.events if e['type'] == 'network']
     assert 'not confirmed' in ev[-1], ev
     # one board's own command, from the air
+    d.feed(f'SATCMD,{S2},failed,8\n')                # the hub gave up on it: the board's queue moves on
     sent.clear()
     ok, msg = d.command(dict(cmd='cal', board=S2))
     assert ok and 'through the hub' in msg and sent == [f'SATCMD,{S2},CAL'], (msg, sent)
+    d.feed(f'SATCMD,{S2},done,9\n')                  # one at a time: the next goes once it confirmed
     ok, _ = d.command(dict(cmd='sens', board=S2, x100=150))
     assert ok and sent[-1] == f'SATCMD,{S2},SENS,150'
+    assert d._sat_settings_view(S2)['SENS'] == dict(line='SENS,150', state='pending')
     ok, _ = d.command(dict(cmd='out', board=S2, mode='motion', secs=120))
-    assert ok and sent[-1] == f'SATCMD,{S2},OUT,motion,120', sent[-1]
+    assert ok and sent[-1] == f'SATCMD,{S2},SENS,150', "waits for the SENS to be confirmed (one order per board at the hub)"
+    d.feed(f'SATCMD,{S2},done,10\n')
+    assert sent[-1] == f'SATCMD,{S2},OUT,motion,120', sent[-1]
+    assert d._sat_settings_view(S2)['SENS']['state'] == 'done'
+    # a restart: every setting you gave it goes again
+    d.feed(f'SATCMD,{S2},done,11\n')
+    d.sats[S2]['up_s'] = 5000
+    sent.clear()
+    d.feed(f'SAT,{S2},-40,99,2,20,15,96,-57,0,12,{mac(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xf1)},6\n')
+    assert sent and sent[0] in (f'SATCMD,{S2},OUT,motion,120', f'SATCMD,{S2},SENS,150'), sent
+    assert any('restarted' in e['text'] for e in d.events), "said"
+    d.sat_q.clear()
     ok, _ = d.command(dict(cmd='out', mode='on', secs=0))
     assert ok and sent[-1] == 'OUT,on,0', "the hub's own pin"
     assert not d.command(dict(cmd='out', mode='disco', secs=1))[0] and not d.command(dict(cmd='out', mode='on', secs=-1))[0]
@@ -391,6 +422,22 @@ def poke_policy():
     sat(d, S2, 0)
     got = tick(d, sent)
     assert not any(f',POKE,{S1}' in c or f',POKE,{S2}' in c or f',POKE,{FIRST}' in c for c in got), got
+    # the reported bug: a slot busy with a board that never answers shows no link scores,
+    # only one more slot in use; with board links off it is unpoked by every board address
+    for S in (S1, S2):
+        done(d, S)
+    d._sat_policy_at.clear()
+    sat(d, S1, 2)                                               # 2 slots, but only the device reports
+    d.feed(f'SATL,{S1},{DEV}:4:5:5\n')
+    asked = set()
+    for _ in range(4):
+        got = tick(d, sent)
+        asked |= {c.split(',', 3)[3] for c in got if f'SATCMD,{S1},UNPOKE,' in c}
+        done(d, S1)
+        sat(d, S1, 2)
+        d.feed(f'SATL,{S1},{DEV}:4:5:5\n')
+    assert {S2, FIRST.lower()} <= {a.lower() for a in asked}, asked
+    sat(d, S1, 1)
     assert json.load(open(os.path.join(tmp, 'dashboard.json')))['peer_links'] is False, "saved"
     d2 = Dashboard(State(60), settings=os.path.join(tmp, 'dashboard.json'))
     assert d2.cfg['peer_links'] is False, "and read back after a restart"

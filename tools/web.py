@@ -52,6 +52,7 @@ import autofit
 import linkpick
 import wires
 import triggers
+import sensors
 from gui import (BRIEF_C, BRIEF_S, CAL_C, COLORS, DIM, FG, LED_MODES, LED_PATTERNS, LONG_C, MOTION_C,
                  SCAN_C, STILL_C, SENS_RANGE, SOUND_MODES, WINDOWS, State, reader, thin)
 
@@ -59,7 +60,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = {'/': ('index.html', 'text/html; charset=utf-8'),
           '/app.js': ('app.js', 'text/javascript; charset=utf-8'),
           '/style.css': ('style.css', 'text/css; charset=utf-8'),
-          '/map.js': ('map.js', 'text/javascript; charset=utf-8')}
+          '/map.js': ('map.js', 'text/javascript; charset=utf-8'),
+          '/home.js': ('home.js', 'text/javascript; charset=utf-8'),       # (was missing: Home stayed empty)
+          '/sensors.js': ('sensors.js', 'text/javascript; charset=utf-8')}
 MAP_MAX = 256 * 1024                        # the Map page's saved layout (no pictures): bytes
 MAP_NODES = 64
 PLAN_MAX = 12 * 1024 * 1024                 # one map picture (satellite, floor plan): bytes
@@ -101,6 +104,9 @@ def out_line(c):
     words = {'off': 'light output off', 'on': 'light output always on',
              'motion': f'light on with motion, off after {fmt_age(secs) if secs else "the motion ends"}'}[mode]
     return f'OUT,{mode},{secs}', words
+SAT_CMD_WAIT_S = 150                           # a command the hub never answered for: tried again (the hub gives up at 120 s)
+SAT_CMD_TRIES = 3                              # a command that failed this often is dropped (and said)
+BOARD_CFG_KINDS = ('SENS', 'LEDSET', 'SOUND', 'OUT', 'DEVHZ')   # settings kept per board here and applied again
 FOLLOW_WAIT_S = 25                             # a network switch waits this long for the boards to confirm
 OTHERS_HOLD_S = 15.0
 EVENTS_MAX = 300                               # events kept for the live stream
@@ -250,7 +256,10 @@ class Dashboard:
         state.devices.router_name = self._router_name   # nicknames on every page
         state.devices.board_name = lambda m: self.cfg['board_names'].get(m)
         self.sats = {}                   # other boards heard through ours: MAC -> latest report
-        self.sat_cmds = {}               # MAC -> the last command sent to it through the hub, and its state
+        self.sat_cmds = {}               # MAC -> the command in flight to it through the hub, and its state
+        self.sat_q = {}                  # MAC -> deque of commands waiting for it (one in flight at a time:
+                                         # the hub holds one order per board and a newer one replaces it)
+        self.sat_applied = {}            # MAC -> {setting kind: 'done' | 'pending' | 'failed'} (board_cfg)
         self.follow = None               # a network switch waiting for the other boards to confirm
         self.peer_tries = {}             # (board, other board) -> (pokes asked, when): links between the boards
         self.policy_log = deque(maxlen=40)  # (when, board, command, why): settings enforced on the boards (Debug)
@@ -277,6 +286,7 @@ class Dashboard:
         self.wv = None                           # the wires as last judged (tick)
         self.wire_ok = {}                        # the hub's link src -> its motion confirmed by the slow window
         self.bstates = {}                        # board key -> its one state for the page and the alerts
+        self.sensorlog = sensors.SensorLog(sessions_dir)   # each board's periods: moving / still / empty ..., how sure
         self.board_since = {}                    # board key -> (state, since)
         self.trig = triggers.Triggers()          # the alert rules (Home: Alerts)
         self.trig_active = []
@@ -320,7 +330,7 @@ class Dashboard:
         self.version = 0                         # bumps on every line fed
         self.settings_path = settings
         self.cfg = dict(SETTINGS, sound=None, sens=None, alerts=[], router_names={}, board_names={}, act_place=0, hub=None, paired=[],
-                        house_rule='confirm', house_off=[], rules=None)   # house_off: boards that don't count   # sound, sens: kept on the board; None = its own
+                        house_rule='confirm', house_off=[], rules=None, board_cfg={})   # house_off: boards that don't count   # sound, sens: kept on the board; None = its own
         # Device links that drive the alerts (light, buzzer, LED) besides the board:
         # src -> True once that link's slow window confirmed its current motion
         self.confirmed = {}
@@ -386,6 +396,11 @@ class Dashboard:
         if isinstance(pr, list) and len(pr) <= SAT_MAX:
             self.cfg['paired'] = sorted({m.lower() for m in pr if isinstance(m, str) and MAC_RE.fullmatch(m)})
         self.cfg['peer_links'] = bool(self.cfg.get('peer_links', True))
+        bc = got.get('board_cfg')                # each board's settings as you last set them (applied again after a restart)
+        if isinstance(bc, dict) and len(bc) <= SAT_MAX:
+            self.cfg['board_cfg'] = {m.lower(): {k: v for k, v in d.items() if k in BOARD_CFG_KINDS and isinstance(v, str)
+                                                 and v.startswith(k) and len(v) < 80}
+                                     for m, d in bc.items() if isinstance(m, str) and MAC_RE.fullmatch(m) and isinstance(d, dict)}
         state.devices.allow_boards = self.cfg['peer_links']   # the hub's own board links follow it too
         # Light on motion: web hooks called when motion starts / the room goes still
         if demo:                         # a light that only pretends: the demo shows the automation
@@ -578,8 +593,7 @@ class Dashboard:
             self._event('health', f"{self.board_label(mac)}: the new model didn't arrive (older firmware?)", key, important=True)
             return
         cmd = q.pop(0)
-        self.s.outbox.append(f'SATCMD,{mac},{cmd}')
-        self.sat_cmds[mac] = dict(line=cmd, state='sent', at=time.time())
+        self._sat_send(mac, cmd, 'the new model', front=True)
         if not q:
             del self.mlw_q[key]
 
@@ -661,6 +675,14 @@ class Dashboard:
             return                                   # the same hello, heard twice
         if old and old.get('via') == 'usb' and now - old['at'] < SAT_GONE_S:
             return                                   # on USB too: its own lines say more
+        if old and d.get('up_s') is not None and old.get('up_s') is not None and d['up_s'] + 5 < old['up_s']:
+            self._event('health', f"{self.board_label(d['mac'])} restarted (up {d['up_s']} s)", 'sat:' + d['mac'], important=True)
+            self._sat_reapply(d['mac'], 'restarted')
+            self.sat_links.pop(d['mac'], None)           # its links start again: their quiet levels too
+            for k in [k for k in self._sat_policy_at if k[0] == d['mac']]:
+                del self._sat_policy_at[k]               # it pokes what it saved again: judged afresh
+        elif old is None or old.get('gone_said'):
+            self._sat_reapply(d['mac'], 'back' if old else 'first heard')
         if old and old.get('gone_said'):
             self._event('health', f"{self.board_label(d['mac'])} back", 'sat:' + d['mac'])
         elif old is None and (self.demo or now - self.started_wall > 60):
@@ -831,10 +853,14 @@ class Dashboard:
                     line = f"LEDSET,{c['mode']},{bright},{c['pattern']},{color.lstrip('#').lower()}"
                     msg = f"{name}: LED {c['mode']}"
             if air:
-                self.s.outbox.append(f'SATCMD,{mac},{line}')
-                self.sat_cmds[mac] = dict(line=line, state='sent', at=time.time())
+                kind = line.split(',')[0]
+                if kind in BOARD_CFG_KINDS and line != 'SOUND,test':   # kept here: applied again after a restart
+                    self.cfg['board_cfg'].setdefault(mac, {})[kind] = line
+                    self.sat_applied.setdefault(mac, {})[kind] = 'pending'
+                    self._save_settings()
+                self._sat_send(mac, line, 'your setting')
                 self._flush()
-                return True, msg + ' (through the hub: it takes it at its next report, a few seconds)'
+                return True, msg + ' (through the hub: it takes it at its next report, a few seconds; Boards shows when it confirmed)'
             try:
                 ob.send(line)
             except Exception as e:
@@ -1147,7 +1173,11 @@ class Dashboard:
     def _motion_now(self):
         """The verdict the badge shows; no data or calibrating counts as still."""
         s = self.s
-        return bool(s.det.motion) and s.det.floor > 0 and not s.source_status()
+        if s.source_status():
+            return False
+        if s.board_verdict:                  # the board's own verdict (its LED, its light): never the PC's copy
+            return bool(s.board_motion) and s.det.floor > 0
+        return bool(s.det.motion) and s.det.floor > 0
 
     # ---------- people and zones, on the Pi ----------
     def _layout(self):
@@ -1344,8 +1374,7 @@ class Dashboard:
                     sent.append('the hub')
             elif key[4:] in self.sats and self.send:
                 self.mlw_q[key] = cmds[1:]
-                self.s.outbox.append(f'SATCMD,{key[4:]},{cmds[0]}')
-                self.sat_cmds[key[4:]] = dict(line=cmds[0], state='sent', at=time.time())
+                self._sat_send(key[4:], cmds[0], 'the new model')
                 sent.append(self.board_label(key[4:]))
         self.model_sent = dict(at=time.time(), to=sent, labels=model.get('labels'))
         return sent
@@ -1625,6 +1654,11 @@ class Dashboard:
                 return f'UNPOKE,{o}', 'links between boards off'
             if not is_board and pol['manual'] is not None and o not in pol['manual']:
                 return f'UNPOKE,{o}', 'Devices: Manual, not one of your picks'
+        if not pol['boards'] and n_dev > len(links):              # a slot poking something it reports nothing for:
+            known = sorted((set(boards) | set(self.sats) | set(self.cfg['paired'])) - {sat})   # may be a board that
+            for o in known:                                       # never answered: unpoked by its address (harmless if not)
+                if now - self._sat_policy_at.get((sat, f'UNPOKE,{o}'), 0.0) >= 300:
+                    return f'UNPOKE,{o}', 'links between boards off (a slot it reports nothing for)'
         if pol['manual'] is not None and n_dev > len(links):      # a slot poking something we can't see
             t0 = self._ghost_since.setdefault(sat, now)
             pend = any(now - at < PEER_RETRY_S for (s, _o), (_n, at) in self.peer_tries.items() if s == sat)
@@ -1637,8 +1671,7 @@ class Dashboard:
 
     def _sat_order(self, sat, line, why, now):
         """One command for a satellite, through the hub (one at a time per board)."""
-        self.s.outbox.append(f'SATCMD,{sat},{line}')
-        self.sat_cmds[sat] = dict(line=line, state='sent', at=now)
+        self._sat_send(sat, line, why, front=True)
         self.policy_log.append((now, sat, line, why))
         verb, _, o = line.partition(',')
         what = 'all its links' if o == 'all' else self._target_key(o, 0)[1]
@@ -1693,9 +1726,8 @@ class Dashboard:
         live = {m for m, d in self.sats.items() if now - d['at'] <= SAT_GONE_S and d.get('via') != 'usb'}
         boards = live | ({hub} if hub else set())
         for sat in sorted(live):
-            c = self.sat_cmds.get(sat)
-            if 'sat:' + sat in self.mlw_q or (c and c.get('state') in ('sent', 'queued') and now - c.get('at', 0) < 60):
-                continue
+            if 'sat:' + sat in self.mlw_q:
+                continue                                 # (a policy command goes ahead of what waits: front of its queue)
             lk = self.sat_links.get(sat, {})
             reporting = {o for o, ln in lk.items() if not (ln.flags & 2) and ln.at is not None and now - ln.at <= SAT_GONE_S}
             got = self._sat_unwanted(sat, pol, boards, self.sats[sat].get('links', 0), reporting, now)
@@ -1717,8 +1749,7 @@ class Dashboard:
         for sat in sorted(live):
             if 'sat:' + sat in self.mlw_q:
                 continue                                 # a model is on its way: not now
-            c = self.sat_cmds.get(sat)
-            if c and c.get('state') in ('sent', 'queued') and now - c.get('at', 0) < 60:
+            if self._sat_busy(sat):
                 continue                                 # one command at a time
             heard = self.surveys.get(sat, {})
             if targets is not None:                      # a watched area: every slot used, the devices worth it learned (linkpick)
@@ -1739,8 +1770,7 @@ class Dashboard:
                 if spare and pol['boards']:
                     o = spare[-1]
                     self.picker_off.setdefault(sat, {})[o] = now
-                    self.s.outbox.append(f'SATCMD,{sat},UNPOKE,{o}')
-                    self.sat_cmds[sat] = dict(line=f'UNPOKE,{o}', state='sent', at=now)
+                    self._sat_send(sat, f'UNPOKE,{o}', 'tripwire slot')
                     self.peer_tries[(sat, o)] = (PEER_TRIES, now)        # and not asked for again
                     print(f"{self.board_label(sat)}: freeing the slot of its link to "
                           f"{'the hub' if o == hub else self.board_label(o)} (keeps one board link as your side's tripwire)", flush=True)
@@ -1761,8 +1791,7 @@ class Dashboard:
                     else:
                         off.pop(dev, None)
                     line = f"{'POKE' if verb == 'poke' else 'UNPOKE'},{dev}"
-                    self.s.outbox.append(f'SATCMD,{sat},{line}')
-                    self.sat_cmds[sat] = dict(line=line, state='sent', at=now)
+                    self._sat_send(sat, line, 'link learner')
                     tag = lambda m: f"{self.s.devices.name(m) or 'device'}#{zlib.crc32(m.encode()) % 1000:03d}"
                     print(f"{self.board_label(sat)}: {'trying a link to' if verb == 'poke' else 'dropping its link to'} {tag(dev)} "
                           f"(links now: {', '.join(sorted(tag(m) for m in linked)) or 'none'}; reporting: "
@@ -1783,12 +1812,96 @@ class Dashboard:
                     continue
                 n = self.peer_tries.get((sat, other), (0, 0.0))[0]
                 self.peer_tries[(sat, other)] = (n + 1, now)
-                self.s.outbox.append(f'SATCMD,{sat},POKE,{other}')
-                self.sat_cmds[sat] = dict(line=f'POKE,{other}', state='sent', at=now)
+                self._sat_send(sat, f'POKE,{other}', 'link between boards')
                 print(f"{self.board_label(sat)}: asked to link with "
                       f"{'the hub' if other == hub else self.board_label(other) if other in boards else self.s.devices.name(other) or 'a device'}",
                       flush=True)
                 break
+
+    # ---------- commands for the other boards: one queue each ----------
+    @staticmethod
+    def _cmd_kind(line):
+        """What a command sets: a newer one of the same kind replaces one still waiting."""
+        verb, _, rest = line.partition(',')
+        if verb in ('POKE', 'UNPOKE'):
+            return 'P:' + rest.split(',')[0]
+        if verb in ('USE', 'USE_DEFAULT', 'APS'):
+            return 'NET'
+        if verb == 'MLW' or line == 'SOUND,test' or verb in ('BEEP', 'GLIDE'):
+            return line                                  # each one counts (a model's steps, a test sound)
+        return verb
+
+    def _sat_send(self, mac, line, why='', front=False):
+        """Queue a command for another board, through the hub. Only one is in flight per
+        board (the hub keeps one order per board, and a newer one replaced a waiting one:
+        settings and policy commands were lost that way). A command waiting of the same
+        kind is replaced (the newest setting wins); UNPOKE,all drops waiting POKEs."""
+        q = self.sat_q.setdefault(mac, deque())
+        kind = self._cmd_kind(line)
+        c = self.sat_cmds.get(mac)
+        if self.send and c and c.get('state') in ('sent', 'queued') and c.get('kind') == kind:
+            # the same setting again while it is in flight: the hub replaces its waiting order with
+            # this newer one, which is what it should do here (nothing else is lost)
+            self.s.outbox.append(f'SATCMD,{mac},{line}')
+            self.sat_cmds[mac] = dict(line=line, kind=kind, why=why, tries=1, state='sent', at=time.time())
+            return
+        if line == 'UNPOKE,all':
+            for e in [e for e in q if e['kind'].startswith('P:')]:
+                q.remove(e)
+        e = dict(line=line, kind=kind, why=why, tries=0)
+        for i, old in enumerate(q):
+            if old['kind'] == kind:
+                q[i] = e
+                break
+        else:
+            if front:
+                q.appendleft(e)
+            else:
+                q.append(e)
+        self._sat_pump(mac, time.time())
+
+    def _sat_busy(self, mac):
+        """A command for this board is in flight or waiting."""
+        c = self.sat_cmds.get(mac)
+        return bool(self.sat_q.get(mac)) or bool(c and c.get('state') in ('sent', 'queued'))
+
+    def _sat_pump(self, mac, now):
+        """Send this board's next command once nothing is in flight. One the hub never
+        answered for goes again (SAT_CMD_WAIT_S), at most SAT_CMD_TRIES times."""
+        if not self.send:
+            return
+        c = self.sat_cmds.get(mac)
+        if c and c.get('state') in ('sent', 'queued'):
+            if now - c.get('at', now) < SAT_CMD_WAIT_S:
+                return
+            c['state'] = 'failed'                        # no answer at all: as if the hub gave up
+            self._sat_failed(mac, c)
+        q = self.sat_q.get(mac)
+        if not q:
+            return
+        e = q.popleft()
+        self.s.outbox.append(f'SATCMD,{mac},{e["line"]}')
+        self.sat_cmds[mac] = dict(line=e['line'], kind=e['kind'], why=e['why'], tries=e['tries'] + 1, state='sent', at=now)
+
+    def _sat_failed(self, mac, c):
+        """A command the board never confirmed: again (front of its queue), or given up and said."""
+        line, kind = c.get('line', ''), c.get('kind') or self._cmd_kind(c.get('line', ''))
+        if not line or line.startswith('MLW') or kind == 'NET':
+            return                                       # a model's steps: the model is sent again as a whole;
+                                                         # a network switch has its own wait (_follow_step)
+        q = self.sat_q.setdefault(mac, deque())
+        if c.get('tries', 1) < SAT_CMD_TRIES and not any(e['kind'] == kind for e in q):
+            q.appendleft(dict(line=line, kind=kind, why=c.get('why', ''), tries=c.get('tries', 1)))
+        elif kind in BOARD_CFG_KINDS:
+            self.sat_applied.setdefault(mac, {})[kind] = 'failed'
+
+    def _sat_reapply(self, mac, why):
+        """Every setting you gave this board, sent again (it restarted, or came back):
+        the board saves each one itself, so this only repairs one it never got."""
+        for kind, line in sorted(self.cfg['board_cfg'].get(mac, {}).items()):
+            if self.sat_applied.get(mac, {}).get(kind) != 'done' or why == 'restarted':
+                self.sat_applied.setdefault(mac, {})[kind] = 'pending'
+                self._sat_send(mac, line, f'setting again ({why})')
 
     def _peer_may(self, sat, other, now):
         """A link not asked for too often: PEER_TRIES times, PEER_RETRY_S apart."""
@@ -1805,8 +1918,7 @@ class Dashboard:
             self.s.outbox.append(line)
             return f'{what}: the board restarts (about 15 s)'
         for m in boards:
-            self.s.outbox.append(f'SATCMD,{m},{line}')
-            self.sat_cmds[m] = dict(line=line, state='sent', at=now)
+            self._sat_send(m, line, 'network', front=True)
         self.follow = dict(line=line, boards=boards, at=now)
         names = ', '.join(self.board_label(m) for m in boards)
         return f'{what}: telling {names} first, then the hub restarts (up to {FOLLOW_WAIT_S} s)'
@@ -1832,7 +1944,8 @@ class Dashboard:
             print(f"hub: board command refused ({p[2]})", flush=True)
             for m, c in self.sat_cmds.items():
                 if c.get('state') == 'sent':
-                    c['state'], c['why'] = 'error', p[2]
+                    c['state'], c['detail'] = 'error', p[2]
+                    self._sat_pump(m, time.time())
             return
         if len(p) < 3 or not MAC_RE.fullmatch(p[1]):
             return
@@ -1841,21 +1954,31 @@ class Dashboard:
             return
         print(f"{self.board_label(mac)}: command {st} {p[3] if len(p) > 3 else ''}", flush=True)   # the add-on's log
         c = self.sat_cmds.setdefault(mac, dict(line='', at=time.time()))
-        c['state'], c['why'] = st, p[3] if len(p) > 3 else ''
-        if ('sat:' + mac) in self.mlw_q and st in ('done', 'failed', 'error'):
-            self._mlw_step_sat(mac, st == 'done')
-            return
+        c['state'], c['detail'] = st, p[3] if len(p) > 3 else ''
+        kind = c.get('kind') or self._cmd_kind(c.get('line', ''))
+        if kind in BOARD_CFG_KINDS and st in ('done', 'error'):
+            self.sat_applied.setdefault(mac, {})[kind] = 'done' if st == 'done' else 'failed'
+        if st == 'failed':
+            self._sat_failed(mac, c)
+        if st in ('done', 'failed', 'error'):
+            if ('sat:' + mac) in self.mlw_q and c.get('line', '').startswith('MLW'):
+                self._mlw_step_sat(mac, st == 'done')
+            self._sat_pump(mac, time.time())
+            if c.get('line', '').startswith('MLW'):
+                return
         if st in ('done', 'failed', 'error') and not self.follow:
             self._event('health', f"{self.board_label(mac)}: " + {
                 'done': f"done ({c.get('line', '').split(',')[0].lower() or 'command'})",
                 'failed': 'never confirmed the command (older firmware? reflash it)',
-                'error': f"command refused by the hub ({c['why']})"}[st], 'sat:' + mac, important=st != 'done')
+                'error': f"command refused by the hub ({c['detail']})"}[st], 'sat:' + mac, important=st != 'done')
 
     def tick(self):
         """Once a second from a timer, so the light still goes off when no data
         comes, and the board keeps hearing that a device link sees motion."""
         with self.lock:
             self._sats_gone()
+            for m in list(self.sat_q) + list(self.sat_cmds):
+                self._sat_pump(m, time.time())
             self._follow_step()
             self._peer_step()
             self._autofit_step()
@@ -1897,6 +2020,14 @@ class Dashboard:
         self.trig.rules = self.cfg['rules']
         self.wv = self._wires_view(now)
         self.bstates = self._board_states(self.wv, time.time())
+        for kind, e in self.sensorlog.update(self.bstates, time.time()):
+            if kind == 'close' and (e['state'] in ('moving', 'gone') or e['t1'] - e['t0'] >= 60):
+                self._event('sensor', sensors.SensorLog.text(e), e['key'],
+                            important=e['state'] == 'gone' or (e['state'] == 'moving' and e['grade'] != 'possible'))
+                if self.send:
+                    print(sensors.SensorLog.text(e), flush=True)     # the add-on's log
+            elif kind == 'open' and e['state'] == 'gone':
+                self._event('sensor', sensors.SensorLog.text(e), e['key'], important=True)
         self.trig_active = self.trig.update({k: dict(moving=b['moving'], near_me=b['near_me']) for k, b in self.bstates.items()
                                              if b['state'] not in ('gone', 'calibrating')}, now)
         on = {r['id'] for r, _s in self.trig_active}
@@ -1929,11 +2060,12 @@ class Dashboard:
             g = self.s.devices.gate.get(0) or {}
             rows.append(('hub', 'Hub', fresh, self.s.det.floor > 0, self._motion_now(),
                          dict(acks=round(self.s.rate((0, 1))) if self.s.now else 0, router_rssi=g.get('rssi', 0) or 0,
-                              weak=g.get('state') in ('weak', 'silent'), via='usb')))
+                              weak=g.get('state') in ('weak', 'silent'), via='usb', level=det_level(self.s.det, self.s.now))))
         for m, d in sorted(self.sats.items()):
             rows.append(('sat:' + m, self.board_label(m), now - d['at'] <= SAT_GONE_S, d['calibrated'], bool(d['motion']),
                          dict(acks=d['acks'], router_rssi=d['router_rssi'], weak=d['weak'], via=d.get('via', 'air'),
-                              heard_rssi=d.get('rssi'), slots=d.get('links', 0))))
+                              heard_rssi=d.get('rssi'), slots=d.get('links', 0),
+                              level=round(max(d['k_short'], d['k_long']), 2), up_s=d.get('up_s'))))
         out = {}
         names = {e: (wv['ends'].get(e) or {}).get('name', e) for e in wv['ends']}
         for k, name, online, cal, own, extra in rows:
@@ -2085,7 +2217,13 @@ class Dashboard:
         c = self.sat_cmds.get(mac)
         if not c:
             return None
-        return dict(what=c.get('line', '').split(',')[0].lower(), state=c.get('state'), age=round(time.time() - c['at']))
+        return dict(what=c.get('line', '').split(',')[0].lower(), state=c.get('state'), age=round(time.time() - c['at']),
+                    waiting=len(self.sat_q.get(mac, ())))
+
+    def _sat_settings_view(self, mac):
+        """Each setting you gave this board and whether the board confirmed it."""
+        return {k: dict(line=v, state=self.sat_applied.get(mac, {}).get(k, 'unknown'))
+                for k, v in sorted(self.cfg['board_cfg'].get(mac, {}).items())}
 
     def _house_slow(self):
         motion, by = self.house_now
@@ -2190,8 +2328,7 @@ class Dashboard:
                 if not boards or not self.send:
                     return False, 'no other board heard right now'
                 for m in boards:
-                    self.s.outbox.append(f'SATCMD,{m},{line}')
-                    self.sat_cmds[m] = dict(line=line, state='sent', at=now)
+                    self._sat_send(m, line, 'network', front=True)
                 msg = (f"Sending the hub's network to {', '.join(self.board_label(m) for m in boards)}: each restarts on it "
                        '(about 15 s); the hub stays as it is')
             elif what == 'house_use':                    # a board counts for the house, or not
@@ -2602,6 +2739,9 @@ class Dashboard:
                        routers=self._routers(), boards=self._boards(), house=self._house_slow(), tz=PC_TZ,
                        wires=self.wv or self._wires_view(),
                        bstates=list(self.bstates.values()),
+                       sensors=self.sensorlog.view(time.time()),
+                       sat_settings={m: self._sat_settings_view(m) for m in self.sats},
+                       sat_cmds={m: self._sat_cmd_view(m) for m in self.sats},
                        rules=dict(list=self.cfg.get('rules') or [], state=self.trig.view(time.time()),
                                   notify_ready=bool(self.notify.cfg.get('enabled') and self.notify.cfg.get('token')),
                                   light_ready=bool(self.light.cfg.get('enabled'))),
@@ -3326,6 +3466,13 @@ def make_handler(dash, allowed_hosts):
                     return self._reply(403, {'error': 'missing X-Ackwave header'})
                 if u.path == '/api/stats':
                     return self._reply(200, dash.stats())
+                if u.path == '/api/sensors':
+                    try:
+                        hours = min(24 * 14, max(0.1, float(parse_qs(u.query).get('hours', ['24'])[0])))
+                    except ValueError:
+                        hours = 24.0
+                    with dash.lock:
+                        return self._reply(200, dict(log=dash.sensorlog.history(hours), now=dash.sensorlog.view(time.time())['now']))
                 if u.path == '/api/map':
                     return self._reply(200, dash.map_load())
                 if u.path == '/api/walks':

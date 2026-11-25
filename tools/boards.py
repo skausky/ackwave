@@ -224,10 +224,19 @@ class Travel:
 class SatLink:
     """One link of another board, judged from its scores (x the board's quiet
     level). A device link is noisier than the router's, so each link keeps its
-    own quiet level: a slow average of its scores while it isn't moving. It
-    moves when the short score passes ON_SHORT x that, or the long one ON_LONG x."""
+    own quiet level: a low percentile (QUIET_PCT) of its scores over the last
+    QUIET_S, sampled once a second, whatever the link is doing (like the
+    board's own floor). It moves when the short score passes ON_SHORT x that,
+    or the long one ON_LONG x.
+
+    The quiet level must keep learning while the link moves: a link that came
+    up above its threshold (a router switch, someone there at its first
+    report) would otherwise stay 'moving' for ever. It did, on 2026-11-24:
+    two board->router links read as moving for 12 h and held an alert on all
+    night. A level that only moves while quiet can't recover from that."""
     ON_SHORT, ON_LONG, OFF = 2.8, 1.4, 0.75
-    TAU_S = 120.0                         # the quiet level follows over ~2 min
+    QUIET_S, QUIET_PCT, QUIET_MIN = 600, 40, 20   # 10 min of 1 Hz samples, its 40th percentile, after 20 s
+    FLOOR = 0.3                                   # never below this (x the board's quiet level)
 
     def __init__(self, flags):
         self.flags = flags
@@ -236,6 +245,8 @@ class SatLink:
         self.moving_since = None
         self.ks = self.kl = 0.0
         self.at = self.t_last = None
+        self._hs, self._hl = deque(maxlen=self.QUIET_S), deque(maxlen=self.QUIET_S)
+        self._sample_at = None
 
     CONFIRM_S = 1.0
 
@@ -248,14 +259,34 @@ class SatLink:
         return self.kl >= self.ON_LONG * self.OFF * self.q_l or \
             (self.moving_since is not None and self.at - self.moving_since >= self.CONFIRM_S)
 
+    @property
+    def settled(self):
+        """Its quiet level comes from enough of its own history to judge it."""
+        return len(self._hs) >= self.QUIET_MIN
+
+    @staticmethod
+    def _pct(h, pct):
+        v = sorted(h)
+        return v[min(len(v) - 1, len(v) * pct // 100)]
+
+    def _learn(self, ks, kl, now):
+        if self._sample_at is not None and now - self._sample_at < 1.0:
+            return
+        self._sample_at = now
+        self._hs.append(max(ks, self.FLOOR))
+        self._hl.append(max(kl, self.FLOOR))
+        if len(self._hs) >= self.QUIET_MIN:
+            self.q_s, self.q_l = self._pct(self._hs, self.QUIET_PCT), self._pct(self._hl, self.QUIET_PCT)
+        else:                             # its first seconds: the lowest so far (never its own motion)
+            self.q_s, self.q_l = max(min(self._hs), 0.5), max(min(self._hl), 0.5)
+
     def feed(self, ks, kl, now):
         self.ks, self.kl, self.at = ks, kl, now
-        if self.q_s is None:
-            self.q_s, self.q_l = max(ks, 0.5), max(kl, 0.5)
-            self.t_last = now
-            return self.moving
-        dt = max(0.0, now - self.t_last)
+        first = self.q_s is None
+        self._learn(ks, kl, now)
         self.t_last = now
+        if first:
+            return self.moving
         rs, rl = ks / self.q_s, kl / self.q_l
         if self.moving:
             self.moving = rs > self.ON_SHORT * self.OFF or rl > self.ON_LONG * self.OFF
@@ -265,10 +296,6 @@ class SatLink:
             self.moving_since = now
         elif not self.moving:
             self.moving_since = None
-        if not self.moving:               # learn the quiet level only while quiet
-            a = 1 - math.exp(-dt / self.TAU_S)
-            self.q_s += a * (max(ks, 0.3) - self.q_s)
-            self.q_l += a * (max(kl, 0.3) - self.q_l)
         return self.moving
 
     def level(self):

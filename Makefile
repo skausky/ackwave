@@ -22,7 +22,7 @@ build-host/score_lines: test/score_lines.c main/csi_core.h main/seal.h
 test-py: build-host/score_lines
 	cd tools && $(PY) test_pipeline.py && $(PY) test_probe_report.py && \
 		$(PY) test_gui.py && $(PY) test_record.py && $(PY) test_history.py && \
-		$(PY) test_devices.py && $(PY) test_doppler.py && $(PY) test_breathing.py && $(PY) test_stats.py && $(PY) test_light.py && $(PY) test_notify.py && $(PY) test_track.py && $(PY) test_autofit.py && $(PY) test_linkpick.py && $(PY) test_wires.py && $(PY) test_triggers.py && $(PY) test_mlfeat.py && $(PY) test_breath_lite.py && $(PY) test_mltrain.py && node test_pages_load.js && $(PY) test_web.py && $(PY) test_activity.py && $(PY) test_timeline.py && $(PY) test_keys.py && $(PY) test_multi.py
+		$(PY) test_devices.py && $(PY) test_doppler.py && $(PY) test_breathing.py && $(PY) test_stats.py && $(PY) test_light.py && $(PY) test_notify.py && $(PY) test_track.py && $(PY) test_autofit.py && $(PY) test_linkpick.py && $(PY) test_wires.py && $(PY) test_triggers.py && $(PY) test_sensors.py && $(PY) test_mlfeat.py && $(PY) test_breath_lite.py && $(PY) test_mltrain.py && node test_pages_load.js && $(PY) test_web.py && $(PY) test_activity.py && $(PY) test_timeline.py && $(PY) test_keys.py && $(PY) test_multi.py
 
 demo:
 	$(PY) tools/fake_csi.py | $(PY) tools/analyze.py -

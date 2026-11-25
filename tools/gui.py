@@ -363,7 +363,12 @@ class State:
         elif kind == 'state':
             self.board_states.append((self.now, d['motion']))
             self.board_motion = d['motion']
+            if not self.board_verdict and self.motion_spans and self.motion_spans[-1][1] is None and not d['motion']:
+                self.motion_spans[-1][1] = self.now   # the twin's open span: the board decides from now on
             self.board_verdict = True
+            open_ = bool(self.motion_spans) and self.motion_spans[-1][1] is None
+            if d['motion'] != open_:
+                self._span_change(1 if d['motion'] else -1, self.now)
             self._hist_change(d['motion'])
         elif kind == 'csi':
             self._csi(d)
@@ -419,10 +424,8 @@ class State:
                     self.hist_t.append(sec)
                     self.hist_s.append(ms / f)
                     self.hist_l.append(ml / f)
-        if change > 0:
-            self.motion_spans.append([t, None])
-        elif change < 0 and self.motion_spans:
-            self.motion_spans[-1][1] = t
+        if not self.board_verdict:               # the board's own STATE lines win (they are what it does)
+            self._span_change(change, t)
         if change and not self.board_verdict:
             self._hist_change(change > 0)
         if ms is not None and self.hist_motion and self.hist_motion[-1][1] is None:
@@ -443,6 +446,12 @@ class State:
         else:
             self.scan_spans.append([t, end])
             self.hist_scans.append([w, self.wall(end)])
+
+    def _span_change(self, change, t):
+        if change > 0:
+            self.motion_spans.append([t, None])
+        elif change < 0 and self.motion_spans and self.motion_spans[-1][1] is None:
+            self.motion_spans[-1][1] = t
 
     def _hist_change(self, motion):
         """Open or close the session's current motion period (wall clock)."""

@@ -5,6 +5,7 @@ import http.client
 import json
 import os
 import tempfile
+HERE_WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
 import time
 
 from fake_csi import generate
@@ -38,7 +39,7 @@ def main():
     assert len(blob) < 400_000, len(blob)
     assert f['header']['badge']['word'] in ('STILL', 'MOTION', 'CALIBRATING')
     assert f['score']['series'] and f['window'][1] > f['window'][0]
-    assert 'links' not in sl and dict(sl['settings'], hub=None, rules=None) == {'per_link': False, 'peer_links': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': [], 'rules': None}
+    assert 'links' not in sl and dict(sl['settings'], hub=None, rules=None) == {'per_link': False, 'peer_links': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': [], 'rules': None, 'board_cfg': {}}
     r0 = sl['settings']['rules'][0]                 # the old settings became the first alert rule
     assert r0['boards'] == [] and r0['need'] == 'any' and r0['where'] == 'any' and r0['buzz'], r0
     assert sent[:2] == ['SOUND', 'SENS'], "asks the board for its buzzer and threshold settings"
@@ -54,7 +55,7 @@ def main():
             assert all(c == f'SATCMD,{m},{line}' for c, m in zip(sent[-len(dash.follow['boards']):], dash.follow['boards']))
             dash.follow['at'] -= 3600                # none confirms (the test has no hub firmware)
             dash.tick()
-        return sent[-1] == line
+        return [c for c in sent if not c.startswith('EXT,')][-1] == line   # an alert may tell the board EXT,1 meanwhile
     assert dash.command({'cmd': 'use', 'name': 'MyNetwork'})[0] and switched('USE,MyNetwork')
     assert not dash.command({'cmd': 'use', 'name': 'x' * 33})[0], "name too long"
     assert not dash.command({'cmd': 'use', 'name': 'a\nCAL'})[0], "no command injection"
@@ -140,7 +141,7 @@ def main():
     saved = json.load(open(os.path.join(tmp, 'dashboard.json')))
     assert len(saved.pop('board_secret') or '0' * 64) == 64, "the boards' secret, if a board was seen"
     assert dict(saved, hub=None, rules=None) == {
-        'per_link': True, 'peer_links': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': [], 'rules': None,
+        'per_link': True, 'peer_links': True, 'sound': None, 'sens': None, 'alerts': [], 'router_names': {}, 'board_names': {}, 'act_place': 0, 'hub': None, 'paired': [], 'house_rule': 'confirm', 'house_off': [], 'rules': None, 'board_cfg': {},
         'light': {'enabled': False, 'on_url': '', 'off_url': '', 'off_after': 120},
         'notify': {'enabled': False, 'token': '', 'user': '', 'quiet_min': 10, 'max_day': 50, 'hours': None,
                    'urgent': False, 'offline': True, 'zones_only': False}}
@@ -348,6 +349,12 @@ def main():
         # The Map page: its script, and the layout saved on the PC (/api/map)
         st, body = request(port, 'GET', '/map.js')
         assert st == 200 and b'window.AckMap' in body
+        import re as _re                         # every script the page loads is served (home.js wasn't)
+        for src in _re.findall(r'<script src="([^"]+)"', open(os.path.join(HERE_WEB, 'index.html')).read()):
+            st, body = request(port, 'GET', '/' + src)
+            assert st == 200 and body, f'{src} not served'
+        st, body = request(port, 'GET', '/api/sensors?hours=2', headers={'X-Ackwave': '1'})
+        assert st == 200 and set(json.loads(body)) == {'log', 'now'}
         hdr = {'X-Ackwave': '1', 'Content-Type': 'application/json'}
         st, body = request(port, 'GET', '/api/map', headers={'X-Ackwave': '1'})
         assert st == 200 and json.loads(body) == {}, "no map yet: empty"
@@ -691,7 +698,7 @@ def pages_and_debug(tmp):
     routes = ['home', 'classic', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings']
     for r in routes:
         assert f'data-page="{r}"' in html and f'href="#/{r}"' in html, r
-    assert "const ROUTES = ['home', 'classic', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];" in js
+    assert "const ROUTES = ['home', 'log', 'classic', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];" in js
     assert '<script src="map.js"></script>' in html and 'localStorage' not in mapjs, "the layout lives on the PC"
     assert 'data-page="train"' not in html and 'data-page="ai"' not in html, "no placeholder pages"
     assert js.count('new EventSource(') == 1, "one live connection for every page"

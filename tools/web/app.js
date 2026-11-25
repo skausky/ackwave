@@ -15,7 +15,7 @@ const C = {
   cal: css('--cal'), long: css('--long'), blue: css('--blue'), card: css('--card'), card2: css('--card2'),
 };
 const FONT = '11px ui-sans-serif, system-ui, sans-serif';
-const ROUTES = ['home', 'classic', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];
+const ROUTES = ['home', 'log', 'classic', 'activity', 'graphs', 'stats', 'links', 'map', 'debug', 'settings'];
 
 let win = 30, paused = false, es = null;
 let link = null;                         // per-link focus for breathing / Doppler (null = router)
@@ -1282,6 +1282,7 @@ function renderSlow() {
   $('#net').textContent = n && n.ap_list && n.ap_list.length ? `${n.ap_list.length} chosen access point${n.ap_list.length > 1 ? 's' : ''}`
     : n && n.name ? `${n.name}${n.how === 'default' ? '' : n.how === 'chosen' ? ' · chosen' : ''}` : '';
   if (page === 'home' && window.Overview) window.Overview.render();
+  else if (page === 'log' && window.Sensors) { window.Sensors.bindLog(); window.Sensors.logPage(slow); }
   else if (page === 'classic') { renderHome(); drawTimeline('#home-tl', true); drawWhere(); window.AckMap.update(slow, fast && fast.header); }
   else if (page === 'graphs') drawTimeline();
   else if (page === 'links') { renderLinks(); renderRates(); renderGates(); renderRouters(); renderDev(); renderAlerts(); }
