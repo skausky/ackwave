@@ -315,6 +315,18 @@ def main():
     test_refused_waits()
     test_manual_and_modes()
     test_prefs_and_format()
+    # a satellite the hub hears only as a device (its hello not heard right now) is still a board:
+    # with 'Links between boards' off the hub stops poking it (2026-11-25: the hub kept poking two)
+    clk2 = Clock()
+    d2 = Devices(clock=clk2)
+    SAT = mac(0xc4, 0x9e, 0x7e, 3, 3, 3)
+    d2.allow_boards = False
+    d2.known_boards = {SAT}
+    out = []
+    for _ in range(12):
+        out += cycle(d2, clk2, [(SAT, -50, 20)], poking={SAT: 8})
+    check(f'UNPOKE,{SAT}' in out and f'POKE,{SAT}' not in out, ('a known board is not a stationary device', out))
+    check(d2.status(d2.devs[SAT])[0] == 'board', d2.status(d2.devs[SAT]))
     print("DEVICES TESTS PASSED")
 
 

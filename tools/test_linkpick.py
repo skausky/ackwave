@@ -47,6 +47,29 @@ def main():
     assert a1 == ('poke', 'z') and pk3.choose('x', {'z': -60}, set()) is None
     t[0] += L.PENDING_S + 1
     assert pk3.choose('x', {'z': -60}, set()) is None and pk3.rest[('x', 'z')] > t[0]
+    # no churn (2026-11-25 on the Pi): a link with old silence on its record, missing from one
+    # survey, was dropped, then asked for again at the next survey, every few seconds
+    t[0] = 10_000.0
+    pk4 = L.LinkPicker(clock=lambda: t[0])
+    lk = {'e0', 'e1', 'e2'}
+    for d in lk:
+        pk4._st('y', d).dead = 1000                           # silent for a while some time ago
+    acts = []
+    for i in range(60):                                       # e0 drops out of every other survey
+        hd = {f'e{k}': -60 for k in range(3) if not (k == 0 and i % 2)}
+        a = pk4.choose('y', hd, lk)
+        if a and a[0] == 'unpoke':
+            acts.append(a)
+            lk.discard(a[1])
+        t[0] += 10
+    assert not acts, ("a link missing now and then is kept", acts)
+    for _ in range(70):                                       # gone for good: dropped after UNHEARD_S
+        a = pk4.choose('y', {'e1': -60, 'e2': -60}, lk)
+        if a and a[0] == 'unpoke':
+            acts.append(a)
+            lk.discard(a[1])
+        t[0] += 10
+    assert acts == [('unpoke', 'e0')], acts
     print('LINKPICK TESTS PASSED')
 
 

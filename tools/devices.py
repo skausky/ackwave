@@ -173,6 +173,8 @@ class Devices:
         self.bad_since = {}
         self.board_seen = False          # any DEV / POKING / STATS seen yet
         self.allow_boards = True         # links to other ackwave boards (the dashboard's 'Links between boards')
+        self.known_boards = set()        # MACs the dashboard knows are boards (paired, reporting): a board even
+                                         # while its hello isn't heard (else it passed as a 'stationary device')
 
     def forget_network(self):
         """The board now watches another network: what it heard on the old one
@@ -262,8 +264,8 @@ class Devices:
         drop = self.dropped.get(dv.mac)
         if drop and now - drop[0] < RETRY_S:
             return 'dropped', drop[1]
-        if dv.board:
-            if not dv.same:
+        if dv.board or dv.mac in self.known_boards:
+            if dv.board and not dv.same:
                 return 'board_other', 'another ackwave board, watching another router'
             if dv.rssi < MIN_RSSI:
                 return 'weak', f"another ackwave board, {dv.rssi} dBm is too weak"
@@ -299,17 +301,17 @@ class Devices:
         if self.mode == 'auto':
             cands = [dv for dv in self.devs.values()
                      if ok(dv) and self.status(dv, now)[0] in (('board', 'stationary') if self.allow_boards else ('stationary',))]
-            cands.sort(key=lambda dv: (dv.mac not in self.poking, not dv.board, -dv.rssi, dv.mac))
+            cands.sort(key=lambda dv: (dv.mac not in self.poking, not self._is_board(dv.mac), -dv.rssi, dv.mac))
         else:                                            # all: most active first
             cands = [dv for dv in self.devs.values()
-                     if ok(dv) and dv.tx > 0 and (self.allow_boards or not dv.board)
+                     if ok(dv) and dv.tx > 0 and (self.allow_boards or not self._is_board(dv.mac))
                      and self.status(dv, now)[0] not in ('gone', 'dropped', 'board_other')]
             cands.sort(key=lambda dv: (dv.mac not in self.poking, not dv.board, -dv.tx_rate(now), dv.mac))
         return {dv.mac for dv in cands[:MAX_DEVS]}
 
     def _is_board(self, mac):
         dv = self.devs.get(mac)
-        return dv is not None and dv.board
+        return (dv is not None and dv.board) or mac in self.known_boards
 
     def set_boards(self, allow):
         """Links to other boards allowed or not. Returns commands."""

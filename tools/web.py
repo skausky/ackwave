@@ -407,6 +407,7 @@ class Dashboard:
                                                  and v.startswith(k) and len(v) < 80}
                                      for m, d in bc.items() if isinstance(m, str) and MAC_RE.fullmatch(m) and isinstance(d, dict)}
         state.devices.allow_boards = self.cfg['peer_links']   # the hub's own board links follow it too
+        state.devices.known_boards = set(self.cfg['paired'])  # boards even when their hello isn't heard
         # Light on motion: web hooks called when motion starts / the room goes still
         if demo:                         # a light that only pretends: the demo shows the automation
             self.light = Light(dict(enabled=True, on_url='http://demo.invalid/on', off_url='http://demo.invalid/off',
@@ -2047,6 +2048,7 @@ class Dashboard:
         comes, and the board keeps hearing that a device link sees motion."""
         with self.lock:
             self._sats_gone()
+            self.s.devices.known_boards = set(self.sats) | set(self.cfg['paired'])   # the hub never pokes them as 'devices'
             for m in list(self.sat_q) + list(self.sat_cmds):
                 self._sat_pump(m, time.time())
             self._follow_step()

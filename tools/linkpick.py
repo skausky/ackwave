@@ -21,6 +21,8 @@ MIN_EVIDENCE_S = 20              # seconds of 'over there' before a score means 
 PRIOR = 0.25                     # an untried link: worth a try
 PENDING_S = 120                  # a link asked for: counted as there while it comes up
 REST_S = 1800                    # one that never came: left alone 30 min
+UNHEARD_S = 600                  # a link missing from the board's survey this long in a row: gone
+DROP_REST_S = 1800               # one this learner dropped: not picked straight back (it churned: drop, re-poke, drop)
 
 
 class Stat:
@@ -51,6 +53,7 @@ class LinkPicker:
         self.trial = {}               # board -> (device, since)
         self.asked = {}               # (board, device) -> when we asked for it (pending until it shows up)
         self.rest = {}                # (board, device) -> until when it is left alone (never answered)
+        self.unheard = {}             # (board, linked device) -> since when it is missing from what the board hears
 
     def _st(self, board, dev):
         st = self.stats.get((board, dev))
@@ -93,6 +96,12 @@ class LinkPicker:
             else:
                 self.asked.pop((b, d))               # never answered: rest it
                 self.rest[(b, d)] = now + REST_S
+        raw = set(heard)
+        for d in linked:                             # how long each link has been missing from what it hears
+            if d in raw:
+                self.unheard.pop((board, d), None)
+            else:
+                self.unheard.setdefault((board, d), now)
         heard = {d: r for d, r in heard.items() if self.rest.get((board, d), 0) <= now}
         for d in sorted(pinned - set(linked)):   # your picks first: on every board that hears them
             if len(linked) < SLOTS:
@@ -115,18 +124,25 @@ class LinkPicker:
                 self._st(board, fresh[0]).tried += 1
                 self.asked[(board, fresh[0])] = now
                 return ('poke', fresh[0])
+        if tr and tr[0] not in linked:           # the trial isn't a link (yet): nothing to compare, nobody dropped for it
+            if now - tr[1] >= EXPLORE_S:
+                self.trial.pop(board, None)
+            return None
         if tr and now - tr[1] >= EXPLORE_S:      # the trial is over: kept if it beats the worst keeper
             self.trial.pop(board, None)
             keepers = [d for d in linked if d != tr[0] and d not in pinned]
             if len(keepers) >= SLOTS - 1:
                 worst = min(keepers, key=score)
                 if score(tr[0]) > score(worst):
-                    return ('unpoke', worst)     # the new one stays, the worst goes
-                return ('unpoke', tr[0])
+                    return self._drop(board, worst, now)   # the new one stays, the worst goes
+                return self._drop(board, tr[0], now)
             return None                          # room enough: it simply stays
         if tr:
             return None
-        dead = [d for d in linked if d not in heard and d not in pinned and self._st(board, d).dead > 300]
+        # gone: missing from what the board hears for UNHEARD_S in a row (a quiet device drops out of
+        # one 2-minute survey now and then: that alone dropped and re-poked it every few seconds)
+        dead = [d for d in linked if d not in pinned and now - self.unheard.get((board, d), now) >= UNHEARD_S
+                and self._st(board, d).dead > 300]
         if dead:
             return ('unpoke', dead[0])
         # full: free the worst sure keeper for a trial now and then (one slot explores)
@@ -136,8 +152,13 @@ class LinkPicker:
             worst = min(sure, key=score)
             best_new = max(score(d) for d in untried)
             if score(worst) < max(best_new, 0.2):
-                return ('unpoke', worst)
+                return self._drop(board, worst, now)
         return None
+
+    def _drop(self, board, d, now):
+        """Unpoke d, and leave it alone a while: the free slot goes to someone else."""
+        self.rest[(board, d)] = now + DROP_REST_S
+        return ('unpoke', d)
 
     def ranking(self, board=None):
         rows = [(b, d, st.score(), st.sure()) for (b, d), st in self.stats.items() if board in (None, b)]
